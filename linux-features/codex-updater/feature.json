@@ -1,0 +1,10 @@
+{
+  "id": "codex-updater",
+  "name": "In-app update UI",
+  "description": "Adds an in-app update affordance that detects new upstream releases, lets the user opt into Linux features, builds the new package via codex-update-manager, and coordinates a clean restart.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patches": "./patch.js",
+    "stageHook": "./stage.sh"
+  }
+}
