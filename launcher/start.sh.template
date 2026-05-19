@@ -1988,11 +1988,34 @@ launch_electron() {
     return "$status"
 }
 
+apply_pending_update() {
+    # Honor the install marker written by the in-app Update button. Only the
+    # primary instance handles installs; secondary multi-launch instances skip.
+    if [ "$MULTI_LAUNCH_ACTIVE" -eq 1 ]; then
+        return 0
+    fi
+    local state_root="${XDG_STATE_HOME:-$HOME/.local/state}"
+    local marker="$state_root/codex-desktop/update-pending"
+    [ -f "$marker" ] || return 0
+    if ! command -v codex-update-manager >/dev/null 2>&1; then
+        echo "Update pending but codex-update-manager is not on PATH; leaving marker in place"
+        return 0
+    fi
+    echo "Applying pending update (marker=$marker)"
+    if codex-update-manager install-ready; then
+        rm -f "$marker"
+        echo "Pending update applied"
+    else
+        echo "codex-update-manager install-ready failed; leaving marker for next launch"
+    fi
+}
+
 hydrate_graphical_session_env
 configure_side_by_side_app_env
 load_packaged_runtime_helper
 prepend_managed_node_runtime_to_path
 register_url_scheme_handlers
+apply_pending_update
 reconcile_runtime_state
 detect_warm_start
 trap cleanup_launcher EXIT

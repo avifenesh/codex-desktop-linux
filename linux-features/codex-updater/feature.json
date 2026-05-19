@@ -1,8 +1,8 @@
 {
   "id": "codex-updater",
-  "name": "In-app update UI",
-  "description": "Adds an in-app update affordance that detects new upstream releases, lets the user opt into Linux features, builds the new package via codex-update-manager, and coordinates a clean restart.",
-  "defaultEnabled": false,
+  "name": "In-app Update button",
+  "description": "Adds a small top-right Update button that appears when codex-update-manager reports a new upstream release. One click triggers the build (when needed) and restarts the app to install.",
+  "defaultEnabled": true,
   "entrypoints": {
     "patches": "./patch.js",
     "stageHook": "./stage.sh"
