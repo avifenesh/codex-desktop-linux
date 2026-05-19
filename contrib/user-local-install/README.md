@@ -7,6 +7,7 @@ It adds:
 - a stable install root under `~/.local/opt/codex-desktop-linux`
 - self-contained maintenance scripts under `~/.local/opt/codex-desktop-linux/bin`
 - thin launch/check/update/version wrappers under `~/.local/bin`
+- launch-time update detection that tags outdated installs and notifies on open
 - a desktop entry under `~/.local/share/applications`
 - an icon extracted from the local `Codex.dmg`
 - metadata tracking for the wrapper repo and cached `Codex.dmg`
@@ -91,6 +92,8 @@ codex-desktop-version
 
 - The icon is not committed as a binary asset here. It is generated locally from `Codex.dmg`.
 - The helper scripts track both upstream wrapper changes and upstream `Codex.dmg` headers.
+- On each app launch, `codex-desktop` runs a best-effort background update check. When the installed wrapper is older than upstream, it writes `~/.local/state/codex-desktop-linux/update-status.env` with `UPDATE_AVAILABLE=1` and shows a desktop notification once per detected update fingerprint.
+- `codex-desktop-version` reports whether the current install is tagged outdated.
 - The helper scripts are copied into `~/.local/opt` and do not run from the git checkout directly.
 - The X11/XWayland preference is stored in `~/.config/codex-desktop-linux/user-local.env` and is preserved across updater refreshes.
 - The weekly timer runs `codex-desktop-update --quiet`. It is opt-in: pass `--enable-timer` to `install-user-local.sh` to activate it, or run `systemctl --user enable --now codex-desktop-update.timer` manually after install.

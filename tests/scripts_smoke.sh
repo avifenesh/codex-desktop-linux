@@ -1780,8 +1780,13 @@ PY
     assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/share/applications/codex-desktop.desktop" "@HOME@/.local/bin/codex-desktop %U"
     assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/share/applications/codex-desktop.desktop" "MimeType=x-scheme-handler/codex;x-scheme-handler/codex-browser-sidebar;"
     assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/bin/codex-desktop" "CODEX_USER_LOCAL_OZONE_PLATFORM"
+    assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/bin/codex-desktop" "run_launch_update_check_background"
     assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/bin/codex-desktop" 'exec "${APP_DIR}/start.sh" --x11 "$@"'
     assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/bin/codex-desktop" 'exec "${APP_DIR}/start.sh" --wayland "$@"'
+    assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/lib/codex-desktop-linux/common.sh" "UPDATE_STATUS_FILE"
+    assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/lib/codex-desktop-linux/common.sh" "tag_outdated_install"
+    assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/bin/codex-desktop-version" "Update status:"
+    assert_contains "$REPO_DIR/contrib/user-local-install/README.md" "update-status.env"
     assert_contains "$REPO_DIR/contrib/user-local-install/install-user-local.sh" "--force-x11"
     assert_contains "$REPO_DIR/contrib/user-local-install/install-user-local.sh" "user-local.env"
     assert_contains "$REPO_DIR/contrib/user-local-install/README.md" "--force-x11"
@@ -3749,6 +3754,34 @@ test_user_local_install_preserves_persisted_x11_preference_on_refresh() {
     assert_contains "$preference_file" "CODEX_USER_LOCAL_OZONE_PLATFORM=auto"
 }
 
+test_user_local_launch_tags_outdated_install() {
+    info "Checking user-local launch update tagging writes outdated status"
+    local workspace="$TMP_DIR/user-local-launch-update-tag"
+    local home="$workspace/home"
+    local state_dir="$workspace/state/codex-desktop-linux"
+
+    mkdir -p "$home" "$state_dir"
+    HOME="$home" \
+        XDG_STATE_HOME="$workspace/state" \
+        XDG_DATA_HOME="$workspace/data" \
+        bash -c '
+            set -euo pipefail
+            source "$1"
+            ensure_layout
+            UPDATE_REPO_UPSTREAM_CHANGED=1
+            UPDATE_REPO_OVERLAY_CHANGED=0
+            UPDATE_DMG_CHANGED=0
+            DMG_ETAG="old-etag"
+            SOURCE_OVERLAY_SHA256="old-overlay"
+            tag_outdated_install "old-head" "new-head" "new-etag" "new-overlay"
+            grep -q "^UPDATE_AVAILABLE=1$" "$UPDATE_STATUS_FILE"
+            grep -q "^OUTDATED_REPO_HEAD=old-head$" "$UPDATE_STATUS_FILE"
+            grep -q "^AVAILABLE_REMOTE_REPO_HEAD=new-head$" "$UPDATE_STATUS_FILE"
+            clear_outdated_install_tags
+            grep -q "^UPDATE_AVAILABLE=0$" "$UPDATE_STATUS_FILE"
+        ' _ "$REPO_DIR/contrib/user-local-install/files/.local/lib/codex-desktop-linux/common.sh"
+}
+
 test_user_local_prepare_build_repo_updates_existing_single_branch_fetch_refspec() {
     info "Checking user-local managed checkout can switch branches after a single-branch clone"
     local workspace="$TMP_DIR/user-local-single-branch-refspec"
@@ -4060,6 +4093,7 @@ main() {
     test_user_local_prepare_build_repo_handles_relative_origin_url
     test_user_local_install_from_update_defers_record_only_metadata
     test_user_local_install_preserves_persisted_x11_preference_on_refresh
+    test_user_local_launch_tags_outdated_install
     test_user_local_prepare_build_repo_updates_existing_single_branch_fetch_refspec
     test_user_local_prepare_build_repo_handles_deleted_overlay_paths
     test_user_local_prepare_build_repo_removes_rename_source_paths

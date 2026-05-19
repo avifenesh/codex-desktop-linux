@@ -27,3 +27,12 @@ echo "DMG modified:      ${DMG_LAST_MODIFIED-unknown}"
 echo "Electron version:  ${ELECTRON_VERSION-unknown}"
 echo "Launcher:          ${HOME}/.local/bin/codex-desktop"
 echo "Manager bin:       ${OPT_ROOT}/bin"
+
+load_update_status
+if [ "${UPDATE_AVAILABLE:-0}" = "1" ]; then
+    echo "Update status:     outdated (${UPDATE_REASONS-unknown reason})"
+    echo "Installed head:    ${OUTDATED_REPO_HEAD-${REPO_HEAD-unknown}}"
+    echo "Available head:    ${AVAILABLE_REMOTE_REPO_HEAD-unknown}"
+else
+    echo "Update status:     up to date"
+fi

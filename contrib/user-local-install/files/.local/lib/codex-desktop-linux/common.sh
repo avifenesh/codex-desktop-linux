@@ -13,7 +13,9 @@ DATA_DIR="${XDG_DATA_HOME}/codex-desktop-linux"
 STATE_DIR="${XDG_STATE_HOME}/codex-desktop-linux"
 LOG_DIR="${STATE_DIR}/logs"
 METADATA_FILE="${STATE_DIR}/metadata.env"
+UPDATE_STATUS_FILE="${STATE_DIR}/update-status.env"
 INSTALL_CONFIG_FILE="${STATE_DIR}/install.env"
+UPDATE_CHECK_FRESHNESS_SECONDS="${UPDATE_CHECK_FRESHNESS_SECONDS:-21600}"
 ICON_PATH="${XDG_DATA_HOME}/icons/hicolor/512x512/apps/codex-desktop.png"
 DESKTOP_FILE="${XDG_DATA_HOME}/applications/codex-desktop.desktop"
 
@@ -42,6 +44,230 @@ load_metadata() {
         # shellcheck disable=SC1090
         source "$METADATA_FILE"
     fi
+}
+
+load_update_status() {
+    if [ -f "$UPDATE_STATUS_FILE" ]; then
+        # shellcheck disable=SC1090
+        source "$UPDATE_STATUS_FILE"
+    fi
+}
+
+write_update_status_file() {
+    ensure_layout
+    {
+        write_kv UPDATE_AVAILABLE "${UPDATE_AVAILABLE:-0}"
+        write_kv UPDATE_FINGERPRINT "${UPDATE_FINGERPRINT-}"
+        write_kv UPDATE_CHECKED_AT "${UPDATE_CHECKED_AT-}"
+        write_kv UPDATE_NOTIFIED_FINGERPRINT "${UPDATE_NOTIFIED_FINGERPRINT-}"
+        write_kv UPDATE_REASONS "${UPDATE_REASONS-}"
+        write_kv OUTDATED_REPO_HEAD "${OUTDATED_REPO_HEAD-}"
+        write_kv AVAILABLE_REMOTE_REPO_HEAD "${AVAILABLE_REMOTE_REPO_HEAD-}"
+        write_kv OUTDATED_DMG_ETAG "${OUTDATED_DMG_ETAG-}"
+        write_kv AVAILABLE_REMOTE_DMG_ETAG "${AVAILABLE_REMOTE_DMG_ETAG-}"
+        write_kv OUTDATED_SOURCE_OVERLAY_SHA256 "${OUTDATED_SOURCE_OVERLAY_SHA256-}"
+        write_kv AVAILABLE_SOURCE_OVERLAY_SHA256 "${AVAILABLE_SOURCE_OVERLAY_SHA256-}"
+    } > "$UPDATE_STATUS_FILE"
+}
+
+update_check_is_fresh() {
+    local checked_at="${UPDATE_CHECKED_AT-}"
+    local now epoch_checked age
+
+    [ -n "$checked_at" ] || return 1
+    now="$(date +%s)"
+    epoch_checked="$(date -d "$checked_at" +%s 2>/dev/null || true)"
+    [ -n "$epoch_checked" ] || return 1
+    age=$((now - epoch_checked))
+    [ "$age" -ge 0 ] && [ "$age" -lt "$UPDATE_CHECK_FRESHNESS_SECONDS" ]
+}
+
+compute_update_fingerprint() {
+    local remote_head="$1"
+    local remote_etag="$2"
+    local remote_last_modified="$3"
+    local remote_content_length="$4"
+    local source_overlay_sha="$5"
+
+    printf '%s\n' "${remote_head}|${remote_etag}|${remote_last_modified}|${remote_content_length}|${source_overlay_sha}" \
+        | sha256sum \
+        | awk '{ print $1 }'
+}
+
+build_update_reasons() {
+    local reasons=()
+
+    if [ "${UPDATE_REPO_UPSTREAM_CHANGED:-0}" -eq 1 ]; then
+        reasons+=("wrapper_repo")
+    fi
+    if [ "${UPDATE_REPO_OVERLAY_CHANGED:-0}" -eq 1 ]; then
+        reasons+=("source_overlay")
+    fi
+    if [ "${UPDATE_DMG_CHANGED:-0}" -eq 1 ]; then
+        reasons+=("codex_dmg")
+    fi
+
+    (IFS=,; printf '%s' "${reasons[*]}")
+}
+
+tag_outdated_install() {
+    local build_head="$1"
+    local remote_head="$2"
+    local remote_etag="$3"
+    local source_overlay_sha="$4"
+
+    UPDATE_AVAILABLE=1
+    UPDATE_FINGERPRINT="$(compute_update_fingerprint "$remote_head" "$remote_etag" "${UPDATE_REMOTE_LAST_MODIFIED-}" "${UPDATE_REMOTE_CONTENT_LENGTH-}" "$source_overlay_sha")"
+    UPDATE_CHECKED_AT="$(date -Iseconds)"
+    UPDATE_REASONS="$(build_update_reasons)"
+    OUTDATED_REPO_HEAD="$build_head"
+    AVAILABLE_REMOTE_REPO_HEAD="$remote_head"
+    OUTDATED_DMG_ETAG="${DMG_ETAG-}"
+    AVAILABLE_REMOTE_DMG_ETAG="$remote_etag"
+    OUTDATED_SOURCE_OVERLAY_SHA256="${SOURCE_OVERLAY_SHA256-}"
+    AVAILABLE_SOURCE_OVERLAY_SHA256="$source_overlay_sha"
+    write_update_status_file
+}
+
+clear_outdated_install_tags() {
+    UPDATE_AVAILABLE=0
+    UPDATE_FINGERPRINT=""
+    UPDATE_CHECKED_AT="$(date -Iseconds)"
+    UPDATE_REASONS=""
+    OUTDATED_REPO_HEAD=""
+    AVAILABLE_REMOTE_REPO_HEAD=""
+    OUTDATED_DMG_ETAG=""
+    AVAILABLE_REMOTE_DMG_ETAG=""
+    OUTDATED_SOURCE_OVERLAY_SHA256=""
+    AVAILABLE_SOURCE_OVERLAY_SHA256=""
+    write_update_status_file
+}
+
+notify_update_available_if_needed() {
+    local icon message
+
+    [ "${UPDATE_AVAILABLE:-0}" = "1" ] || return 0
+    [ "${UPDATE_FINGERPRINT-}" != "${UPDATE_NOTIFIED_FINGERPRINT-}" ] || return 0
+    command -v notify-send >/dev/null 2>&1 || return 0
+
+    icon="${ICON_PATH:-codex-desktop}"
+    if [ ! -f "$icon" ]; then
+        icon="codex-desktop"
+    fi
+
+    message="Your installed Codex Desktop wrapper is older than the latest upstream build."
+    case "${UPDATE_REASONS-}" in
+        *wrapper_repo*)
+            message="A newer codex-desktop-linux wrapper release is available."
+            ;;
+        *codex_dmg*)
+            message="A newer upstream Codex.dmg is available for your local wrapper."
+            ;;
+        *source_overlay*)
+            message="Local wrapper changes are ready to rebuild into your install."
+            ;;
+    esac
+
+    notify-send \
+        -a "Codex Desktop" \
+        -i "$icon" \
+        -h "string:desktop-entry:codex-desktop" \
+        "Codex Desktop update available" \
+        "${message} Run: codex-desktop-update"
+
+    UPDATE_NOTIFIED_FINGERPRINT="${UPDATE_FINGERPRINT-}"
+    write_update_status_file
+}
+
+evaluate_update_status() {
+    local build_head remote_head source_overlay_sha dmg_headers
+    local remote_etag remote_last_modified remote_content_length
+
+    UPDATE_REPO_UPSTREAM_CHANGED=0
+    UPDATE_REPO_OVERLAY_CHANGED=0
+    UPDATE_DMG_CHANGED=0
+
+    build_head="${REPO_HEAD-}"
+    if [ -z "$build_head" ]; then
+        build_head="$(current_repo_head 2>/dev/null || true)"
+    fi
+    [ -n "$build_head" ] || return 1
+
+    source_overlay_sha="$(source_repo_overlay_signature 2>/dev/null || true)"
+
+    if ! remote_head="$(remote_repo_head 2>/dev/null)"; then
+        return 1
+    fi
+
+    if ! dmg_headers="$(remote_dmg_headers 2>/dev/null)"; then
+        return 1
+    fi
+
+    remote_etag="$(header_value "$dmg_headers" "etag")"
+    remote_last_modified="$(header_value "$dmg_headers" "last-modified")"
+    remote_content_length="$(header_value "$dmg_headers" "content-length")"
+    UPDATE_REMOTE_LAST_MODIFIED="$remote_last_modified"
+    UPDATE_REMOTE_CONTENT_LENGTH="$remote_content_length"
+
+    if [ "$build_head" != "$remote_head" ]; then
+        UPDATE_REPO_UPSTREAM_CHANGED=1
+    fi
+
+    if [ "$source_overlay_sha" != "${SOURCE_OVERLAY_SHA256-}" ]; then
+        UPDATE_REPO_OVERLAY_CHANGED=1
+    fi
+
+    if [ "${DMG_ETAG-}" != "$remote_etag" ] \
+        || [ "${DMG_LAST_MODIFIED-}" != "$remote_last_modified" ] \
+        || [ "${DMG_CONTENT_LENGTH-}" != "$remote_content_length" ]; then
+        UPDATE_DMG_CHANGED=1
+    fi
+
+    EVAL_BUILD_HEAD="$build_head"
+    EVAL_REMOTE_HEAD="$remote_head"
+    EVAL_SOURCE_OVERLAY_SHA="$source_overlay_sha"
+    EVAL_REMOTE_ETAG="$remote_etag"
+
+    if [ "${UPDATE_REPO_UPSTREAM_CHANGED}" -eq 0 ] \
+        && [ "${UPDATE_REPO_OVERLAY_CHANGED}" -eq 0 ] \
+        && [ "${UPDATE_DMG_CHANGED}" -eq 0 ]; then
+        return 0
+    fi
+
+    return 10
+}
+
+run_launch_update_check() {
+    ensure_layout
+    load_install_config
+    load_metadata
+    load_update_status
+
+    if update_check_is_fresh; then
+        if [ "${UPDATE_AVAILABLE:-0}" = "1" ]; then
+            notify_update_available_if_needed
+        fi
+        return 0
+    fi
+
+    if evaluate_update_status; then
+        clear_outdated_install_tags
+        return 0
+    fi
+
+    tag_outdated_install \
+        "$EVAL_BUILD_HEAD" \
+        "$EVAL_REMOTE_HEAD" \
+        "$EVAL_REMOTE_ETAG" \
+        "$EVAL_SOURCE_OVERLAY_SHA"
+    notify_update_available_if_needed
+    return 10
+}
+
+run_launch_update_check_background() {
+    (
+        run_launch_update_check >/dev/null 2>&1 || true
+    ) &
 }
 
 write_kv() {

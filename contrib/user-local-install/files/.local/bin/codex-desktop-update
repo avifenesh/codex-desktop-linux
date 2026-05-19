@@ -86,6 +86,8 @@ fi
 
 if [ "$repo_changed" -eq 0 ] && [ "$dmg_changed" -eq 0 ] && [ "$force" -eq 0 ]; then
     log "Codex desktop wrapper is already up to date."
+    load_update_status
+    clear_outdated_install_tags
     exit 0
 fi
 
@@ -128,6 +130,8 @@ log "Rebuilding wrapper..."
 
 extract_icon
 record_metadata
+load_update_status
+clear_outdated_install_tags
 
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "${XDG_DATA_HOME}/applications" >/dev/null 2>&1 || true

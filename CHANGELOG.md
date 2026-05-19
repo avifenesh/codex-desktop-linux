@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   bundled plugin registry so the app keeps `read-aloud` installed, and the
   launcher syncs the plugin cache so new Codex windows expose the MCP tools
   through the same auto-install path as Computer Use.
+- User-local `codex-desktop` launches now run a background update check on open. When the installed wrapper or cached `Codex.dmg` is older than upstream, the install is tagged in `update-status.env` and a desktop notification prompts you to run `codex-desktop-update`.
 
 ### Fixed
 

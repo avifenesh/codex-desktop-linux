@@ -4,6 +4,7 @@ set -euo pipefail
 OPT_ROOT="${HOME}/.local/opt/codex-desktop-linux"
 APP_DIR="${OPT_ROOT}/codex-app"
 CONFIG_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/codex-desktop-linux/user-local.env"
+COMMON_SH="${OPT_ROOT}/lib/codex-desktop-linux/common.sh"
 
 USER_LOCAL_OZONE_PLATFORM_OVERRIDE="${CODEX_USER_LOCAL_OZONE_PLATFORM:-}"
 if [ -f "$CONFIG_FILE" ]; then
@@ -12,6 +13,12 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 if [ -n "$USER_LOCAL_OZONE_PLATFORM_OVERRIDE" ]; then
     CODEX_USER_LOCAL_OZONE_PLATFORM="$USER_LOCAL_OZONE_PLATFORM_OVERRIDE"
+fi
+
+if [ -f "$COMMON_SH" ]; then
+    # shellcheck disable=SC1090
+    source "$COMMON_SH"
+    run_launch_update_check_background
 fi
 
 case "${CODEX_USER_LOCAL_OZONE_PLATFORM:-auto}" in
