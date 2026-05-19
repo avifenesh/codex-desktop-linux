@@ -18,7 +18,7 @@ Two patches, mirroring the `linux-features/read-aloud` pattern:
      (skipped for multi-launch instances so secondary windows don't
      duplicate the work).
    - The handler exposes three actions:
-     - `status` — reads `~/.local/share/codex-update-manager/state.json` and
+     - `status` — reads `~/.local/state/codex-update-manager/state.json` and
        returns `{phase, show, ready}`.
      - `check` — fires another background `check-now`.
      - `install` — when status is `ready_to_install` / `waiting_for_app_exit`,
