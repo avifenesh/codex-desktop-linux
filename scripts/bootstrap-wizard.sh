@@ -351,6 +351,8 @@ def discover_features(root):
         if not isinstance(feature_id, str) or not id_re.match(feature_id):
             warn(f"Skipping feature with invalid id in {manifest_path}")
             continue
+        if data.get("hidden") is True:
+            continue
         if feature_id in features:
             warn(f"Skipping duplicate Linux feature id: {feature_id}")
             continue

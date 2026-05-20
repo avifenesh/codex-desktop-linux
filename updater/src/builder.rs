@@ -2,6 +2,7 @@
 
 use crate::{
     config::{RuntimeConfig, RuntimePaths},
+    features,
     install::PackageKind,
     state::{ArtifactPaths, PersistedState, UpdateStatus},
 };
@@ -83,6 +84,8 @@ pub async fn build_update(
     state.save(&paths.state_file)?;
 
     copy_builder_bundle(&config.builder_bundle_root, &workspace.bundle_dir)?;
+    let enabled_feature_ids = features::effective_enabled_feature_ids(config, paths)?;
+    features::write_features_config(&workspace.features_config, &enabled_feature_ids)?;
 
     state.status = UpdateStatus::PatchingApp;
     state.save(&paths.state_file)?;
@@ -90,6 +93,7 @@ pub async fn build_update(
         Command::new(workspace.bundle_dir.join("install.sh"))
             .arg(dmg_path)
             .env("CODEX_INSTALL_DIR", &workspace.app_dir)
+            .env("CODEX_LINUX_FEATURES_CONFIG", &workspace.features_config)
             .env(
                 "CODEX_MANAGED_NODE_SOURCE",
                 config.builder_bundle_root.join("node-runtime"),
@@ -126,6 +130,7 @@ pub async fn build_update(
 
     let package_path = find_package_in(&workspace.dist_dir)?;
     state.status = UpdateStatus::ReadyToInstall;
+    state.enabled_feature_ids = enabled_feature_ids;
     state.artifact_paths = ArtifactPaths {
         dmg_path: Some(dmg_path.to_path_buf()),
         workspace_dir: Some(workspace.workspace_dir.clone()),
@@ -149,6 +154,7 @@ struct BuilderWorkspace {
     app_dir: PathBuf,
     install_log: PathBuf,
     build_log: PathBuf,
+    features_config: PathBuf,
 }
 
 impl BuilderWorkspace {
@@ -160,6 +166,7 @@ impl BuilderWorkspace {
         let logs_dir = workspace_dir.join("logs");
         let install_log = logs_dir.join("install.log");
         let build_log = logs_dir.join("build-package.log");
+        let features_config = workspace_dir.join("features.json");
 
         if workspace_dir.exists() {
             fs::remove_dir_all(&workspace_dir)
@@ -176,6 +183,7 @@ impl BuilderWorkspace {
             app_dir,
             install_log,
             build_log,
+            features_config,
         })
     }
 }
@@ -596,8 +604,10 @@ touch "${DIST_DIR_OVERRIDE}/codex-desktop-${VER}-1-x86_64.pkg.tar.zst"
             bundle_root.join("install.sh"),
             r#"#!/bin/bash
 set -euo pipefail
+test -f "${CODEX_LINUX_FEATURES_CONFIG}"
 mkdir -p "${CODEX_INSTALL_DIR}"
 echo launcher > "${CODEX_INSTALL_DIR}/start.sh"
+cp "${CODEX_LINUX_FEATURES_CONFIG}" "${CODEX_INSTALL_DIR}/features.json"
 chmod +x "${CODEX_INSTALL_DIR}/start.sh"
 "#,
         )?;
@@ -655,6 +665,7 @@ chmod +x "${CODEX_INSTALL_DIR}/start.sh"
 
         let config = RuntimeConfig {
             dmg_url: "https://example.com/Codex.dmg".to_string(),
+            appcast_url: None,
             initial_check_delay_seconds: 30,
             check_interval_hours: 6,
             auto_install_on_app_exit: true,
@@ -663,6 +674,10 @@ chmod +x "${CODEX_INSTALL_DIR}/start.sh"
             builder_bundle_root: bundle_root,
             app_executable_path: PathBuf::from("/opt/codex-desktop/electron"),
         };
+        features::write_features_config(
+            &features::user_features_config_path(&paths),
+            &["example-feature".to_string()],
+        )?;
         let dmg_path = temp.path().join("Codex.dmg");
         fs::write(&dmg_path, b"dmg")?;
 
@@ -698,6 +713,15 @@ chmod +x "${CODEX_INSTALL_DIR}/start.sh"
             .workspace_dir
             .join("builder/linux-features/features.example.json")
             .exists());
+        assert_eq!(state.enabled_feature_ids, vec!["example-feature"]);
+        assert_eq!(
+            fs::read_to_string(artifacts.workspace_dir.join("features.json"))?,
+            "{\n  \"enabled\": [\n    \"example-feature\"\n  ]\n}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(artifacts.workspace_dir.join("codex-app/features.json"))?,
+            "{\n  \"enabled\": [\n    \"example-feature\"\n  ]\n}\n"
+        );
         assert!(
             is_native_package_file(&artifacts.package_path),
             "expected a native package (.deb, .rpm, or .pkg.tar.zst), got {}",

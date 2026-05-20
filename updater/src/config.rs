@@ -11,6 +11,8 @@ const SERVICE_NAME: &str = "codex-update-manager";
 /// Runtime configuration values that control how the updater behaves on Linux.
 pub struct RuntimeConfig {
     pub dmg_url: String,
+    #[serde(default = "default_appcast_url")]
+    pub appcast_url: Option<String>,
     pub initial_check_delay_seconds: u64,
     pub check_interval_hours: u64,
     pub auto_install_on_app_exit: bool,
@@ -84,6 +86,7 @@ impl RuntimeConfig {
 
         Self {
             dmg_url: "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg".to_string(),
+            appcast_url: default_appcast_url(),
             initial_check_delay_seconds: 30,
             check_interval_hours: 6,
             auto_install_on_app_exit: true,
@@ -108,6 +111,13 @@ impl RuntimeConfig {
     }
 }
 
+fn default_appcast_url() -> Option<String> {
+    Some(match std::env::consts::ARCH {
+        "x86_64" => "https://persistent.oaistatic.com/codex-app-prod/appcast-x64.xml".to_string(),
+        _ => "https://persistent.oaistatic.com/codex-app-prod/appcast.xml".to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,6 +138,9 @@ mod tests {
 
         let config = RuntimeConfig::load_or_default(&paths)?;
         assert_eq!(config.initial_check_delay_seconds, 30);
+        assert!(config.appcast_url.as_deref().is_some_and(
+            |url| url.starts_with("https://persistent.oaistatic.com/codex-app-prod/appcast")
+        ));
         assert!(config.auto_install_on_app_exit);
         assert_eq!(config.workspace_root, paths.cache_dir);
         assert!(config.builder_bundle_root.is_absolute());
@@ -150,6 +163,7 @@ mod tests {
             &paths.config_file,
             r#"
 dmg_url = "https://example.com/Codex.dmg"
+appcast_url = "https://example.com/appcast.xml"
 initial_check_delay_seconds = 5
 check_interval_hours = 12
 auto_install_on_app_exit = false
@@ -162,6 +176,10 @@ app_executable_path = "/opt/codex-desktop/electron"
 
         let config = RuntimeConfig::load_or_default(&paths)?;
         assert_eq!(config.dmg_url, "https://example.com/Codex.dmg");
+        assert_eq!(
+            config.appcast_url.as_deref(),
+            Some("https://example.com/appcast.xml")
+        );
         assert_eq!(config.initial_check_delay_seconds, 5);
         assert_eq!(config.check_interval_hours, 12);
         assert!(!config.auto_install_on_app_exit);

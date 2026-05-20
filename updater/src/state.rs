@@ -96,6 +96,8 @@ pub struct PersistedState {
     pub cli_error_message: Option<String>,
     #[serde(default)]
     pub cli_prompt_dismissed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub enabled_feature_ids: Vec<String>,
 }
 
 impl PersistedState {
@@ -123,6 +125,7 @@ impl PersistedState {
             cli_last_verified_at: None,
             cli_error_message: None,
             cli_prompt_dismissed_at: None,
+            enabled_feature_ids: Vec::new(),
         }
     }
 

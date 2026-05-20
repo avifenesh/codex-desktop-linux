@@ -56,6 +56,8 @@ Descriptor patches use the same shape as `scripts/patches/core/**/patch.js`.
 They can target `main-bundle`, `webview-asset`, or `extracted-app` phases.
 Feature descriptor ids are namespaced as `feature:<feature-id>:<descriptor-id>`
 in patch reports and are optional by default.
+Set `"hidden": true` in `feature.json` for developer-only fixtures that should
+not appear in native setup or update feature-selection prompts.
 
 Feature self-tests live inside each feature directory. Run them with:
 

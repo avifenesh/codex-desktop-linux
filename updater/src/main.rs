@@ -5,6 +5,7 @@ mod builder;
 mod cli;
 mod codex_cli;
 mod config;
+mod features;
 mod install;
 mod install_rollback;
 mod liveness;

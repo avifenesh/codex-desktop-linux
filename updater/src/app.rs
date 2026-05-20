@@ -5,7 +5,7 @@ use crate::{
     cli::{Cli, Commands},
     codex_cli,
     config::{RuntimeConfig, RuntimePaths},
-    install, install_rollback, liveness, logging, notify, rollback,
+    features, install, install_rollback, liveness, logging, notify, rollback,
     state::{CliStatus, PersistedState, UpdateStatus},
     upstream,
 };
@@ -64,6 +64,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             print_path,
         } => run_prompt_install_cli(&mut state, &paths, cli_path, print_path),
         Commands::Status { json } => run_status(&mut state, &paths, json),
+        Commands::Features { json } => run_features(&config, &paths, json),
+        Commands::PromptFeatures { json } => run_prompt_features(&config, &paths, json),
         Commands::InstallReady => run_install_ready(&config, &mut state, &paths).await,
         Commands::Rollback => rollback::run(&config, &mut state, &paths).await,
         Commands::InstallDeb { path } => install::install_deb(&path),
@@ -312,6 +314,57 @@ fn run_status(state: &mut PersistedState, paths: &RuntimePaths, json: bool) -> R
     Ok(())
 }
 
+fn run_features(config: &RuntimeConfig, paths: &RuntimePaths, json: bool) -> Result<()> {
+    let selection = features::selection(config, paths)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&selection)?);
+    } else {
+        println!("features_config: {}", selection.config_path.display());
+        println!(
+            "enabled_features: {}",
+            if selection.enabled.is_empty() {
+                "none".to_string()
+            } else {
+                selection.enabled.join(",")
+            }
+        );
+        for option in selection.available {
+            println!(
+                "{} [{}] - {}",
+                option.id,
+                if option.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                option.title
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_prompt_features(config: &RuntimeConfig, paths: &RuntimePaths, json: bool) -> Result<()> {
+    let outcome = features::prompt_for_update(config, paths)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+    } else if outcome.cancelled {
+        println!("Feature selection cancelled.");
+    } else if outcome.prompted {
+        println!(
+            "Enabled update features: {}",
+            if outcome.selection.enabled.is_empty() {
+                "none".to_string()
+            } else {
+                outcome.selection.enabled.join(",")
+            }
+        );
+    } else {
+        println!("No graphical feature selection prompt was available.");
+    }
+    Ok(())
+}
+
 fn update_error_status_line(state: &PersistedState) -> String {
     format!(
         "update_error: {}",
@@ -539,7 +592,12 @@ async fn run_check_cycle(
     persist_state(paths, state)?;
 
     let result: Result<()> = async {
-        let metadata = upstream::fetch_remote_metadata(&client, &config.dmg_url).await?;
+        let metadata = upstream::fetch_remote_metadata(
+            &client,
+            &config.dmg_url,
+            config.appcast_url.as_deref(),
+        )
+        .await?;
         let previous_headers_fingerprint = state.remote_headers_fingerprint.clone();
         state.remote_headers_fingerprint = Some(metadata.headers_fingerprint.clone());
         state.last_successful_check_at = Some(Utc::now());
@@ -547,6 +605,7 @@ async fn run_check_cycle(
         if previous_headers_fingerprint.as_deref() == Some(metadata.headers_fingerprint.as_str())
             && state.dmg_sha256.is_some()
             && !retrying_failed_update
+            && installed_version_satisfies_remote_candidate(state, &metadata)
         {
             set_status(state, paths, UpdateStatus::Idle)?;
             info!("upstream fingerprint unchanged; skipping download");
@@ -556,8 +615,15 @@ async fn run_check_cycle(
         set_status(state, paths, UpdateStatus::DownloadingDmg)?;
 
         let downloads_dir = config.workspace_root.join("downloads");
-        let downloaded =
-            upstream::download_dmg(&client, &config.dmg_url, &downloads_dir, Utc::now()).await?;
+        let downloaded = upstream::download_dmg(
+            &client,
+            &metadata.download_url,
+            &downloads_dir,
+            Utc::now(),
+            metadata.candidate_version.as_deref(),
+            metadata.upstream_version.as_deref(),
+        )
+        .await?;
 
         if state
             .rollback_blocked_candidate_version
@@ -581,6 +647,10 @@ async fn run_check_cycle(
 
         if state.dmg_sha256.as_deref() == Some(downloaded.sha256.as_str())
             && !retrying_failed_update
+            && installed_version_satisfies_candidate(
+                &state.installed_version,
+                &downloaded.candidate_version,
+            )
         {
             state.status = UpdateStatus::Idle;
             state.artifact_paths.dmg_path = Some(downloaded.path);
@@ -747,6 +817,8 @@ async fn run_install_ready(
         }
     }
 
+    rebuild_ready_update_if_features_changed(config, state, paths).await?;
+
     let Some(package_path) = state.artifact_paths.package_path.clone() else {
         mark_failed_and_persist(state, paths, "No ready update package is recorded")?;
         maybe_send_notification(
@@ -793,6 +865,36 @@ async fn run_install_ready(
 
     clear_install_auth_required_event(state, paths)?;
     trigger_install(state, paths, &package_path).await
+}
+
+async fn rebuild_ready_update_if_features_changed(
+    config: &RuntimeConfig,
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+) -> Result<()> {
+    let enabled_feature_ids = features::effective_enabled_feature_ids(config, paths)?;
+    if enabled_feature_ids == state.enabled_feature_ids {
+        return Ok(());
+    }
+
+    let Some(candidate_version) = state.candidate_version.clone() else {
+        return Ok(());
+    };
+    let Some(dmg_path) = state.artifact_paths.dmg_path.clone() else {
+        return Ok(());
+    };
+    if !dmg_path.exists() {
+        return Ok(());
+    }
+
+    info!(
+        candidate_version,
+        previous_features = ?state.enabled_feature_ids,
+        selected_features = ?enabled_feature_ids,
+        "rebuilding ready update because Linux feature selection changed"
+    );
+    builder::build_update(config, state, paths, &candidate_version, &dmg_path).await?;
+    Ok(())
 }
 
 fn complete_pending_install_if_already_installed(
@@ -900,6 +1002,18 @@ fn installed_version_matches_candidate(installed: &str, candidate: &str) -> bool
         Some(std::cmp::Ordering::Equal) => true,
         Some(_) => false,
         None => installed == candidate,
+    }
+}
+
+fn installed_version_satisfies_remote_candidate(
+    state: &PersistedState,
+    metadata: &upstream::RemoteMetadata,
+) -> bool {
+    match metadata.candidate_version.as_deref() {
+        Some(candidate) => {
+            installed_version_satisfies_candidate(&state.installed_version, candidate)
+        }
+        None => true,
     }
 }
 
@@ -1191,6 +1305,7 @@ mod tests {
     fn upstream_check_freshness_respects_configured_interval() {
         let config = RuntimeConfig {
             dmg_url: "https://example.com/Codex.dmg".to_string(),
+            appcast_url: None,
             initial_check_delay_seconds: 1,
             check_interval_hours: 6,
             auto_install_on_app_exit: true,
@@ -1248,6 +1363,7 @@ mod tests {
 
         let config = RuntimeConfig {
             dmg_url: "https://example.com/Codex.dmg".to_string(),
+            appcast_url: None,
             initial_check_delay_seconds: 1,
             check_interval_hours: 6,
             auto_install_on_app_exit: false,
@@ -1285,6 +1401,7 @@ mod tests {
 
         let config = RuntimeConfig {
             dmg_url: "https://invalid.example/Codex.dmg".to_string(),
+            appcast_url: None,
             initial_check_delay_seconds: 1,
             check_interval_hours: 6,
             auto_install_on_app_exit: true,
@@ -1385,6 +1502,7 @@ mod tests {
 
         let config = RuntimeConfig {
             dmg_url: "https://example.com/Codex.dmg".to_string(),
+            appcast_url: None,
             initial_check_delay_seconds: 1,
             check_interval_hours: 6,
             auto_install_on_app_exit: true,
@@ -1432,6 +1550,7 @@ mod tests {
 
         let config = RuntimeConfig {
             dmg_url: "https://example.com/Codex.dmg".to_string(),
+            appcast_url: None,
             initial_check_delay_seconds: 1,
             check_interval_hours: 6,
             auto_install_on_app_exit: true,
@@ -1476,6 +1595,7 @@ mod tests {
 
         let config = RuntimeConfig {
             dmg_url: "https://example.com/Codex.dmg".to_string(),
+            appcast_url: None,
             initial_check_delay_seconds: 1,
             check_interval_hours: 6,
             auto_install_on_app_exit: false,
@@ -1515,6 +1635,7 @@ mod tests {
 
         let config = RuntimeConfig {
             dmg_url: "https://example.com/Codex.dmg".to_string(),
+            appcast_url: None,
             initial_check_delay_seconds: 1,
             check_interval_hours: 6,
             auto_install_on_app_exit: false,
@@ -1951,6 +2072,30 @@ mod tests {
     #[test]
     fn generated_version_comparison_rejects_non_generated_versions() {
         assert_eq!(compare_generated_versions("0.34.1", "0.35.0"), None);
+    }
+
+    #[test]
+    fn appcast_candidate_skip_requires_installed_package_to_satisfy_candidate() {
+        let mut state = PersistedState::new(true);
+        state.installed_version = "2026.05.15.010203+oldbuild".to_string();
+        let metadata = upstream::RemoteMetadata {
+            etag: Some("\"appcast\"".to_string()),
+            last_modified: None,
+            content_length: Some(42),
+            headers_fingerprint: "appcast=fingerprint".to_string(),
+            download_url: "https://example.com/Codex.zip".to_string(),
+            candidate_version: Some("2026.05.16.013614+26.513.31313".to_string()),
+            upstream_version: Some("26.513.31313".to_string()),
+        };
+
+        assert!(!installed_version_satisfies_remote_candidate(
+            &state, &metadata
+        ));
+
+        state.installed_version = "2026.05.16.013614+26.513.31313".to_string();
+        assert!(installed_version_satisfies_remote_candidate(
+            &state, &metadata
+        ));
     }
 
     #[tokio::test]

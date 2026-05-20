@@ -280,8 +280,9 @@ CODEX_MULTI_LAUNCH=1 CODEX_MULTI_LAUNCH_PORT_RANGE=5175-5199 ./codex-app/start.s
 
 By default, the native package installs a companion `systemd --user` service named `codex-update-manager`.
 
-- It checks upstream `Codex.dmg` on daemon startup, every 6 hours, and in the background on app launch when stale.
-- When a new DMG is available, it rebuilds a local native package with `/opt/codex-desktop/update-builder`.
+- It checks the upstream Codex Sparkle appcast on daemon startup, every 6 hours, and in the background whenever the app launches.
+- When a newer upstream appcast item is available, it downloads that archive and rebuilds a local native package with `/opt/codex-desktop/update-builder`.
+- The app's existing update UI is enabled on Linux. Choosing the update action asks which optional Linux features to include before the ready package is installed.
 - If Codex Desktop is open, the final install waits until Electron exits.
 - The updater runs unprivileged and uses `pkexec` only for the final package install.
 - Codex CLI checks are best-effort and launcher-scoped. Set `CODEX_SYNC_CLI_PREFLIGHT=1` when debugging launch-time CLI preflight.
@@ -291,6 +292,7 @@ Inspect the live service and runtime files with:
 ```bash
 systemctl --user status codex-update-manager.service
 codex-update-manager status --json
+codex-update-manager features --json
 sed -n '1,160p' ~/.local/state/codex-update-manager/state.json
 sed -n '1,160p' ~/.local/state/codex-update-manager/service.log
 ```
@@ -307,12 +309,17 @@ Runtime files live in standard XDG locations:
 
 ```text
 ~/.config/codex-update-manager/config.toml
+~/.config/codex-update-manager/features.json
 ~/.local/state/codex-update-manager/state.json
 ~/.local/state/codex-update-manager/service.log
 ~/.cache/codex-update-manager/
 ~/.cache/codex-desktop/launcher.log
 ~/.local/state/codex-desktop/app.pid
 ```
+
+`features.json` stores the opt-in Linux feature selection used for future update
+rebuilds. If it is missing, the updater keeps the feature list that was bundled
+with the installed package.
 
 ### Manual-update packages
 

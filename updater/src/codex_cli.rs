@@ -837,6 +837,7 @@ mod tests {
 
     #[test]
     fn refresh_status_uses_persisted_cli_path_and_cached_latest() -> Result<()> {
+        let _env_guard = env_lock();
         let temp = tempdir()?;
         let paths = test_runtime_paths(temp.path());
         paths.ensure_dirs()?;
@@ -864,6 +865,7 @@ mod tests {
 
     #[test]
     fn preflight_uses_cached_latest_for_fresh_explicit_cli_path() -> Result<()> {
+        let _env_guard = env_lock();
         let temp = tempdir()?;
         let paths = test_runtime_paths(temp.path());
         paths.ensure_dirs()?;
@@ -895,6 +897,7 @@ mod tests {
 
     #[test]
     fn refresh_cached_status_uses_cached_installed_version_without_running_cli() -> Result<()> {
+        let _env_guard = env_lock();
         let temp = tempdir()?;
         let paths = test_runtime_paths(temp.path());
         paths.ensure_dirs()?;

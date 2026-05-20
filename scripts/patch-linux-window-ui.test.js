@@ -1485,13 +1485,18 @@ test("adds Linux package updater behind the existing app updater manager", () =>
   assert.match(patched, /codexLinuxRunUpdateManager\(\[`--help`\]\)/);
   assert.match(patched, /async function codexLinuxRefreshUpdateState\(\)/);
   assert.match(patched, /async function codexLinuxRefreshUpdateState\(\)\{return codexLinuxReadUpdateState\(\)\}/);
+  assert.match(patched, /async function codexLinuxCheckForUpdatesOnOpen\(\)/);
+  assert.match(patched, /codexLinuxRunUpdateManager\(\[`check-now`\]\)/);
+  assert.match(patched, /async function codexLinuxPromptUpdateFeatures\(\)/);
+  assert.match(patched, /codexLinuxRunUpdateManager\(\[`prompt-features`,`--json`\]\)/);
   assert.doesNotMatch(patched, /codexLinuxRunUpdateManager\(\[`status`,`--json`\]\)/);
-  assert.match(patched, /await codexLinuxProbeUpdateManager\(\),e\(\)/);
+  assert.match(patched, /await codexLinuxProbeUpdateManager\(\),e\(\),codexLinuxCheckForUpdatesOnOpen\(\)/);
   assert.match(patched, /if\(!this\.options\.enableUpdater&&process\.platform!==`linux`\)/);
   assert.match(patched, /process\.platform===`linux`\?await this\.initializeLinuxPackageUpdater\(\)/);
   assert.match(patched, /async initializeLinuxPackageUpdater\(\)/);
   assert.match(patched, /codexLinuxRunUpdateManager\(\[`check-now`\]\)/);
   assert.match(patched, /codexLinuxRunUpdateManager\(\[`install-ready`\]\)/);
+  assert.match(patched, /if\(!await codexLinuxPromptUpdateFeatures\(\)\)/);
   assert.match(patched, /this\.setInstallProgressPercent\(0\),this\.setUpdateLifecycleState\(`installing`\)/);
   assert.match(patched, /this\.setInstallProgressPercent\(null\),codexLinuxQuitForUpdate\(\)/);
   assert.doesNotMatch(patched, /this\.options\.onInstallUpdatesRequested\?\.\(\)/);
@@ -1504,7 +1509,7 @@ test("does not run bootstrap probe-state migration on class-style updater bundle
   const patched = applyPatchTwice(applyLinuxAppUpdaterBridgePatch, source);
 
   assert.match(patched, /function unrelated\(\)\{i\(\);let o=1;return o\}/);
-  assert.match(patched, /await codexLinuxProbeUpdateManager\(\),e\(\)/);
+  assert.match(patched, /await codexLinuxProbeUpdateManager\(\),e\(\),codexLinuxCheckForUpdatesOnOpen\(\)/);
   assert.doesNotMatch(patched, /let s=!1,c=codexLinuxProbeUpdateManager/);
   assert.doesNotMatch(patched, /getIsUpdateReady:\(\)=>s&&t/);
 });
@@ -1521,10 +1526,11 @@ test("adds Linux package updater to current bootstrap updater wiring", () => {
   assert.match(patched, /async function codexLinuxProbeUpdateManager\(\)/);
   assert.match(patched, /codexLinuxRunUpdateManager\(\[`--help`\]\)/);
   assert.match(patched, /async function codexLinuxRefreshUpdateState\(\)\{return codexLinuxReadUpdateState\(\)\}/);
-  assert.match(patched, /codexLinuxProbeUpdateManager\(\)\.then\(\(\)=>\{s=!0,i\(\),a\(\);return!0\}\)/);
+  assert.match(patched, /codexLinuxProbeUpdateManager\(\)\.then\(\(\)=>\{s=!0,i\(\),a\(\),codexLinuxCheckForUpdatesOnOpen\(\)/);
   assert.match(patched, /getIsUpdateReady:\(\)=>s&&t/);
   assert.match(patched, /checkForUpdates:async\(\)=>\{if\(!await c\)return;n=`checking`/);
   assert.match(patched, /installUpdatesIfAvailable:async\(\)=>\{if\(!await c\)\{a\(\);return\}i\(\);if\(!t\)\{a\(\);return\}/);
+  assert.match(patched, /if\(!await codexLinuxPromptUpdateFeatures\(\)\)\{r=null,n=t\?`ready`:`idle`,a\(\);return\}/);
   assert.match(patched, /refresh:async\(\)=>\{if\(await c\)\{try\{await codexLinuxRefreshUpdateState\(\)\}/);
   assert.doesNotMatch(patched, /codexLinuxRunUpdateManager\(\[`status`,`--json`\]\)/);
 });
@@ -1533,7 +1539,7 @@ test("migrates already-patched bootstrap updater bridge to probe before enabling
   const patched = applyLinuxAppUpdaterBridgePatch(currentBootstrapUpdaterBundleFixture());
   const oldPatched = patched
     .replace(
-      "let s=!1,c=codexLinuxProbeUpdateManager().then(()=>{s=!0,i(),a();return!0}).catch(()=>{s=!1,t=!1,n=`idle`,a();return!1});let o=",
+      "let s=!1,c=codexLinuxProbeUpdateManager().then(()=>{s=!0,i(),a(),codexLinuxCheckForUpdatesOnOpen().then(()=>{i(),a()}).catch(()=>{});return!0}).catch(()=>{s=!1,t=!1,n=`idle`,a();return!1});let o=",
       "i(),codexLinuxRefreshUpdateState().then(()=>{i(),a()}).catch(()=>{});let o=",
     )
     .replace(
@@ -1549,15 +1555,20 @@ test("migrates already-patched bootstrap updater bridge to probe before enabling
       "installUpdatesIfAvailable:async()=>{i();if(!t)return;",
     )
     .replace(
+      "try{if(!await codexLinuxPromptUpdateFeatures()){r=null,n=t?`ready`:`idle`,a();return}let e=await codexLinuxRunUpdateManager([`install-ready`]),s=i();",
+      "try{let e=await codexLinuxRunUpdateManager([`install-ready`]),s=i();",
+    )
+    .replace(
       "refresh:async()=>{if(await c){try{await codexLinuxRefreshUpdateState()}catch{}i()}else t=!1,n=`idle`;a()}",
       "refresh:async()=>{try{await codexLinuxRefreshUpdateState()}catch{}i(),a()}",
     );
 
   const migrated = applyPatchTwice(applyLinuxAppUpdaterBridgePatch, oldPatched);
 
-  assert.match(migrated, /codexLinuxProbeUpdateManager\(\)\.then\(\(\)=>\{s=!0,i\(\),a\(\);return!0\}\)/);
+  assert.match(migrated, /codexLinuxProbeUpdateManager\(\)\.then\(\(\)=>\{s=!0,i\(\),a\(\),codexLinuxCheckForUpdatesOnOpen\(\)/);
   assert.match(migrated, /getIsUpdateReady:\(\)=>s&&t/);
   assert.match(migrated, /installUpdatesIfAvailable:async\(\)=>\{if\(!await c\)\{a\(\);return\}i\(\);if\(!t\)\{a\(\);return\}/);
+  assert.match(migrated, /if\(!await codexLinuxPromptUpdateFeatures\(\)\)\{r=null,n=t\?`ready`:`idle`,a\(\);return\}/);
 });
 
 test("migrates previous bootstrap updater bridge without leaving undefined probe state", () => {
@@ -1572,7 +1583,15 @@ test("migrates previous bootstrap updater bridge without leaving undefined probe
       "",
     )
     .replace(
-      ",s=!1,c=codexLinuxProbeUpdateManager().then(()=>{s=!0,i(),a();return!0}).catch(()=>{s=!1,t=!1,n=`idle`,a();return!1});let o=",
+      "async function codexLinuxCheckForUpdatesOnOpen(){try{await codexLinuxRunUpdateManager([`check-now`])}catch{}}",
+      "",
+    )
+    .replace(
+      "async function codexLinuxPromptUpdateFeatures(){try{let e=await codexLinuxRunUpdateManager([`prompt-features`,`--json`]),t=JSON.parse(e.stdout||`{}`);return t?.cancelled!==!0}catch{return!0}}",
+      "",
+    )
+    .replace(
+      ",s=!1,c=codexLinuxProbeUpdateManager().then(()=>{s=!0,i(),a(),codexLinuxCheckForUpdatesOnOpen().then(()=>{i(),a()}).catch(()=>{});return!0}).catch(()=>{s=!1,t=!1,n=`idle`,a();return!1});let o=",
       ";i();let o=",
     )
     .replace(
@@ -1588,22 +1607,31 @@ test("migrates previous bootstrap updater bridge without leaving undefined probe
       "installUpdatesIfAvailable:async()=>{i();if(!t)return;",
     )
     .replace(
+      "try{if(!await codexLinuxPromptUpdateFeatures()){r=null,n=t?`ready`:`idle`,a();return}let e=await codexLinuxRunUpdateManager([`install-ready`]),s=i();",
+      "try{let e=await codexLinuxRunUpdateManager([`install-ready`]),s=i();",
+    )
+    .replace(
       "refresh:async()=>{if(await c){try{await codexLinuxRefreshUpdateState()}catch{}i()}else t=!1,n=`idle`;a()}",
       "refresh:()=>{i(),a()}",
     );
 
   assert.doesNotMatch(oldPatched, /codexLinuxProbeUpdateManager/);
   assert.doesNotMatch(oldPatched, /codexLinuxRefreshUpdateState/);
+  assert.doesNotMatch(oldPatched, /codexLinuxCheckForUpdatesOnOpen/);
+  assert.doesNotMatch(oldPatched, /codexLinuxPromptUpdateFeatures/);
   assert.match(oldPatched, /i\(\);let o=/);
 
   const migrated = applyPatchTwice(applyLinuxAppUpdaterBridgePatch, oldPatched);
 
   assert.match(migrated, /async function codexLinuxProbeUpdateManager\(\)\{await codexLinuxRunUpdateManager\(\[`--help`\]\)\}/);
   assert.match(migrated, /async function codexLinuxRefreshUpdateState\(\)\{return codexLinuxReadUpdateState\(\)\}/);
-  assert.match(migrated, /let s=!1,c=codexLinuxProbeUpdateManager\(\)\.then/);
+  assert.match(migrated, /async function codexLinuxCheckForUpdatesOnOpen\(\)\{try\{await codexLinuxRunUpdateManager\(\[`check-now`\]\)\}catch\{\}\}/);
+  assert.match(migrated, /async function codexLinuxPromptUpdateFeatures\(\)/);
+  assert.match(migrated, /let s=!1,c=codexLinuxProbeUpdateManager\(\)\.then\(\(\)=>\{s=!0,i\(\),a\(\),codexLinuxCheckForUpdatesOnOpen\(\)/);
   assert.match(migrated, /getIsUpdateReady:\(\)=>s&&t/);
   assert.match(migrated, /checkForUpdates:async\(\)=>\{if\(!await c\)return;n=`checking`/);
   assert.match(migrated, /installUpdatesIfAvailable:async\(\)=>\{if\(!await c\)\{a\(\);return\}i\(\);if\(!t\)\{a\(\);return\}/);
+  assert.match(migrated, /if\(!await codexLinuxPromptUpdateFeatures\(\)\)\{r=null,n=t\?`ready`:`idle`,a\(\);return\}/);
   assert.match(migrated, /refresh:async\(\)=>\{if\(await c\)\{try\{await codexLinuxRefreshUpdateState\(\)\}/);
 });
 

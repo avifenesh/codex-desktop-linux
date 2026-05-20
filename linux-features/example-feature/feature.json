@@ -3,6 +3,7 @@
   "title": "Example Linux Feature",
   "description": "Disabled example showing the linux-features ASAR patch and stage hook contract.",
   "defaultEnabled": false,
+  "hidden": true,
   "entrypoints": {
     "mainBundlePatch": "./patch.js",
     "stageHook": "./stage.sh"
