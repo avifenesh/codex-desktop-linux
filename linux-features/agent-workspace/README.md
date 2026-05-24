@@ -33,9 +33,10 @@ lifecycle actions needed by the UI. The default command is
 The first conversation-view slice shows a compact live workspace panel when an
 agent workspace is active. It polls `workspace observe --screenshot` through the
 allowlisted bridge, renders the latest screenshot in the conversation surface,
-and exposes a stop button next to the live view. This is not a full streaming
-viewer yet; the deeper viewer can build on the same observe/screenshot bridge
-after the lifecycle and profile surface is stable.
+shows the display, profile/policy summary, and running app names, and exposes a
+stop button next to the live view. This is not a full streaming viewer yet; the
+deeper viewer can build on the same observe/screenshot bridge after the
+lifecycle and profile surface is stable.
 
 Dogfood check: the side-by-side dev app built with `make build-dev-app` has been
 launched inside an agent workspace. The conversation panel rendered the live

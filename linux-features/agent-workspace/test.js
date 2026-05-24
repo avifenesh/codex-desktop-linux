@@ -303,6 +303,11 @@ test("conversation visibility runtime is valid script and idempotent", () => {
   assert.match(runtime, /workspaceStop/);
   assert.match(runtime, /codex-linux-agent-workspace-panel/);
   assert.match(runtime, /data_url/);
+  assert.match(runtime, /function policySummary/);
+  assert.match(runtime, /function appSummary/);
+  assert.match(runtime, /profile /);
+  assert.match(runtime, /network /);
+  assert.match(runtime, /mount/);
 
   const patched = applyAgentWorkspaceConversationViewPatch("let thread=1;");
   assert.match(patched, new RegExp(CONVERSATION_RUNTIME_VERSION));
