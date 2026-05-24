@@ -781,11 +781,12 @@ test("conversation visibility runtime is valid script and idempotent", () => {
   assert.match(runtime, /function beginInteraction/);
   assert.match(runtime, /pointerdown/);
   assert.match(runtime, /codex-linux-agent-workspace-resize/);
-  assert.match(runtime, /codex-linux-agent-workspace-theme-v8/);
+  assert.match(runtime, /codex-linux-agent-workspace-theme-v9/);
   assert.match(runtime, /function removeOldPanels/);
   assert.match(runtime, /codexLinuxAgentWorkspaceConversationCleanup/);
   assert.match(runtime, /--color-token-main-surface-primary/);
-  assert.match(runtime, /54%,transparent/);
+  assert.match(runtime, /88%,transparent/);
+  assert.match(runtime, /backdrop-filter:blur\(8px\) saturate\(1\.05\)/);
   assert.match(runtime, /--color-token-bg-fog/);
   assert.match(runtime, /--color-token-border-default/);
   assert.match(runtime, /Drag workspace viewer/);
