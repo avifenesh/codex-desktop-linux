@@ -85,7 +85,7 @@ function syntheticMainBundle() {
   ].join("");
 }
 
-function buildBridgeHarness({ env = {}, globalState = new Map(), execFile } = {}) {
+function buildBridgeHarness({ env = {}, globalState = new Map(), execFile, electron = null } = {}) {
   const patched = applyAgentWorkspaceMainBridgePatch(syntheticMainBundle());
   const execCalls = [];
   const childProcess = {
@@ -101,6 +101,7 @@ function buildBridgeHarness({ env = {}, globalState = new Map(), execFile } = {}
       if (name === "node:child_process") return childProcess;
       if (name === "node:fs") return fs;
       if (name === "node:path") return path;
+      if (name === "electron" && electron) return electron;
       throw new Error(`unexpected require ${name}`);
     },
     process: { env: { ...process.env, ...env } },
@@ -403,6 +404,9 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   assert.match(patched, /"linux-agent-workspace-pick-mount":async/);
   assert.match(patched, /"linux-agent-workspace-pick-browser-data":async/);
   assert.match(patched, /showOpenDialog/);
+  assert.match(patched, /Desktop Entry/);
+  assert.match(patched, /startup_app/);
+  assert.match(patched, /desktop_file/);
   assert.match(patched, new RegExp(SETTINGS_COMMAND_KEY));
   assert.match(patched, /\.local`\,`bin`\,`agent-workspace-linux`/);
   assert.match(patched, /CODEX_AGENT_WORKSPACE_BIN/);
@@ -427,6 +431,40 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   const { value, warnings } = captureWarns(() => applyAgentWorkspaceMainBridgePatch("real bundle"));
   assert.equal(value, "real bundle");
   assert.match(warnings.join("\n"), /Could not find Node module aliases/);
+});
+
+test("app picker converts desktop launchers into startup app commands", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-agent-workspace-desktop-app-"));
+  try {
+    const desktopPath = path.join(tempDir, "canva.desktop");
+    fs.writeFileSync(
+      desktopPath,
+      [
+        "[Desktop Entry]",
+        "Name=Canva",
+        'Exec="/opt/Canva/canva" --new-window %U',
+        "Type=Application",
+        "",
+      ].join("\n"),
+    );
+
+    const { handlers } = buildBridgeHarness({
+      electron: {
+        dialog: {
+          showOpenDialog: async () => ({ canceled: false, filePaths: [desktopPath] }),
+        },
+      },
+    });
+
+    const response = await handlers["linux-agent-workspace-pick-app"]();
+    assert.equal(response.ok, true);
+    assert.equal(response.json.desktop, true);
+    assert.equal(response.json.startup_app.name, "Canva");
+    assert.equal(response.json.startup_app.desktop_file, desktopPath);
+    assert.deepEqual(Array.from(response.json.startup_app.command), ["/opt/Canva/canva", "--new-window"]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("main bridge reads MCP permission config and applies it to CLI calls", async () => {
@@ -529,6 +567,7 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /function profileMounts/);
   assert.match(source, /function addMountsFromPaths/);
   assert.match(source, /function pickMount/);
+  assert.match(source, /startup_app/);
   assert.match(source, /function profileAllowHosts/);
   assert.match(source, /function addNetworkHost/);
   assert.match(source, /function removeNetworkHost/);

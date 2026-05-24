@@ -20,6 +20,10 @@ saved profiles, validate profile JSON without saving, preview profile-backed
 workspace starts, start a hidden workspace after explicit acknowledgement, stop
 running workspaces, run stale workspace cleanup, and create a restricted Chrome
 starter profile that keeps the `--no-sandbox` browser tradeoff visible.
+The startup-app picker accepts ordinary executable files and Linux `.desktop`
+launchers; when a launcher is selected, the bridge reads its `Name`/`Exec`
+fields, removes desktop field codes such as `%U`, and stores the parsed command
+array without invoking a shell.
 
 The bridge is intentionally allowlisted. It invokes `agent-workspace-linux`
 through `execFile`, never through a shell, and exposes only profile/workspace
