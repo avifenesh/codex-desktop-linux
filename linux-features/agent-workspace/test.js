@@ -401,6 +401,7 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   assert.match(patched, /"linux-agent-workspace":async/);
   assert.match(patched, /"linux-agent-workspace-pick-app":async/);
   assert.match(patched, /"linux-agent-workspace-pick-mount":async/);
+  assert.match(patched, /"linux-agent-workspace-pick-browser-data":async/);
   assert.match(patched, /showOpenDialog/);
   assert.match(patched, new RegExp(SETTINGS_COMMAND_KEY));
   assert.match(patched, /\.local`\,`bin`\,`agent-workspace-linux`/);
@@ -414,6 +415,7 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   assert.match(patched, /\[`profile`,`validate`,`--json`,__codexTempPath\]/);
   assert.match(patched, /case`profileTemplate`/);
   assert.match(patched, /--browser-path/);
+  assert.match(patched, /--user-data-dir/);
   assert.match(patched, /case`workspaceOpenProfile`/);
   assert.match(patched, /case`workspaceStart`/);
   assert.match(patched, /case`workspaceObserve`/);
@@ -464,6 +466,23 @@ test("main bridge reads MCP permission config and applies it to CLI calls", asyn
     const response = await handlers["linux-agent-workspace"]({ action: "profileList" });
     assert.equal(response.ok, true);
     assert.deepEqual(Array.from(execCalls[0].args.slice(0, 4)), ["--permissions", permissionsPath, "profile", "list"]);
+
+    const template = await handlers["linux-agent-workspace"]({
+      action: "profileTemplate",
+      templateKind: "browser-session",
+      profileId: "browser-session",
+      browserPath: "/usr/bin/google-chrome",
+      userDataDir: "/tmp/browser-profile",
+    });
+    assert.equal(template.ok, true);
+    assert.deepEqual(Array.from(execCalls[1].args.slice(0, 5)), [
+      "--permissions",
+      permissionsPath,
+      "profile",
+      "template",
+      "browser-session",
+    ]);
+    assert.match(execCalls[1].args.join("\n"), /--user-data-dir\n\/tmp\/browser-profile/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -530,10 +549,15 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.doesNotMatch(source, /Saved profiles/);
   assert.match(source, /Create new/);
   assert.match(source, /Chrome template/);
+  assert.match(source, /Browser session/);
   assert.match(source, /function createRestrictedChromeProfile/);
+  assert.match(source, /function createBrowserSessionProfile/);
+  assert.match(source, /linux-agent-workspace-pick-browser-data/);
   assert.match(source, /profileFromResponse\(response\)/);
   assert.match(source, /profileTemplate/);
   assert.match(source, /restricted-chrome/);
+  assert.match(source, /browser-session/);
+  assert.match(source, /userDataDir/);
   assert.match(source, /Edit saved/);
   assert.match(source, /profileValidate/);
   assert.match(source, /Save changes/);
