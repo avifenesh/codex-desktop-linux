@@ -677,8 +677,19 @@ test("approval renderer formats agent workspace params without affecting generic
   const patched = applyAgentWorkspaceApprovalRenderingPatch(syntheticComposerBundle());
   assert.match(patched, /codexLinuxAgentWorkspaceApprovalEntries/);
   assert.match(patched, /Hidden workspace acknowledged/);
-  assert.match(patched, /return t\?\?codexLinuxAgentWorkspaceApprovalEntries\(e\)\?\?\(/);
+  assert.match(patched, /let n=codexLinuxAgentWorkspaceApprovalEntries\(e\);return n\?\?t\?\?\(/);
   assert.equal(applyAgentWorkspaceApprovalRenderingPatch(patched), patched);
+  const stalePatched = patched
+    .replace("if(params.params&&typeof params.params==\"object\"&&!Array.isArray(params.params))params=params.params;\n", "")
+    .replace(
+      "let n=codexLinuxAgentWorkspaceApprovalEntries(e);return n??t??(",
+      "return t??codexLinuxAgentWorkspaceApprovalEntries(e)??(",
+    );
+  assert.match(applyAgentWorkspaceApprovalRenderingPatch(stalePatched), /if\(params\.params&&typeof params\.params=="object"/);
+  assert.match(
+    applyAgentWorkspaceApprovalRenderingPatch(stalePatched),
+    /let n=codexLinuxAgentWorkspaceApprovalEntries\(e\);return n\?\?t\?\?\(/,
+  );
 
   const check = spawnSync(process.execPath, ["--check"], {
     encoding: "utf8",
@@ -718,6 +729,24 @@ test("approval renderer formats agent workspace params without affecting generic
   assert.equal(rows.find((row) => row.displayName === "Command").value, 'python3 -c "print(1)"');
   assert.equal(rows.find((row) => row.displayName === "Network").value, "local_only (localhost:3000)");
   assert.equal(rows.find((row) => row.displayName === "Preview only").value, "Yes");
+
+  const explicitDisplayRows = sandbox.render(
+    {
+      params: {
+        action: "workspaceOpenProfile",
+        profileId: "desktop-qa",
+        runSetup: true,
+        startupWaitWindow: true,
+        ackHiddenWorkspace: true,
+      },
+    },
+    [{ name: "params", displayName: "Params", value: { raw: "json" } }],
+  );
+  assert.deepEqual(
+    Array.from(explicitDisplayRows, (row) => row.displayName),
+    ["Action", "Profile", "Run setup", "Wait for startup window", "Hidden workspace acknowledged"],
+  );
+  assert.equal(explicitDisplayRows.find((row) => row.displayName === "Action").value, "workspaceOpenProfile");
 
   const genericRows = sandbox.render({ query: "abc" }, null);
   assert.deepEqual(

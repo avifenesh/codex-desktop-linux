@@ -1357,9 +1357,11 @@ function agentWorkspaceApprovalEntriesHelperSource() {
   return `
 function codexLinuxAgentWorkspaceApprovalEntries(params){
   if(!params||typeof params!="object"||Array.isArray(params))return null;
+  if(params.params&&typeof params.params=="object"&&!Array.isArray(params.params))params=params.params;
   const keys=Object.keys(params);
   const marker=new Set(["acknowledge_hidden_workspace","acknowledge_unenforced_policy","ackHiddenWorkspace","ackUnenforcedPolicy","run_setup","runSetup","startup_wait_window","startupWaitWindow","startup_screenshot_window","startupScreenshotWindow","wait_window","waitWindow","screenshot_window","screenshotWindow","kill_on_timeout","killOnTimeout","timeout_ms","timeoutMs","tail_bytes","tailBytes","observe_screenshot","observeScreenshot","include_hidden","includeHidden","events_tail","eventsTail","cleanup_id","cleanupId","user_data_dir","userDataDir","browser_path","browserPath","host_path","hostPath","mounts","network","setup_commands","setupCommands","startup_apps","startupApps","require_enforced_policy","requireEnforcedPolicy","dry_run","dryRun","replace","purpose"]);
-  const looksLikeAgentWorkspace=keys.some(key=>marker.has(key))||(Array.isArray(params.command)&&keys.some(key=>["id","profile","cwd","name","timeout_ms","timeoutMs","tail_bytes","tailBytes","kill_on_timeout","killOnTimeout","wait_window","waitWindow","screenshot_window","screenshotWindow"].includes(key)))||(params.profile&&typeof params.profile=="object"&&!Array.isArray(params.profile));
+  const action=typeof params.action=="string"?params.action:"";
+  const looksLikeAgentWorkspace=/^(workspace|profile)/i.test(action)||keys.some(key=>marker.has(key))||(Array.isArray(params.command)&&keys.some(key=>["id","profile","cwd","name","timeout_ms","timeoutMs","tail_bytes","tailBytes","kill_on_timeout","killOnTimeout","wait_window","waitWindow","screenshot_window","screenshotWindow"].includes(key)))||(params.profile&&typeof params.profile=="object"&&!Array.isArray(params.profile));
   if(!looksLikeAgentWorkspace)return null;
   const rows=[];
   const consumed=new Set();
@@ -1368,6 +1370,7 @@ function codexLinuxAgentWorkspaceApprovalEntries(params){
     if(value===void 0||value===null||value===""||(Array.isArray(value)&&value.length===0))return;
     rows.push({name,displayName,value:codexLinuxAgentWorkspaceApprovalValue(value)});
   };
+  add("action",action,"Action");
   const profile=params.profile&&typeof params.profile=="object"&&!Array.isArray(params.profile)?params.profile:null;
   if(profile){
     add("profile",profile.id||"(inline profile)","Profile");
@@ -1438,22 +1441,34 @@ function codexLinuxAgentWorkspaceApprovalQuote(value){
 }
 
 function applyAgentWorkspaceApprovalRenderingPatch(currentSource) {
+  const needle =
+    "function sU(e,t){return t??(e==null?[]:Object.entries(e).map(([e,t])=>({name:e,value:t,displayName:(0,YH.default)(e.trim())})))}";
+  const patchedNeedle = needle.replace(
+    "return t??(",
+    "let n=codexLinuxAgentWorkspaceApprovalEntries(e);return n??t??(",
+  );
+
   if (currentSource.includes("codexLinuxAgentWorkspaceApprovalEntries")) {
+    const helperStart = currentSource.indexOf("function codexLinuxAgentWorkspaceApprovalEntries(params){");
+    const nextFunction = helperStart < 0 ? -1 : currentSource.indexOf("function cU", helperStart);
+    if (helperStart >= 0) {
+      const replaceEnd = nextFunction > helperStart ? nextFunction : currentSource.length;
+      const prefix = currentSource.slice(0, helperStart);
+      const helper = prefix.endsWith("\n")
+        ? agentWorkspaceApprovalEntriesHelperSource().replace(/^\n/, "")
+        : agentWorkspaceApprovalEntriesHelperSource();
+      return `${prefix}${helper}${patchedNeedle}${currentSource.slice(replaceEnd)}`;
+    }
     return currentSource;
   }
 
-  const needle =
-    "function sU(e,t){return t??(e==null?[]:Object.entries(e).map(([e,t])=>({name:e,value:t,displayName:(0,YH.default)(e.trim())})))}";
   if (!currentSource.includes(needle)) {
     return currentSource;
   }
 
   return currentSource.replace(
     needle,
-    `${agentWorkspaceApprovalEntriesHelperSource()}${needle.replace(
-      "return t??(",
-      "return t??codexLinuxAgentWorkspaceApprovalEntries(e)??(",
-    )}`,
+    `${agentWorkspaceApprovalEntriesHelperSource()}${patchedNeedle}`,
   );
 }
 
