@@ -134,6 +134,15 @@ function parseProfile(value){
   }
 }
 
+function responseOk(response){
+  return response?.ok!==false&&response?.json?.ok!==false;
+}
+
+function profileFromResponse(response){
+  var candidate=response?.json?.profile??response?.json;
+  return responseOk(response)&&candidate&&typeof candidate==="object"&&!Array.isArray(candidate)&&typeof candidate.id==="string"?candidate:null;
+}
+
 function defaultProfile(){
   return {
     id:"desktop-qa",
@@ -526,7 +535,7 @@ function AgentWorkspacesSettings(){
     }
     if(!profileId)return;
     callAgentWorkspace("profileGet",{profileId:profileId}).then(function(response){
-      var loaded=response?.json?.profile??response?.json;
+      var loaded=profileFromResponse(response);
       if(loaded)setProfileJson(pretty(loaded));
     });
   }
@@ -553,7 +562,7 @@ function AgentWorkspacesSettings(){
   async function createRestrictedChromeProfile(){
     var id=uniqueProfileId("restricted-chrome");
     var response=await callAgentWorkspace("profileTemplate",{templateKind:"restricted-chrome",profileId:id});
-    var template=response?.json?.profile??response?.json;
+    var template=profileFromResponse(response);
     if(template){
       setFormMode("create");
       setSelectedProfileId("");
