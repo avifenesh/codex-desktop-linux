@@ -23,6 +23,7 @@ const {
   SETTINGS_SLUG,
   agentWorkspaceConversationRuntimeSource,
   applyAgentWorkspaceConversationViewPatch,
+  applyAgentWorkspaceApprovalRenderingPatch,
   applyAgentWorkspaceMainBridgePatch,
   applyAgentWorkspaceSettingsIndexPatch,
   applyAgentWorkspaceSettingsPagePatch,
@@ -179,6 +180,10 @@ function syntheticAppMainRouteRegistry() {
   ].join("");
 }
 
+function syntheticComposerBundle() {
+  return "const YH={default:e=>e};function sU(e,t){return t??(e==null?[]:Object.entries(e).map(([e,t])=>({name:e,value:t,displayName:(0,YH.default)(e.trim())})))}";
+}
+
 function writeSyntheticExtractedApp(root) {
   const buildDir = path.join(root, ".vite", "build");
   const assetsDir = path.join(root, "webview", "assets");
@@ -191,6 +196,7 @@ function writeSyntheticExtractedApp(root) {
   fs.writeFileSync(path.join(assetsDir, "settings-page-test.js"), syntheticSettingsPage());
   fs.writeFileSync(path.join(assetsDir, "index-test.js"), syntheticIndex());
   fs.writeFileSync(path.join(assetsDir, "local-conversation-thread-test.js"), "let thread=1;");
+  fs.writeFileSync(path.join(assetsDir, "composer-test.js"), syntheticComposerBundle());
   fs.writeFileSync(path.join(assetsDir, "chunk-test.js"), "export function s(e){return e}");
   fs.writeFileSync(path.join(assetsDir, "react-test.js"), 'import{s}from"./chunk-test.js";/* react.transitional.element */export{ReactFactory as t};function ReactFactory(){return{createElement(){return{}},useState(){return[null,()=>{}]},useCallback(e){return e},useEffect(){}}}');
   fs.writeFileSync(path.join(assetsDir, "jsx-runtime-test.js"), "/* react.transitional.element */export{j as t};function j(){return{jsx(){},jsxs(){}}}");
@@ -392,6 +398,7 @@ test("agent-workspace feature exposes optional bridge and settings descriptors w
         ["feature:agent-workspace:main-bridge", "main-bundle", "optional"],
         ["feature:agent-workspace:settings-page", "extracted-app", "optional"],
         ["feature:agent-workspace:conversation-view", "webview-asset", "optional"],
+        ["feature:agent-workspace:approval-rendering", "webview-asset", "optional"],
       ],
     );
   });
@@ -664,6 +671,59 @@ test("conversation visibility runtime is valid script and idempotent", () => {
   const patched = applyAgentWorkspaceConversationViewPatch("let thread=1;");
   assert.match(patched, new RegExp(CONVERSATION_RUNTIME_VERSION));
   assert.equal(applyAgentWorkspaceConversationViewPatch(patched), patched);
+});
+
+test("approval renderer formats agent workspace params without affecting generic MCP params", () => {
+  const patched = applyAgentWorkspaceApprovalRenderingPatch(syntheticComposerBundle());
+  assert.match(patched, /codexLinuxAgentWorkspaceApprovalEntries/);
+  assert.match(patched, /Hidden workspace acknowledged/);
+  assert.match(patched, /return t\?\?codexLinuxAgentWorkspaceApprovalEntries\(e\)\?\?\(/);
+  assert.equal(applyAgentWorkspaceApprovalRenderingPatch(patched), patched);
+
+  const check = spawnSync(process.execPath, ["--check"], {
+    encoding: "utf8",
+    input: patched,
+  });
+  assert.equal(check.status, 0, check.stderr || check.stdout);
+
+  const sandbox = {};
+  vm.runInNewContext(`${patched};this.render=sU;`, sandbox);
+
+  const rows = sandbox.render(
+    {
+      id: "mcp-visible",
+      profile: "dogfood-network-disabled",
+      command: ["python3", "-c", "print(1)"],
+      network: { mode: "local_only", allow_hosts: ["localhost:3000"] },
+      dry_run: true,
+      timeout_ms: 10000,
+      kill_on_timeout: true,
+      acknowledge_hidden_workspace: true,
+    },
+    null,
+  );
+  assert.deepEqual(
+    Array.from(rows, (row) => row.displayName),
+    [
+      "Profile",
+      "Workspace",
+      "Command",
+      "Network",
+      "Preview only",
+      "Timeout",
+      "Kill on timeout",
+      "Hidden workspace acknowledged",
+    ],
+  );
+  assert.equal(rows.find((row) => row.displayName === "Command").value, 'python3 -c "print(1)"');
+  assert.equal(rows.find((row) => row.displayName === "Network").value, "local_only (localhost:3000)");
+  assert.equal(rows.find((row) => row.displayName === "Preview only").value, "Yes");
+
+  const genericRows = sandbox.render({ query: "abc" }, null);
+  assert.deepEqual(
+    Array.from(genericRows, (row) => ({ name: row.name, value: row.value, displayName: row.displayName })),
+    [{ name: "query", value: "abc", displayName: "query" }],
+  );
 });
 
 test("conversation visibility runtime renders and stops an active workspace", async () => {
@@ -984,9 +1044,11 @@ test("agent-workspace feature participates in ASAR patching and reports", () => 
           fs.readFileSync(path.join(assetsDir, "local-conversation-thread-test.js"), "utf8"),
           new RegExp(CONVERSATION_RUNTIME_VERSION),
         );
+        assert.match(fs.readFileSync(path.join(assetsDir, "composer-test.js"), "utf8"), /codexLinuxAgentWorkspaceApprovalEntries/);
         assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:main-bridge" && patch.status === "applied"));
         assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:settings-page" && patch.status === "applied"));
         assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:conversation-view" && patch.status === "applied"));
+        assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:approval-rendering" && patch.status === "applied"));
       } finally {
         fs.rmSync(tempApp, { recursive: true, force: true });
       }
@@ -1001,6 +1063,7 @@ test("feature patch list is intentionally small", () => {
       ["main-bridge", "main-bundle"],
       ["settings-page", "extracted-app"],
       ["conversation-view", "webview-asset"],
+      ["approval-rendering", "webview-asset"],
     ],
   );
 });

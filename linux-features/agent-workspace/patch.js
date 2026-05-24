@@ -1353,6 +1353,110 @@ function applyAgentWorkspaceSettingsPagePatch(currentSource) {
   return patchedSource;
 }
 
+function agentWorkspaceApprovalEntriesHelperSource() {
+  return `
+function codexLinuxAgentWorkspaceApprovalEntries(params){
+  if(!params||typeof params!="object"||Array.isArray(params))return null;
+  const keys=Object.keys(params);
+  const marker=new Set(["acknowledge_hidden_workspace","acknowledge_unenforced_policy","ackHiddenWorkspace","ackUnenforcedPolicy","run_setup","runSetup","startup_wait_window","startupWaitWindow","startup_screenshot_window","startupScreenshotWindow","wait_window","waitWindow","screenshot_window","screenshotWindow","kill_on_timeout","killOnTimeout","timeout_ms","timeoutMs","tail_bytes","tailBytes","observe_screenshot","observeScreenshot","include_hidden","includeHidden","events_tail","eventsTail","cleanup_id","cleanupId","user_data_dir","userDataDir","browser_path","browserPath","host_path","hostPath","mounts","network","setup_commands","setupCommands","startup_apps","startupApps","require_enforced_policy","requireEnforcedPolicy","dry_run","dryRun","replace","purpose"]);
+  const looksLikeAgentWorkspace=keys.some(key=>marker.has(key))||(Array.isArray(params.command)&&keys.some(key=>["id","profile","cwd","name","timeout_ms","timeoutMs","tail_bytes","tailBytes","kill_on_timeout","killOnTimeout","wait_window","waitWindow","screenshot_window","screenshotWindow"].includes(key)))||(params.profile&&typeof params.profile=="object"&&!Array.isArray(params.profile));
+  if(!looksLikeAgentWorkspace)return null;
+  const rows=[];
+  const consumed=new Set();
+  const add=(name,value,displayName)=>{
+    consumed.add(name);
+    if(value===void 0||value===null||value===""||(Array.isArray(value)&&value.length===0))return;
+    rows.push({name,displayName,value:codexLinuxAgentWorkspaceApprovalValue(value)});
+  };
+  const profile=params.profile&&typeof params.profile=="object"&&!Array.isArray(params.profile)?params.profile:null;
+  if(profile){
+    add("profile",profile.id||"(inline profile)","Profile");
+    add("description",profile.description,"Description");
+    add("cwd",profile.cwd,"Working folder");
+    add("network",profile.network,"Network");
+    add("mounts",Array.isArray(profile.mounts)?profile.mounts.length+" mount"+(profile.mounts.length===1?"":"s"):null,"File access");
+    add("setup_commands",profile.setup_commands||profile.setupCommands,"Setup commands");
+    add("startup_apps",profile.startup_apps||profile.startupApps,"Startup apps");
+    add("require_enforced_policy",profile.require_enforced_policy??profile.requireEnforcedPolicy,"Require enforcement");
+  }else{
+    add("profile",params.profile??params.profile_id??params.profileId,"Profile");
+  }
+  add("id",params.id??params.workspace_id??params.workspaceId,"Workspace");
+  add("name",params.name,"App name");
+  add("purpose",params.purpose,"Purpose");
+  add("command",params.command,"Command");
+  add("cwd",params.cwd,"Working folder");
+  add("network",params.network,"Network");
+  add("mounts",Array.isArray(params.mounts)?params.mounts.length+" mount"+(params.mounts.length===1?"":"s"):params.mounts,"File access");
+  add("setup_commands",params.setup_commands??params.setupCommands,"Setup commands");
+  add("startup_apps",params.startup_apps??params.startupApps,"Startup apps");
+  add("host_path",params.host_path??params.hostPath,"Host path");
+  add("browser_path",params.browser_path??params.browserPath,"Browser");
+  add("user_data_dir",params.user_data_dir??params.userDataDir,"Browser data");
+  add("dry_run",params.dry_run??params.dryRun,"Preview only");
+  add("replace",params.replace,"Overwrite saved profile");
+  add("run_setup",params.run_setup??params.runSetup,"Run setup");
+  add("startup_wait_window",params.startup_wait_window??params.startupWaitWindow,"Wait for startup window");
+  add("startup_screenshot_window",params.startup_screenshot_window??params.startupScreenshotWindow,"Screenshot startup window");
+  add("wait_window",params.wait_window??params.waitWindow,"Wait for window");
+  add("screenshot_window",params.screenshot_window??params.screenshotWindow,"Screenshot window");
+  add("observe_screenshot",params.observe_screenshot??params.observeScreenshot,"Capture screenshot");
+  add("include_hidden",params.include_hidden??params.includeHidden,"Include hidden windows");
+  add("events_tail",params.events_tail??params.eventsTail,"Recent events");
+  add("timeout_ms",params.timeout_ms!=null?params.timeout_ms+" ms":params.timeoutMs!=null?params.timeoutMs+" ms":null,"Timeout");
+  add("tail_bytes",params.tail_bytes??params.tailBytes,"Log tail");
+  add("kill_on_timeout",params.kill_on_timeout??params.killOnTimeout,"Kill on timeout");
+  add("acknowledge_hidden_workspace",params.acknowledge_hidden_workspace??params.ackHiddenWorkspace,"Hidden workspace acknowledged");
+  add("acknowledge_unenforced_policy",params.acknowledge_unenforced_policy??params.ackUnenforcedPolicy,"Unenforced policy acknowledged");
+  const aliases=new Set(["profile_id","profileId","workspace_id","workspaceId","timeoutMs","tailBytes","killOnTimeout","ackHiddenWorkspace","ackUnenforcedPolicy","dryRun","runSetup","startupWaitWindow","startupScreenshotWindow","waitWindow","screenshotWindow","observeScreenshot","includeHidden","eventsTail","hostPath","browserPath","userDataDir","setupCommands","startupApps","requireEnforcedPolicy"]);
+  const extra=keys.filter(key=>!consumed.has(key)&&!aliases.has(key)&&params[key]!=null);
+  if(extra.length>0)rows.push({name:"other_options",displayName:"Other options",value:extra.join(", ")});
+  return rows.length>0?rows:null;
+}
+function codexLinuxAgentWorkspaceApprovalValue(value){
+  if(typeof value=="boolean")return value?"Yes":"No";
+  if(typeof value=="number")return String(value);
+  if(typeof value=="string")return value;
+  if(Array.isArray(value)){
+    if(value.every(item=>["string","number","boolean"].includes(typeof item)))return codexLinuxAgentWorkspaceApprovalCommand(value);
+    if(value.every(item=>item&&typeof item=="object"&&Array.isArray(item.command)))return value.map(item=>item.name||codexLinuxAgentWorkspaceApprovalCommand(item.command)).join("; ");
+    return value.length+" item"+(value.length===1?"":"s");
+  }
+  if(value&&typeof value=="object"){
+    if(typeof value.mode=="string")return value.allow_hosts&&Array.isArray(value.allow_hosts)&&value.allow_hosts.length>0?value.mode+" ("+value.allow_hosts.join(", ")+")":value.mode;
+    const keys=Object.keys(value).filter(key=>value[key]!=null);
+    return keys.length>0?keys.join(", "):"configured";
+  }
+  return String(value);
+}
+function codexLinuxAgentWorkspaceApprovalCommand(command){
+  return command.map(part=>codexLinuxAgentWorkspaceApprovalQuote(String(part))).join(" ");
+}
+function codexLinuxAgentWorkspaceApprovalQuote(value){
+  return /^[A-Za-z0-9_./:=@%+-]+$/.test(value)?value:JSON.stringify(value);
+}`;
+}
+
+function applyAgentWorkspaceApprovalRenderingPatch(currentSource) {
+  if (currentSource.includes("codexLinuxAgentWorkspaceApprovalEntries")) {
+    return currentSource;
+  }
+
+  const needle =
+    "function sU(e,t){return t??(e==null?[]:Object.entries(e).map(([e,t])=>({name:e,value:t,displayName:(0,YH.default)(e.trim())})))}";
+  if (!currentSource.includes(needle)) {
+    return currentSource;
+  }
+
+  return currentSource.replace(
+    needle,
+    `${agentWorkspaceApprovalEntriesHelperSource()}${needle.replace(
+      "return t??(",
+      "return t??codexLinuxAgentWorkspaceApprovalEntries(e)??(",
+    )}`,
+  );
+}
+
 function patchAgentWorkspaceRouteAssets(extractedDir) {
   const assetsDir = webviewAssetsDir(extractedDir);
   const candidates = fs
@@ -1466,6 +1570,16 @@ module.exports = {
       skipDescription: "agent workspace conversation visibility patch",
       apply: applyAgentWorkspaceConversationViewPatch,
     },
+    {
+      id: "approval-rendering",
+      phase: "webview-asset",
+      order: 20_830,
+      ciPolicy: "optional",
+      pattern: /^composer-.*\.js$/,
+      missingDescription: "composer bundle",
+      skipDescription: "agent workspace approval rendering patch",
+      apply: applyAgentWorkspaceApprovalRenderingPatch,
+    },
   ],
   CONVERSATION_RUNTIME_VERSION,
   SETTINGS_ASSET,
@@ -1478,6 +1592,7 @@ module.exports = {
   applyAgentWorkspaceSettingsPagePatch,
   applyAgentWorkspaceSettingsSectionsPatch,
   applyAgentWorkspaceSettingsSharedPatch,
+  applyAgentWorkspaceApprovalRenderingPatch,
   buildAgentWorkspaceSettingsSource,
   patchAgentWorkspaceSettingsAssets,
 };
