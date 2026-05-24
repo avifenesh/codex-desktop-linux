@@ -372,6 +372,10 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   assert.match(patched, /\.local`\,`bin`\,`agent-workspace-linux`/);
   assert.match(patched, /CODEX_AGENT_WORKSPACE_BIN/);
   assert.match(patched, /startsWith\(`~\/`\)/);
+  assert.match(patched, /case`mcpConfig`/);
+  assert.match(patched, /config\.toml/);
+  assert.match(patched, /--permissions/);
+  assert.match(patched, /__codexMcpConfig\?\.permissions_path/);
   assert.match(patched, /case`profileValidate`/);
   assert.match(patched, /\[`profile`,`validate`,`--json`,__codexTempPath\]/);
   assert.match(patched, /case`profileTemplate`/);
@@ -405,6 +409,10 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.equal(check.status, 0, check.stderr || check.stdout);
   assert.match(source, /export\{AgentWorkspacesSettings,AgentWorkspacesSettings as default\}/);
   assert.match(source, /function resultSummary/);
+  assert.match(source, /function mcpConfigView/);
+  assert.match(source, /MCP permissions/);
+  assert.match(source, /MCP locked/);
+  assert.match(source, /callAgentWorkspace\("mcpConfig"\)/);
   assert.match(source, /function responseOk/);
   assert.match(source, /function profileFromResponse/);
   assert.match(source, /function cleanupProcessActionCount/);

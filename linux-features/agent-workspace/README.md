@@ -31,6 +31,14 @@ lifecycle actions needed by the UI. The default command is
 - the settings-page command field, persisted as
   `codex-linux-agent-workspace-command`
 
+On each bridge call, the feature inspects the local Codex MCP config for
+`mcp_servers.agent-workspace-linux`. If that server is configured with
+`--permissions PATH`, the settings page shows the MCP ceiling state and the
+bridge prepends the same `--permissions PATH` to CLI profile/workspace actions.
+That keeps app-driven actions inside the same spawn-time ceiling used by
+auto-loop agents and other MCP hosts. If no MCP permission file is configured,
+the page stays in the existing app-owned permission mode.
+
 The first conversation-view slice shows a compact live workspace panel when an
 agent workspace is active. It polls `workspace observe --screenshot` through the
 allowlisted bridge, renders the latest screenshot in the conversation surface,
