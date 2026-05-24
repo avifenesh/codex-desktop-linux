@@ -165,9 +165,14 @@ function applyAgentWorkspaceSettingsSharedPatch(currentSource) {
     if (!patchedSource.includes(sectionNeedle)) {
       throw new Error("could not add agent workspace section title");
     }
+    const sectionRendererMatch = patchedSource.match(
+      /case`worktrees`:\{[\s\S]*?\(0,([A-Za-z_$][\w$]*)\.jsx\)\(([A-Za-z_$][\w$]*),\{id:`settings\.section\.worktrees`/,
+    );
+    const jsxAlias = sectionRendererMatch?.[1] ?? "d";
+    const messageComponent = sectionRendererMatch?.[2] ?? "n";
     patchedSource = patchedSource.replace(
       sectionNeedle,
-      `case\`${SETTINGS_SLUG}\`:{return (0,d.jsx)(n,{id:\`settings.section.${SETTINGS_SLUG}\`,defaultMessage:\`Agent Workspaces\`,description:\`Title for Agent Workspaces settings section\`})}${sectionNeedle}`,
+      `case\`${SETTINGS_SLUG}\`:{return (0,${jsxAlias}.jsx)(${messageComponent},{id:\`settings.section.${SETTINGS_SLUG}\`,defaultMessage:\`Agent Workspaces\`,description:\`Title for Agent Workspaces settings section\`})}${sectionNeedle}`,
     );
   }
   return patchedSource;
@@ -188,17 +193,20 @@ function applyAgentWorkspaceSettingsIndexPatch(currentSource) {
     );
   }
 
-  if (!new RegExp(`[,{]"${SETTINGS_SLUG}":[A-Za-z_$][\\w$]*,"general-settings":`).test(patchedSource)) {
-    const iconPattern = /([,{])"general-settings":([A-Za-z_$][\w$]*),/;
-    if (!iconPattern.test(patchedSource)) {
-      throw new Error("could not add agent workspace settings icon");
-    }
+  const iconPattern = /([,{])"general-settings":([A-Za-z_$][\w$]*),/;
+  if (
+    !new RegExp(`[,{]"${SETTINGS_SLUG}":[A-Za-z_$][\\w$]*,"general-settings":`).test(patchedSource) &&
+    iconPattern.test(patchedSource)
+  ) {
     patchedSource = patchedSource.replace(
       iconPattern,
       (_match, prefix, icon) => `${prefix}"${SETTINGS_SLUG}":${icon},"general-settings":${icon},`,
     );
   }
 
+  const hasLegacyVisibilityGate =
+    patchedSource.includes("case`appearance`:case`git-settings`:case`worktrees`:case`local-environments`:") ||
+    patchedSource.includes("case`local-environments`:case`worktrees`:case`environments`:");
   patchedSource = patchedSource.replaceAll(
     "`local-environments`,`worktrees`",
     "`local-environments`,`agent-workspaces`,`worktrees`",
@@ -216,11 +224,45 @@ function applyAgentWorkspaceSettingsIndexPatch(currentSource) {
     );
   }
 
-  if (!patchedSource.includes(`case\`${SETTINGS_SLUG}\``)) {
+  if (hasLegacyVisibilityGate && !patchedSource.includes(`case\`${SETTINGS_SLUG}\``)) {
     throw new Error("could not add agent workspace settings visibility");
   }
 
   return patchedSource;
+}
+
+function patchAgentWorkspaceRouteAssets(extractedDir) {
+  const assetsDir = webviewAssetsDir(extractedDir);
+  const candidates = fs
+    .readdirSync(assetsDir)
+    .filter((name) => /^(app-main|index)-.*\.js$/.test(name))
+    .sort();
+  let lastError = null;
+  const patches = [];
+
+  for (const candidate of candidates) {
+    const filePath = path.join(assetsDir, candidate);
+    const currentSource = fs.readFileSync(filePath, "utf8");
+    if (!currentSource.includes(SETTINGS_ASSET) && !currentSource.includes('"general-settings":(0,')) {
+      continue;
+    }
+
+    try {
+      patches.push({
+        filePath,
+        currentSource,
+        patchedSource: applyAgentWorkspaceSettingsIndexPatch(currentSource),
+      });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (patches.length === 0) {
+    throw lastError ?? new Error("could not find webview settings route bundle");
+  }
+
+  return patches;
 }
 
 function patchAgentWorkspaceSettingsAssets(extractedDir) {
@@ -242,12 +284,7 @@ function patchAgentWorkspaceSettingsAssets(extractedDir) {
         applyAgentWorkspaceSettingsSharedPatch,
         "settings shared bundle",
       ),
-      ...patchRequiredAssets(
-        extractedDir,
-        /^index-.*\.js$/,
-        applyAgentWorkspaceSettingsIndexPatch,
-        "webview index bundle",
-      ),
+      ...patchAgentWorkspaceRouteAssets(extractedDir),
     ];
 
     fs.writeFileSync(settingsAsset.filePath, settingsAsset.source, "utf8");
