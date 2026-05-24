@@ -486,9 +486,15 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /export\{AgentWorkspacesSettings,AgentWorkspacesSettings as default\}/);
   assert.match(source, /function resultSummary/);
   assert.match(source, /function mcpConfigView/);
+  assert.match(source, /function permissionsPathFromArgs/);
+  assert.match(source, /function mcpConfigFromResponses/);
   assert.match(source, /MCP permissions/);
   assert.match(source, /MCP locked/);
+  assert.match(source, /Inspecting MCP permissions/);
+  assert.match(source, /No MCP permission ceiling detected/);
   assert.match(source, /callAgentWorkspace\("mcpConfig"\)/);
+  assert.match(source, /MCP permission ceiling is active for workspace actions/);
+  assert.match(source, /h\("details",[\s\S]*?\)\s*,\s*mcpConfig\?mcpConfigView\(mcpConfig\):null/);
   assert.match(source, /function responseOk/);
   assert.match(source, /function profileFromResponse/);
   assert.match(source, /function cleanupProcessActionCount/);
@@ -585,6 +591,7 @@ test("conversation visibility runtime is valid script and idempotent", () => {
   assert.match(runtime, /data_url/);
   assert.match(runtime, /function policySummary/);
   assert.match(runtime, /function appSummary/);
+  assert.match(runtime, /function inSettingsView/);
   assert.match(runtime, /profile /);
   assert.match(runtime, /network /);
   assert.match(runtime, /mount/);
@@ -713,6 +720,68 @@ test("conversation visibility runtime renders and stops an active workspace", as
     "cleanup action should be sent for revoked workspace",
   );
   await waitFor(() => panel.hidden === true, "workspace panel should hide after revoke");
+});
+
+test("conversation visibility runtime hides on settings pages", async () => {
+  const document = createFakeDocument();
+  document.body.textContent = "Back to app\nApp\nGeneral\nAppearance\nConnections\nAgent Workspaces";
+  const listeners = new Map();
+  const activeStatus = { id: "qa-live", ready: true, display: ":90", purpose: "QA live view", apps: [] };
+  const window = {
+    document,
+    addEventListener(type, callback) {
+      const callbacks = listeners.get(type) || [];
+      callbacks.push(callback);
+      listeners.set(type, callbacks);
+    },
+    dispatchEvent(event) {
+      const payload = event.detail;
+      if (payload?.type !== "fetch") return true;
+      const params = JSON.parse(payload.body);
+      const response =
+        params.action === "workspaceList"
+          ? { json: { workspaces: [{ id: "qa-live", running: true, status: activeStatus }] } }
+          : { json: { status: activeStatus, screenshot: { data_url: "data:image/png;base64,abc" } } };
+      setTimeout(() => {
+        for (const callback of listeners.get("message") || []) {
+          callback({
+            data: {
+              type: "fetch-response",
+              requestId: payload.requestId,
+              responseType: "success",
+              status: 200,
+              bodyJsonString: JSON.stringify(response),
+            },
+          });
+        }
+      }, 0);
+      return true;
+    },
+  };
+  const context = vm.createContext({
+    CustomEvent: class CustomEvent {
+      constructor(type, options) {
+        this.type = type;
+        this.detail = options?.detail;
+      }
+    },
+    clearTimeout,
+    console,
+    document,
+    globalThis: null,
+    setInterval() {
+      return 1;
+    },
+    setTimeout,
+    window,
+  });
+  context.globalThis = context;
+
+  vm.runInContext(agentWorkspaceConversationRuntimeSource(), context);
+  await waitFor(
+    () => document.body.querySelector(".codex-linux-agent-workspace-panel")?.hidden === true,
+    "workspace panel should stay hidden in settings",
+  );
 });
 
 test("settings asset patches add navigation, route, visibility, and title", () => {

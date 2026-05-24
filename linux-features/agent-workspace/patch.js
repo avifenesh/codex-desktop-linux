@@ -62,7 +62,7 @@ function applyAgentWorkspaceMainBridgePatch(currentSource) {
   );
 }
 
-const CONVERSATION_RUNTIME_VERSION = "agent-workspace-conversation-v1";
+const CONVERSATION_RUNTIME_VERSION = "agent-workspace-conversation-v2";
 
 function agentWorkspaceConversationRuntimeSource() {
   return [
@@ -82,11 +82,12 @@ function agentWorkspaceConversationRuntimeSource() {
     `function appSummary(apps){let running=runningApps(apps),count=running.length;if(count===0)return"0 apps";let names=running.map(appLabel).filter(Boolean).slice(0,3).join(", "),extra=count>3?" +"+(count-3):"";return count+" app"+(count===1?"":"s")+(names?": "+names+extra:"")}`,
     `function policySummary(status){let policy=status?.applied_policy||{},profile=shortText(status?.profile_id)||shortText(policy?.profile_id),network=shortText(policy?.network?.mode),mountCount=Array.isArray(policy?.mounts)?policy.mounts.length:0,parts=[];profile&&parts.push("profile "+profile);network&&network!=="inherit_host"&&parts.push("network "+network.replaceAll("_","-"));mountCount>0&&parts.push(mountCount+" mount"+(mountCount===1?"":"s"));return parts.join(" - ")}`,
     `function statusText(status,apps){let display=status?.display||"";return [display,policySummary(status),appSummary(apps)].filter(Boolean).join(" - ")}`,
+    `function inSettingsView(){let text=String(document.body?.innerText||document.body?.textContent||"").trim();return /^Back to app\\s+App\\s+General\\s+Appearance\\s+Connections\\b/.test(text)}`,
     `function ensureUi(){if(state.panel||typeof document==="undefined"||!document.body)return;let style=document.getElementById("codex-linux-agent-workspace-style");if(!style){style=document.createElement("style");style.id="codex-linux-agent-workspace-style";style.textContent=".codex-linux-agent-workspace-panel{position:fixed;right:18px;bottom:18px;width:min(420px,calc(100vw - 36px));max-height:min(440px,calc(100vh - 36px));z-index:2147482600;border:1px solid var(--token-border-default,rgba(120,120,120,.35));border-radius:8px;background:var(--token-bg-primary,#fff);box-shadow:0 16px 42px rgba(0,0,0,.22);overflow:hidden;color:var(--token-text-primary,#111);font:12px system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}.codex-linux-agent-workspace-panel[hidden]{display:none}.codex-linux-agent-workspace-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 10px;border-bottom:1px solid var(--token-border-default,rgba(120,120,120,.24))}.codex-linux-agent-workspace-title{min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.codex-linux-agent-workspace-dot{width:9px;height:9px;border-radius:999px;background:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,.15)}.codex-linux-agent-workspace-actions{display:flex;gap:6px;flex-shrink:0}.codex-linux-agent-workspace-actions button{height:26px;border-radius:6px;border:1px solid var(--token-border-default,rgba(120,120,120,.35));background:transparent;color:inherit;padding:0 8px;cursor:pointer}.codex-linux-agent-workspace-actions button:hover{background:var(--token-main-surface-secondary,rgba(120,120,120,.10))}.codex-linux-agent-workspace-actions [data-action='revoke']{border-color:rgba(185,28,28,.35);color:#b91c1c}.codex-linux-agent-workspace-shot{display:block;width:100%;aspect-ratio:16/9;object-fit:contain;background:#111}.codex-linux-agent-workspace-empty{display:flex;align-items:center;justify-content:center;width:100%;aspect-ratio:16/9;background:linear-gradient(135deg,#151515,#262626);color:#ddd}.codex-linux-agent-workspace-meta,.codex-linux-agent-workspace-error{padding:8px 10px;color:var(--token-text-secondary,#555);border-top:1px solid var(--token-border-default,rgba(120,120,120,.2));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.codex-linux-agent-workspace-error{color:#b91c1c;white-space:normal}@media (max-width:640px){.codex-linux-agent-workspace-panel{right:10px;left:10px;bottom:10px;width:auto}.codex-linux-agent-workspace-actions button{padding:0 6px}}";document.head?.appendChild?.(style)}let panel=document.createElement("section");panel.className="codex-linux-agent-workspace-panel";panel.hidden=true;panel.innerHTML='<div class="codex-linux-agent-workspace-head"><span class="codex-linux-agent-workspace-dot" aria-hidden="true"></span><div class="codex-linux-agent-workspace-title"></div><div class="codex-linux-agent-workspace-actions"><button type="button" data-action="refresh" title="Refresh workspace view">Refresh</button><button type="button" data-action="stop" title="Stop workspace">Stop</button><button type="button" data-action="revoke" title="Stop workspace and remove its runtime files">Revoke</button></div></div><div class="codex-linux-agent-workspace-empty">No screenshot yet</div><div class="codex-linux-agent-workspace-meta"></div><div class="codex-linux-agent-workspace-error" hidden></div>';document.body.appendChild(panel);state.panel=panel;state.media=panel.querySelector(".codex-linux-agent-workspace-empty");state.title=panel.querySelector(".codex-linux-agent-workspace-title");state.meta=panel.querySelector(".codex-linux-agent-workspace-meta");state.error=panel.querySelector(".codex-linux-agent-workspace-error");state.refresh=panel.querySelector("[data-action='refresh']");state.stop=panel.querySelector("[data-action='stop']");state.revoke=panel.querySelector("[data-action='revoke']");state.refresh?.addEventListener("click",e=>{e.preventDefault();refresh(!0)});state.stop?.addEventListener("click",e=>{e.preventDefault();stopActive()});state.revoke?.addEventListener("click",e=>{e.preventDefault();revokeActive()})}`,
     `function showError(message){ensureUi();if(state.error){state.error.hidden=!message;state.error.textContent=message||""}}`,
     `function hide(){ensureUi();state.visible=false;state.activeId=null;state.lastImage="";if(state.panel)state.panel.hidden=true;showError("")}`,
     `function setImage(dataUrl){if(!state.panel)return;if(!dataUrl)return;if(dataUrl===state.lastImage)return;let img=document.createElement("img");img.className="codex-linux-agent-workspace-shot";img.alt="Agent workspace screenshot";img.src=dataUrl;state.media?.replaceWith(img);state.media=img;state.lastImage=dataUrl}`,
-    `function render(workspace,observe){ensureUi();let status=observe?.json?.status||workspace?.status||workspace?.manifest||{},apps=Array.isArray(status.apps)?status.apps:workspace?.status?.apps||[],id=workspaceId(workspace),meta=statusText(status,apps)||id;state.visible=true;state.activeId=id;if(state.panel)state.panel.hidden=false;if(state.title)state.title.textContent=workspaceLabel(workspace);if(state.meta){state.meta.textContent=meta;state.meta.title=meta}setImage(observe?.json?.screenshot?.data_url);showError("")}`,
+    `function render(workspace,observe){if(inSettingsView()){hide();return}ensureUi();let status=observe?.json?.status||workspace?.status||workspace?.manifest||{},apps=Array.isArray(status.apps)?status.apps:workspace?.status?.apps||[],id=workspaceId(workspace),meta=statusText(status,apps)||id;state.visible=true;state.activeId=id;if(state.panel)state.panel.hidden=false;if(state.title)state.title.textContent=workspaceLabel(workspace);if(state.meta){state.meta.textContent=meta;state.meta.title=meta}setImage(observe?.json?.screenshot?.data_url);showError("")}`,
     `async function activeWorkspace(){let list=await post({action:"workspaceList"},10000),error=bridgeError(list);if(error)throw Error(error);let workspaces=list?.body?.json?.workspaces||[];return workspaces.find(workspaceRunning)||null}`,
     `async function refresh(force=false){if(state.busy&&!force)return;state.busy=true;try{let workspace=await activeWorkspace();if(!workspace){hide();return}let id=workspaceId(workspace);let observe=await post({action:"workspaceObserve",workspaceId:id,observeScreenshot:true,includeHidden:true,eventsTail:8},15000),error=bridgeError(observe);if(error)throw Error(error);render(workspace,observe?.body)}catch(e){state.visible?showError(e instanceof Error?e.message:String(e)):hide()}finally{state.busy=false}}`,
     `async function stopActive(){let id=state.activeId;if(!id)return;try{let result=await post({action:"workspaceStop",workspaceId:id},15000),error=bridgeError(result);if(error){showError(error);return}}catch(e){showError(e instanceof Error?e.message:String(e));return}hide();setTimeout(()=>refresh(!0),600)}`,
@@ -417,7 +418,7 @@ function mcpConfigView(config){
   if(!config)return null;
   var locked=config.restricted===true;
   var configured=config.configured===true;
-  var label=locked?"MCP locked":configured?"MCP open":"MCP not configured";
+  var label=config.configured==null?"Checking":locked?"MCP locked":configured?"MCP open":"MCP not configured";
   var detail=config.permissions_path||config.message||config.config_path||"No permission ceiling";
   return h("div",{className:"rounded-md border border-token-border-default bg-token-bg-primary p-3 text-sm"},
     h("div",{className:"mb-1 flex items-center justify-between gap-2"},
@@ -430,6 +431,37 @@ function mcpConfigView(config){
   );
 }
 
+function permissionsPathFromArgs(args){
+  if(!Array.isArray(args))return null;
+  for(var index=0;index<args.length;index+=1){
+    var value=args[index];
+    if(value==="--permissions"&&typeof args[index+1]==="string"&&args[index+1].trim())return args[index+1].trim();
+    if(typeof value==="string"&&value.startsWith("--permissions=")){
+      var path=value.slice("--permissions=".length).trim();
+      if(path)return path;
+    }
+  }
+  return null;
+}
+
+function mcpConfigFromResponses(mcpResponse,commandResponse){
+  if(mcpResponse?.json&&typeof mcpResponse.json==="object")return mcpResponse.json;
+  var permissionsPath=permissionsPathFromArgs(commandResponse?.args);
+  if(permissionsPath)return{
+    configured:true,
+    restricted:true,
+    permissions_path:permissionsPath,
+    message:"MCP permission ceiling is active for workspace actions"
+  };
+  if(mcpResponse&&mcpResponse.ok===false)return{
+    configured:false,
+    restricted:false,
+    message:mcpResponse.message||"MCP permissions could not be inspected",
+    error:mcpResponse.message||null
+  };
+  return null;
+}
+
 function AgentWorkspacesSettings(){
   var commandState=React.useState("");
   var command=commandState[0];
@@ -440,7 +472,7 @@ function AgentWorkspacesSettings(){
   var workspaceState=React.useState([]);
   var workspaces=workspaceState[0];
   var setWorkspaces=workspaceState[1];
-  var mcpConfigState=React.useState(null);
+  var mcpConfigState=React.useState({configured:null,restricted:false,message:"Inspecting MCP permissions"});
   var mcpConfig=mcpConfigState[0];
   var setMcpConfig=mcpConfigState[1];
   var selectedState=React.useState("");
@@ -506,7 +538,8 @@ function AgentWorkspacesSettings(){
       callAgentWorkspace("profileList"),
       callAgentWorkspace("workspaceList")
     ]);
-    if(responses[0]?.json&&typeof responses[0].json==="object")setMcpConfig(responses[0].json);
+    var nextMcpConfig=mcpConfigFromResponses(responses[0],responses[2]);
+    setMcpConfig(nextMcpConfig||{configured:false,restricted:false,message:"No MCP permission ceiling detected"});
     if(Array.isArray(responses[1]?.json?.profiles))setProfiles(responses[1].json.profiles);
     if(Array.isArray(responses[2]?.json?.workspaces))setWorkspaces(responses[2].json.workspaces);
   },[callAgentWorkspace]);
@@ -806,9 +839,9 @@ function AgentWorkspacesSettings(){
           h("div",{className:"grid gap-3 border-t border-token-border-default p-3 md:grid-cols-[1fr_auto]"},
             field("Command",command,setCommand,DEFAULT_COMMAND_LABEL),
             h("div",{className:"flex items-end"},button("Save",activeAction==="doctor",saveCommand))
-          ),
-          mcpConfig?h("div",{className:"border-t border-token-border-default p-3"},mcpConfigView(mcpConfig)):null
-        )
+          )
+        ),
+        mcpConfig?mcpConfigView(mcpConfig):null
       ),
 
       h("section",{className:"flex flex-col gap-2"},
