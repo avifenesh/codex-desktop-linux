@@ -85,6 +85,40 @@ function syntheticMainBundle() {
   ].join("");
 }
 
+function buildBridgeHarness({ env = {}, globalState = new Map(), execFile } = {}) {
+  const patched = applyAgentWorkspaceMainBridgePatch(syntheticMainBundle());
+  const execCalls = [];
+  const childProcess = {
+    execFile:
+      execFile ||
+      ((command, args, options, callback) => {
+        execCalls.push({ command, args, options });
+        callback(null, '{"profiles":[]}\n', "");
+      }),
+  };
+  const sandbox = {
+    require(name) {
+      if (name === "node:child_process") return childProcess;
+      if (name === "node:fs") return fs;
+      if (name === "node:path") return path;
+      throw new Error(`unexpected require ${name}`);
+    },
+    process: { env: { ...process.env, ...env } },
+    Buffer,
+  };
+  vm.runInNewContext(`${patched};this.Host=Host;`, sandbox);
+  const host = new sandbox.Host();
+  host.globalState = {
+    get(key) {
+      return globalState.get(key);
+    },
+    set(key, value) {
+      globalState.set(key, value);
+    },
+  };
+  return { handlers: host.handlers(), execCalls };
+}
+
 function syntheticSettingsSections() {
   return "var e=`general-settings`,t={},n=[{slug:`general-settings`},{slug:`appearance`},{slug:`local-environments`},{slug:`worktrees`}];export{n,t as r,e as t};";
 }
@@ -391,6 +425,48 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   const { value, warnings } = captureWarns(() => applyAgentWorkspaceMainBridgePatch("real bundle"));
   assert.equal(value, "real bundle");
   assert.match(warnings.join("\n"), /Could not find Node module aliases/);
+});
+
+test("main bridge reads MCP permission config and applies it to CLI calls", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-agent-workspace-mcp-config-"));
+  try {
+    const codexHome = path.join(tempDir, "codex-home");
+    const permissionsPath = path.join(tempDir, "permissions.json");
+    fs.mkdirSync(codexHome, { recursive: true });
+    fs.writeFileSync(
+      path.join(codexHome, "config.toml"),
+      [
+        "[mcp_servers.agent-workspace-linux]",
+        'command = "/tmp/agent-workspace-linux"',
+        `args = ["mcp", "--permissions", "${permissionsPath}"]`,
+        "",
+      ].join("\n"),
+    );
+    fs.writeFileSync(
+      permissionsPath,
+      JSON.stringify({ network: { mode: "disabled" }, apps: { allow: ["sh"] } }, null, 2),
+    );
+
+    const { handlers, execCalls } = buildBridgeHarness({
+      env: {
+        CODEX_HOME: codexHome,
+        CODEX_AGENT_WORKSPACE_BIN: "/tmp/agent-workspace-linux",
+      },
+    });
+
+    const config = await handlers["linux-agent-workspace"]({ action: "mcpConfig" });
+    assert.equal(config.ok, true);
+    assert.equal(config.json.configured, true);
+    assert.equal(config.json.restricted, true);
+    assert.equal(config.json.permissions_path, permissionsPath);
+    assert.equal(config.json.ceiling.network.mode, "disabled");
+
+    const response = await handlers["linux-agent-workspace"]({ action: "profileList" });
+    assert.equal(response.ok, true);
+    assert.deepEqual(Array.from(execCalls[0].args.slice(0, 4)), ["--permissions", permissionsPath, "profile", "list"]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("generated agent workspace settings module is valid ESM syntax", () => {
