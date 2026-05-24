@@ -614,6 +614,19 @@ function AgentWorkspacesSettings(){
     }).then(refresh);
   }
 
+  function startSavedWorkspace(savedProfile){
+    var id=profileId(savedProfile);
+    if(!id||activeWorkspace)return;
+    callAgentWorkspace("workspaceOpenProfile",{
+      profileId:id,
+      ackHiddenWorkspace:true,
+      ackUnenforcedPolicy:true,
+      purpose:profileSummary(savedProfile)||"Codex agent workspace",
+      runSetup:true,
+      startupWaitWindow:true
+    }).then(refresh);
+  }
+
   function stopWorkspace(workspaceId){
     callAgentWorkspace("workspaceStop",{workspaceId:workspaceId}).then(function(){
       setWorkspaceDetail(null);
@@ -763,8 +776,9 @@ function AgentWorkspacesSettings(){
                   ),
                   h("div",{className:"mt-1 truncate text-token-text-tertiary"},profileSummary(savedProfile)),
                   h("div",{className:"mt-3 flex gap-2"},
+                    button(activeForProfile?"Running":"Start",!!activeWorkspace||activeAction==="workspaceOpenProfile",function(){startSavedWorkspace(savedProfile);}),
                     button(activeForProfile?"Stop to edit":"Edit saved",activeForProfile,function(){selectProfile(id,true);}),
-                    button("Delete",false,function(){
+                    button("Delete",activeForProfile,function(){
                       if(window.confirm("Delete profile "+id+"?"))callAgentWorkspace("profileDelete",{profileId:id}).then(refresh);
                     })
                   )

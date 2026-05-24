@@ -264,6 +264,8 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /stoppedWorkspaces\.map\(function\(workspace\)/);
   assert.match(source, /function startStoppedWorkspace/);
   assert.match(source, /function deleteStoppedWorkspace/);
+  assert.match(source, /function startSavedWorkspace/);
+  assert.match(source, /startSavedWorkspace\(savedProfile\)/);
   assert.match(source, /workspaceStart/);
   assert.match(source, /Delete stale/);
   assert.match(source, /h\("details"/);
