@@ -365,6 +365,11 @@ function networkHostPlaceholder(mode){
   return mode==="local_only"?"localhost:3000":"example.com";
 }
 
+function cleanupProcessActionCount(cleanup){
+  var entries=[cleanup?.removed,cleanup?.candidates,cleanup?.skipped].flatMap(function(value){return Array.isArray(value)?value:[];});
+  return entries.reduce(function(count,entry){return count+(Array.isArray(entry?.process_cleanup)?entry.process_cleanup.length:0);},0);
+}
+
 function resultSummary(result){
   if(result.ok===false)return result.message||result.stderr||"Command failed";
   if(Array.isArray(result.json?.workspaces)){
@@ -376,7 +381,9 @@ function resultSummary(result){
     var removed=Array.isArray(result.json.removed)?result.json.removed.length:0;
     var candidates=Array.isArray(result.json.candidates)?result.json.candidates.length:0;
     var skipped=Array.isArray(result.json.skipped)?result.json.skipped.length:0;
-    return result.json.dry_run?"Cleanup preview: "+candidates+" stale":"Cleanup: "+removed+" removed, "+skipped+" skipped";
+    var processActions=cleanupProcessActionCount(result.json);
+    var processText=processActions>0?", "+processActions+" process action"+(processActions===1?"":"s"):"";
+    return result.json.dry_run?"Cleanup preview: "+candidates+" stale"+processText:"Cleanup: "+removed+" removed, "+skipped+" skipped"+processText;
   }
   if(result.action)return result.action+" complete";
   return "Command complete";

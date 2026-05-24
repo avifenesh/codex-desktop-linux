@@ -400,6 +400,9 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.equal(check.status, 0, check.stderr || check.stdout);
   assert.match(source, /export\{AgentWorkspacesSettings,AgentWorkspacesSettings as default\}/);
   assert.match(source, /function resultSummary/);
+  assert.match(source, /function cleanupProcessActionCount/);
+  assert.match(source, /process_cleanup/);
+  assert.match(source, /process action/);
   assert.match(source, /function resultView\(result,open,setOpen\)/);
   assert.match(source, /function workspaceRunning/);
   assert.match(source, /function workspaceSummary/);
