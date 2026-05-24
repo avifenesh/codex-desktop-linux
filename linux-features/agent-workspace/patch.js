@@ -223,6 +223,11 @@ var React=__toESM(__reactFactory(),1);
 var h=React.createElement;
 var COMMAND_KEY=${JSON.stringify(SETTINGS_COMMAND_KEY)};
 var DEFAULT_COMMAND_LABEL="~/.local/bin/agent-workspace-linux";
+var NETWORK_MODE_OPTIONS=[
+  {value:"disabled",label:"Closed"},
+  {value:"local_only",label:"Local"},
+  {value:"inherit_host",label:"Open"}
+];
 
 function pretty(value){
   return JSON.stringify(value,null,2);
@@ -471,11 +476,11 @@ function profileAllowHosts(profile){
 }
 
 function networkHostListLabel(mode){
-  return mode==="local_only"?"Loopback hosts":"Allowed hosts";
+  return "Local hosts";
 }
 
 function networkHostPlaceholder(mode){
-  return mode==="local_only"?"localhost:3000":"example.com";
+  return "localhost:3000";
 }
 
 function cleanupProcessActionCount(cleanup){
@@ -664,7 +669,10 @@ function AgentWorkspacesSettings(){
   var mountMode=profileMountMode(profile);
   var networkMode=profileNetwork(profile);
   var networkHosts=profileAllowHosts(profile);
-  var showNetworkHosts=networkMode==="allowlist"||networkMode==="local_only";
+  var showNetworkHosts=networkMode==="local_only";
+  var networkModeOptions=NETWORK_MODE_OPTIONS.some(function(option){return option.value===networkMode;})
+    ? NETWORK_MODE_OPTIONS
+    : [{value:networkMode,label:"Advanced: "+networkMode.replaceAll("_"," ")}].concat(NETWORK_MODE_OPTIONS);
   var runningWorkspaces=workspaces.filter(workspaceRunning);
   var activeWorkspace=activeWorkspaceFromList(workspaces);
   var otherRunningWorkspaces=activeWorkspace?runningWorkspaces.slice(1):[];
@@ -786,7 +794,7 @@ function AgentWorkspacesSettings(){
   function setNetworkMode(mode){
     updateProfile(function(next){
       next.network={...(next.network||{}),mode:mode};
-      if(mode!=="allowlist"&&mode!=="local_only")delete next.network.allow_hosts;
+      if(mode!=="local_only")delete next.network.allow_hosts;
     });
   }
 
@@ -1163,8 +1171,8 @@ function AgentWorkspacesSettings(){
                   onChange:function(event){setNetworkMode(event.target.value);},
                   disabled:profileFormLocked
                 },
-                  ["inherit_host","local_only","disabled","allowlist"].map(function(mode){
-                    return h("option",{key:mode,value:mode},mode);
+                  networkModeOptions.map(function(option){
+                    return h("option",{key:option.value,value:option.value},option.label);
                   })
                 )
               )

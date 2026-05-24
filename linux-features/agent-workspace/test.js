@@ -642,8 +642,13 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /function addNetworkHost/);
   assert.match(source, /function removeNetworkHost/);
   assert.match(source, /allow_hosts/);
-  assert.match(source, /Allowed hosts/);
-  assert.match(source, /Loopback hosts/);
+  assert.match(source, /NETWORK_MODE_OPTIONS/);
+  assert.match(source, /Closed/);
+  assert.match(source, /Local/);
+  assert.match(source, /Open/);
+  assert.match(source, /Local hosts/);
+  assert.doesNotMatch(source, /\["inherit_host","local_only","disabled","allowlist"\]/);
+  assert.doesNotMatch(source, /Allowed hosts/);
   assert.match(source, /Add host/);
   assert.match(source, /DEFAULT_COMMAND_LABEL="~\/\.local\/bin\/agent-workspace-linux"/);
   assert.match(source, /Custom command/);

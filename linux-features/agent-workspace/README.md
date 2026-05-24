@@ -23,6 +23,12 @@ starter profile that keeps the `--no-sandbox` browser tradeoff visible. It can
 also prepare a browser-session profile from a picked browser data directory,
 defaulting to a managed copy under Agent Workspace data and keeping direct
 read-write mounting behind an explicit profile-lock warning.
+The friendly profile editor intentionally exposes only three network choices:
+**Closed** (`network.mode=disabled`), **Local** (`network.mode=local_only`), and
+**Open** (`network.mode=inherit_host`). More complex host allowlists are not a
+current product path; advanced JSON can still show older/internal profile data
+without making the normal UI promise filtering that the runtime does not
+enforce.
 The startup-app picker accepts ordinary executable files and Linux `.desktop`
 launchers; when a launcher is selected, the bridge reads its `Name`/`Exec`
 fields, removes desktop field codes such as `%U`, and stores the parsed command
