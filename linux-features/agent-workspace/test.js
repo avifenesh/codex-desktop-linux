@@ -220,6 +220,13 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /function workspaceSecondary/);
   assert.match(source, /function statusDot/);
   assert.match(source, /function profileMountMode/);
+  assert.match(source, /function profileAllowHosts/);
+  assert.match(source, /function addNetworkHost/);
+  assert.match(source, /function removeNetworkHost/);
+  assert.match(source, /allow_hosts/);
+  assert.match(source, /Allowed hosts/);
+  assert.match(source, /Loopback hosts/);
+  assert.match(source, /Add host/);
   assert.match(source, /DEFAULT_COMMAND_LABEL="~\/\.local\/bin\/agent-workspace-linux"/);
   assert.match(source, /Custom command/);
   assert.match(source, /Active workspace/);
@@ -236,7 +243,9 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /Hide status/);
   assert.match(source, /File access: /);
   assert.match(source, /aria-pressed/);
-  assert.match(source, /Stopped workspaces: /);
+  assert.match(source, /Stopped workspaces \(/);
+  assert.match(source, /var stoppedWorkspaces=workspaces\.filter/);
+  assert.match(source, /stoppedWorkspaces\.map\(function\(workspace\)/);
   assert.match(source, /Remove stale/);
   assert.match(source, /h\("details"/);
   assert.match(source, /var activeWorkspace=runningWorkspaces\[0\]\?\?null/);
@@ -273,7 +282,9 @@ test("settings asset patches add navigation, route, visibility, and title", () =
   assert.equal(applyAgentWorkspaceSettingsIndexPatch(appMain), appMain);
 
   const settingsPage = applyAgentWorkspaceSettingsPagePatch(syntheticSettingsPage());
-  assert.match(settingsPage, new RegExp(`"${SETTINGS_SLUG}":q`));
+  assert.match(settingsPage, /codexLinuxAgentWorkspaceSettingsIcon=e=>/);
+  assert.match(settingsPage, new RegExp(`"${SETTINGS_SLUG}":codexLinuxAgentWorkspaceSettingsIcon`));
+  assert.doesNotMatch(settingsPage, new RegExp(`"${SETTINGS_SLUG}":q`));
   assert.match(settingsPage, /`local-environments`,`agent-workspaces`,`worktrees`/);
   assert.match(settingsPage, /case`local-environments`:case`agent-workspaces`:case`environments`:return!0/);
   assert.match(settingsPage, /case`local-environments`:case`agent-workspaces`:case`worktrees`:case`environments`/);
