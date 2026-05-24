@@ -16,9 +16,12 @@ const {
   patchExtractedApp,
 } = require("../../scripts/patch-linux-window-ui.js");
 const {
+  CONVERSATION_RUNTIME_VERSION,
   SETTINGS_ASSET,
   SETTINGS_COMMAND_KEY,
   SETTINGS_SLUG,
+  agentWorkspaceConversationRuntimeSource,
+  applyAgentWorkspaceConversationViewPatch,
   applyAgentWorkspaceMainBridgePatch,
   applyAgentWorkspaceSettingsIndexPatch,
   applyAgentWorkspaceSettingsPagePatch,
@@ -151,6 +154,7 @@ function writeSyntheticExtractedApp(root) {
   fs.writeFileSync(path.join(assetsDir, "settings-shared-test.js"), syntheticSettingsShared());
   fs.writeFileSync(path.join(assetsDir, "settings-page-test.js"), syntheticSettingsPage());
   fs.writeFileSync(path.join(assetsDir, "index-test.js"), syntheticIndex());
+  fs.writeFileSync(path.join(assetsDir, "local-conversation-thread-test.js"), "let thread=1;");
   fs.writeFileSync(path.join(assetsDir, "chunk-test.js"), "export function s(e){return e}");
   fs.writeFileSync(path.join(assetsDir, "react-test.js"), 'import{s}from"./chunk-test.js";/* react.transitional.element */export{ReactFactory as t};function ReactFactory(){return{createElement(){return{}},useState(){return[null,()=>{}]},useCallback(e){return e},useEffect(){}}}');
   fs.writeFileSync(path.join(assetsDir, "jsx-runtime-test.js"), "/* react.transitional.element */export{j as t};function j(){return{jsx(){},jsxs(){}}}");
@@ -175,6 +179,7 @@ test("agent-workspace feature exposes optional bridge and settings descriptors w
       [
         ["feature:agent-workspace:main-bridge", "main-bundle", "optional"],
         ["feature:agent-workspace:settings-page", "extracted-app", "optional"],
+        ["feature:agent-workspace:conversation-view", "webview-asset", "optional"],
       ],
     );
   });
@@ -192,6 +197,9 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   assert.match(patched, /startsWith\(`~\/`\)/);
   assert.match(patched, /case`workspaceOpenProfile`/);
   assert.match(patched, /case`workspaceStart`/);
+  assert.match(patched, /case`workspaceObserve`/);
+  assert.match(patched, /--include-hidden/);
+  assert.match(patched, /data:image\/png;base64/);
   assert.match(patched, /execFile\(__codexCommand,__codexArgs/);
   assert.equal(applyAgentWorkspaceMainBridgePatch(patched), patched);
 
@@ -275,11 +283,30 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /workspaceStart/);
   assert.match(source, /Delete stale/);
   assert.match(source, /h\("details"/);
-  assert.match(source, /var activeWorkspace=runningWorkspaces\[0\]\?\?null/);
+  assert.match(source, /function activeWorkspaceFromList/);
+  assert.match(source, /var activeWorkspace=activeWorkspaceFromList\(workspaces\)/);
   assert.doesNotMatch(source, /workspace\.profile_id\|\|workspace\.purpose\|\|workspace\.status/);
   assert.doesNotMatch(source, /workspaces\.map\(function\(workspace\)/);
   assert.doesNotMatch(source, /Cleanup stale/);
   assert.doesNotMatch(source, /workspaceCleanup",\{dryRun:true\}/);
+});
+
+test("conversation visibility runtime is valid script and idempotent", () => {
+  const runtime = agentWorkspaceConversationRuntimeSource();
+  const check = spawnSync(process.execPath, ["--check"], {
+    encoding: "utf8",
+    input: `let source=1;\n${runtime}`,
+  });
+  assert.equal(check.status, 0, check.stderr || check.stdout);
+  assert.match(runtime, new RegExp(CONVERSATION_RUNTIME_VERSION));
+  assert.match(runtime, /workspaceObserve/);
+  assert.match(runtime, /workspaceStop/);
+  assert.match(runtime, /codex-linux-agent-workspace-panel/);
+  assert.match(runtime, /data_url/);
+
+  const patched = applyAgentWorkspaceConversationViewPatch("let thread=1;");
+  assert.match(patched, new RegExp(CONVERSATION_RUNTIME_VERSION));
+  assert.equal(applyAgentWorkspaceConversationViewPatch(patched), patched);
 });
 
 test("settings asset patches add navigation, route, visibility, and title", () => {
@@ -338,8 +365,13 @@ test("agent-workspace feature participates in ASAR patching and reports", () => 
         assert.match(fs.readFileSync(path.join(assetsDir, "settings-shared-test.js"), "utf8"), /Agent Workspaces/);
         assert.match(fs.readFileSync(path.join(assetsDir, "settings-page-test.js"), "utf8"), /agent-workspaces/);
         assert.match(fs.readFileSync(path.join(assetsDir, "index-test.js"), "utf8"), new RegExp(SETTINGS_ASSET));
+        assert.match(
+          fs.readFileSync(path.join(assetsDir, "local-conversation-thread-test.js"), "utf8"),
+          new RegExp(CONVERSATION_RUNTIME_VERSION),
+        );
         assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:main-bridge" && patch.status === "applied"));
         assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:settings-page" && patch.status === "applied"));
+        assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:conversation-view" && patch.status === "applied"));
       } finally {
         fs.rmSync(tempApp, { recursive: true, force: true });
       }
@@ -353,6 +385,7 @@ test("feature patch list is intentionally small", () => {
     [
       ["main-bridge", "main-bundle"],
       ["settings-page", "extracted-app"],
+      ["conversation-view", "webview-asset"],
     ],
   );
 });

@@ -23,15 +23,24 @@ workspace cleanup.
 The bridge is intentionally allowlisted. It invokes `agent-workspace-linux`
 through `execFile`, never through a shell, and exposes only profile/workspace
 lifecycle actions needed by the UI. The default command is
+`~/.local/bin/agent-workspace-linux` when `$HOME` is available, falling back to
 `agent-workspace-linux`; users can override it with either:
 
 - `CODEX_AGENT_WORKSPACE_BIN=/absolute/path/to/agent-workspace-linux`
 - the settings-page command field, persisted as
   `codex-linux-agent-workspace-command`
 
-The first embedded version does not stream the hidden X11 workspace into the app
-yet. That should come as a separate viewer slice after the lifecycle and profile
-surface is stable.
+The first conversation-view slice shows a compact live workspace panel when an
+agent workspace is active. It polls `workspace observe --screenshot` through the
+allowlisted bridge, renders the latest screenshot in the conversation surface,
+and exposes a stop button next to the live view. This is not a full streaming
+viewer yet; the deeper viewer can build on the same observe/screenshot bridge
+after the lifecycle and profile surface is stable.
+
+Dogfood check: the side-by-side dev app built with `make build-dev-app` has been
+launched inside an agent workspace. The conversation panel rendered the live
+workspace screenshot and its Stop control issued the expected workspace stop
+request through the bridge.
 
 Run the feature tests with:
 
