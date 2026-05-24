@@ -410,10 +410,13 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   assert.match(patched, /"linux-agent-workspace-pick-app":async/);
   assert.match(patched, /"linux-agent-workspace-pick-mount":async/);
   assert.match(patched, /"linux-agent-workspace-pick-browser-data":async/);
+  assert.match(patched, /"linux-agent-workspace-copy-browser-data":async/);
   assert.match(patched, /showOpenDialog/);
   assert.match(patched, /Desktop Entry/);
   assert.match(patched, /startup_app/);
   assert.match(patched, /desktop_file/);
+  assert.match(patched, /browser-sessions/);
+  assert.match(patched, /SingletonLock/);
   assert.match(patched, new RegExp(SETTINGS_COMMAND_KEY));
   assert.match(patched, /\.local`\,`bin`\,`agent-workspace-linux`/);
   assert.match(patched, /CODEX_AGENT_WORKSPACE_BIN/);
@@ -434,6 +437,11 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   assert.match(patched, /data:image\/png;base64/);
   assert.match(patched, /execFile\(__codexCommand,__codexArgs/);
   assert.equal(applyAgentWorkspaceMainBridgePatch(patched), patched);
+  const stalePatched = patched.replace(
+    '"linux-agent-workspace-copy-browser-data":async',
+    '"linux-agent-workspace-copy-browser-data-old":async',
+  );
+  assert.match(applyAgentWorkspaceMainBridgePatch(stalePatched), /"linux-agent-workspace-copy-browser-data":async/);
 
   const { value, warnings } = captureWarns(() => applyAgentWorkspaceMainBridgePatch("real bundle"));
   assert.equal(value, "real bundle");
@@ -469,6 +477,37 @@ test("app picker converts desktop launchers into startup app commands", async ()
     assert.equal(response.json.startup_app.name, "Canva");
     assert.equal(response.json.startup_app.desktop_file, desktopPath);
     assert.deepEqual(Array.from(response.json.startup_app.command), ["/opt/Canva/canva", "--new-window"]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("browser data copy bridge creates a managed copy without lock files", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-agent-workspace-browser-copy-"));
+  try {
+    const home = path.join(tempDir, "home");
+    const source = path.join(tempDir, "chrome-user-data");
+    fs.mkdirSync(path.join(source, "Default"), { recursive: true });
+    fs.writeFileSync(path.join(source, "Default", "Cookies"), "cookie-db");
+    fs.writeFileSync(path.join(source, "SingletonLock"), "lock");
+
+    const { handlers } = buildBridgeHarness({
+      env: {
+        HOME: home,
+        XDG_DATA_HOME: path.join(tempDir, "data"),
+      },
+    });
+
+    const response = await handlers["linux-agent-workspace-copy-browser-data"]({
+      sourcePath: source,
+      profileId: "Browser Session!",
+    });
+
+    assert.equal(response.ok, true);
+    assert.equal(response.action, "copyBrowserData");
+    assert.match(response.json.path, /browser-sessions\/browser-session/);
+    assert.equal(fs.readFileSync(path.join(response.json.path, "Default", "Cookies"), "utf8"), "cookie-db");
+    assert.equal(fs.existsSync(path.join(response.json.path, "SingletonLock")), false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -596,9 +635,17 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /Create new/);
   assert.match(source, /Chrome template/);
   assert.match(source, /Browser session/);
+  assert.match(source, /Prepare browser session/);
+  assert.match(source, /Copy profile/);
+  assert.match(source, /Use folder directly/);
+  assert.match(source, /profile locks/);
+  assert.match(source, /Create from copy/);
+  assert.match(source, /Create direct/);
   assert.match(source, /function createRestrictedChromeProfile/);
   assert.match(source, /function createBrowserSessionProfile/);
+  assert.match(source, /function finishBrowserSessionProfile/);
   assert.match(source, /linux-agent-workspace-pick-browser-data/);
+  assert.match(source, /linux-agent-workspace-copy-browser-data/);
   assert.match(source, /profileFromResponse\(response\)/);
   assert.match(source, /profileTemplate/);
   assert.match(source, /restricted-chrome/);

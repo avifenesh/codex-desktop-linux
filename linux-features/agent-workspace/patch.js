@@ -37,11 +37,15 @@ function agentWorkspaceBrowserDataPickerBridgeSource() {
   return `"linux-agent-workspace-pick-browser-data":async()=>{let __codexElectron;try{__codexElectron=require(\`electron\`)}catch(e){return{ok:!1,action:\`pickBrowserData\`,message:\`file picker unavailable\`}}try{let e=await __codexElectron.dialog.showOpenDialog({title:\`Choose browser data folder\`,properties:[\`openDirectory\`]});let t=Array.isArray(e.filePaths)?e.filePaths:[];return{ok:!e.canceled&&t.length>0,action:\`pickBrowserData\`,json:{canceled:!!e.canceled,path:t[0]||null,paths:t}}}catch(e){return{ok:!1,action:\`pickBrowserData\`,message:e instanceof Error?e.message:String(e)}}}`;
 }
 
+function agentWorkspaceBrowserDataCopyBridgeSource({ fsVar, pathVar }) {
+  return `"linux-agent-workspace-copy-browser-data":async({sourcePath:__codexSourcePath,profileId:__codexProfileId}={})=>{let __codexString=e=>typeof e===\`string\`&&e.trim().length>0?e.trim():null,__codexHome=()=>typeof process.env.HOME===\`string\`&&process.env.HOME.trim().length>0?process.env.HOME.trim():null,__codexExpand=e=>{let t=__codexString(e),n=__codexHome();return t&&t.startsWith(\`~/\`)&&n?${pathVar}.join(n,t.slice(2)):t},__codexSafe=e=>String(e||\`browser-session\`).toLowerCase().replace(/[^a-z0-9._-]+/g,\`-\`).replace(/^-+|-+$/g,\`\`)||\`browser-session\`;try{let e=__codexExpand(__codexSourcePath);if(!e)return{ok:!1,action:\`copyBrowserData\`,message:\`browser data folder is required\`};if(!${fsVar}.existsSync(e)||!${fsVar}.statSync(e).isDirectory())return{ok:!1,action:\`copyBrowserData\`,message:\`browser data folder does not exist\`,json:{source_path:e}};let t=__codexSafe(__codexProfileId),n=__codexExpand(process.env.XDG_DATA_HOME)||(__codexHome()?${pathVar}.join(__codexHome(),\`.local\`,\`share\`):${pathVar}.join(process.env.TMPDIR||\`/tmp\`,\`codex-agent-workspace-data\`)),r=${pathVar}.join(n,\`agent-workspace-linux\`,\`browser-sessions\`,t);if(${fsVar}.existsSync(r))return{ok:!1,action:\`copyBrowserData\`,message:\`managed browser-session copy already exists\`,json:{source_path:e,path:r,profile_id:t}};${fsVar}.mkdirSync(${pathVar}.dirname(r),{recursive:!0,mode:448});let a=new Set([\`SingletonCookie\`,\`SingletonLock\`,\`SingletonSocket\`,\`lockfile\`,\`.parentlock\`]);await ${fsVar}.promises.cp(e,r,{recursive:!0,force:!1,errorOnExist:!0,filter:(e)=>{let t=${pathVar}.basename(e);return !a.has(t)&&!t.startsWith(\`Singleton\`)}});return{ok:!0,action:\`copyBrowserData\`,json:{source_path:e,path:r,profile_id:t,copied:!0,excluded_lock_files:!0}}}catch(e){return{ok:!1,action:\`copyBrowserData\`,message:e instanceof Error?e.message:String(e)}}}`;
+}
+
 function agentWorkspaceBridgeWithWorkspaceStartSource(args) {
   return agentWorkspaceBridgeSource(args)
     .replace(
       `},"linux-agent-workspace":async`,
-      `},${agentWorkspaceMountPickerBridgeSource()},${agentWorkspaceBrowserDataPickerBridgeSource()},"linux-agent-workspace":async`,
+      `},${agentWorkspaceMountPickerBridgeSource()},${agentWorkspaceBrowserDataPickerBridgeSource()},${agentWorkspaceBrowserDataCopyBridgeSource(args)},"linux-agent-workspace":async`,
     )
     .replace(
     "case`workspaceStop`:",
@@ -52,7 +56,19 @@ function agentWorkspaceBridgeWithWorkspaceStartSource(args) {
 function applyAgentWorkspaceMainBridgePatch(currentSource) {
   const patchName = "agent workspace main bridge patch";
   if (currentSource.includes('"linux-agent-workspace":async')) {
-    return currentSource;
+    if (currentSource.includes('"linux-agent-workspace-copy-browser-data":async')) {
+      return currentSource;
+    }
+    const fsVar = requireName(currentSource, "node:fs");
+    const pathVar = requireName(currentSource, "node:path");
+    if (fsVar == null || pathVar == null) {
+      warn("Could not find Node module aliases for browser data copy upgrade", patchName);
+      return currentSource;
+    }
+    return currentSource.replace(
+      `,"linux-agent-workspace":async`,
+      `,${agentWorkspaceBrowserDataCopyBridgeSource({ fsVar, pathVar })},"linux-agent-workspace":async`,
+    );
   }
 
   const childProcessVar = requireName(currentSource, "node:child_process");
@@ -529,6 +545,9 @@ function AgentWorkspacesSettings(){
   var detailState=React.useState(null);
   var workspaceDetail=detailState[0];
   var setWorkspaceDetail=detailState[1];
+  var browserSessionState=React.useState(null);
+  var browserSessionDraft=browserSessionState[0];
+  var setBrowserSessionDraft=browserSessionState[1];
 
   var callAgentWorkspace=React.useCallback(async function(action,params){
     setActiveAction(action);
@@ -642,12 +661,41 @@ function AgentWorkspacesSettings(){
       setResult(pick);
       var dataDir=pick?.json?.path;
       if(!pick?.ok||!dataDir)return;
-      var id=uniqueProfileId("browser-session");
-      var response=await callAgentWorkspace("profileTemplate",{templateKind:"browser-session",profileId:id,userDataDir:dataDir});
-      var template=profileFromResponse(response);
-      openCreateProfileTemplate(template);
+      setBrowserSessionDraft({sourcePath:dataDir,profileId:uniqueProfileId("browser-session"),useCopy:true});
+      setEditingProfile(false);
     }catch(error){
       setResult({ok:false,action:"pickBrowserData",message:error instanceof Error?error.message:String(error)});
+    }
+  }
+
+  function updateBrowserSessionDraft(mutator){
+    setBrowserSessionDraft(function(current){
+      if(!current)return current;
+      var next={...current};
+      mutator(next);
+      return next;
+    });
+  }
+
+  async function finishBrowserSessionProfile(){
+    if(!browserSessionDraft?.sourcePath||!browserSessionDraft?.profileId)return;
+    var dataDir=browserSessionDraft.sourcePath;
+    if(browserSessionDraft.useCopy){
+      var copy=await __post("linux-agent-workspace-copy-browser-data",{params:{sourcePath:browserSessionDraft.sourcePath,profileId:browserSessionDraft.profileId}});
+      setResult(copy);
+      if(!copy?.ok||!copy?.json?.path)return;
+      dataDir=copy.json.path;
+    }else if(!window.confirm("Use this browser data folder directly? Close the host browser first to avoid profile locks or corruption.")){
+      return;
+    }
+    var response=await callAgentWorkspace("profileTemplate",{templateKind:"browser-session",profileId:browserSessionDraft.profileId,userDataDir:dataDir});
+    var template=profileFromResponse(response);
+    if(template&&browserSessionDraft.useCopy){
+      template.description=(template.description||"Browser session profile")+" Managed copy from "+browserSessionDraft.sourcePath+".";
+    }
+    if(template){
+      setBrowserSessionDraft(null);
+      openCreateProfileTemplate(template);
     }
   }
 
@@ -978,6 +1026,47 @@ function AgentWorkspacesSettings(){
               })
             )
       ),
+
+      browserSessionDraft
+        ? h("div",{className:"fixed inset-0 z-50 overflow-y-auto bg-black/40 p-4",role:"presentation"},
+          h("section",{className:"mx-auto flex max-h-[calc(100vh-2rem)] max-w-2xl flex-col gap-3 overflow-y-auto rounded-md border border-token-border-default bg-token-bg-primary p-3 shadow-xl",role:"dialog","aria-modal":true},
+            h("div",{className:"flex items-center justify-between gap-2"},
+              h("div",{className:"text-sm font-medium text-token-text-primary"},"Prepare browser session"),
+              statusPill("Account data","warn")
+            ),
+            h("div",{className:"rounded-md border border-yellow-500/30 bg-token-main-surface-secondary p-3 text-sm text-token-text-secondary"},"Browser profiles contain cookies and logged-in sessions. Copying the folder is safer for profile locks; direct use is for cases where you already made a dedicated browser profile."),
+            field("Workspace name",browserSessionDraft.profileId,function(value){updateBrowserSessionDraft(function(next){next.profileId=value;});},"browser-session"),
+            h("div",{className:"rounded-md border border-token-border-default p-3 text-sm"},
+              h("div",{className:"mb-1 text-xs text-token-text-tertiary"},"Selected folder"),
+              h("div",{className:"truncate text-token-text-primary",title:browserSessionDraft.sourcePath},browserSessionDraft.sourcePath)
+            ),
+            h("div",{className:"grid gap-2 md:grid-cols-2"},
+              h("button",{
+                type:"button",
+                className:"rounded-md border p-3 text-left text-sm hover:bg-token-main-surface-secondary "+(browserSessionDraft.useCopy?"border-token-border-strong bg-token-main-surface-secondary":"border-token-border-default"),
+                "aria-pressed":browserSessionDraft.useCopy,
+                onClick:function(){updateBrowserSessionDraft(function(next){next.useCopy=true;});}
+              },
+                h("div",{className:"font-medium text-token-text-primary"},"Copy profile"),
+                h("div",{className:"mt-1 text-xs text-token-text-secondary"},"Creates a managed copy under Agent Workspace data and skips browser lock files.")
+              ),
+              h("button",{
+                type:"button",
+                className:"rounded-md border p-3 text-left text-sm hover:bg-token-main-surface-secondary "+(!browserSessionDraft.useCopy?"border-token-border-strong bg-token-main-surface-secondary":"border-token-border-default"),
+                "aria-pressed":!browserSessionDraft.useCopy,
+                onClick:function(){updateBrowserSessionDraft(function(next){next.useCopy=false;});}
+              },
+                h("div",{className:"font-medium text-token-text-primary"},"Use folder directly"),
+                h("div",{className:"mt-1 text-xs text-token-text-secondary"},"Mounts the selected folder read-write. Close the host browser first.")
+              )
+            ),
+            h("div",{className:"flex flex-wrap justify-end gap-2"},
+              button("Cancel",false,function(){setBrowserSessionDraft(null);}),
+              button(browserSessionDraft.useCopy?"Create from copy":"Create direct",!browserSessionDraft.profileId?.trim()||activeAction==="profileTemplate",finishBrowserSessionProfile)
+            )
+          )
+          )
+        : null,
 
       editingProfile
         ? h("div",{className:"fixed inset-0 z-50 overflow-y-auto bg-black/40 p-4",role:"presentation"},

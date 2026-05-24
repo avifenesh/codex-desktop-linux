@@ -19,7 +19,10 @@ page can point Codex Desktop at an `agent-workspace-linux` binary, list and edit
 saved profiles, validate profile JSON without saving, preview profile-backed
 workspace starts, start a hidden workspace after explicit acknowledgement, stop
 running workspaces, run stale workspace cleanup, and create a restricted Chrome
-starter profile that keeps the `--no-sandbox` browser tradeoff visible.
+starter profile that keeps the `--no-sandbox` browser tradeoff visible. It can
+also prepare a browser-session profile from a picked browser data directory,
+defaulting to a managed copy under Agent Workspace data and keeping direct
+read-write mounting behind an explicit profile-lock warning.
 The startup-app picker accepts ordinary executable files and Linux `.desktop`
 launchers; when a launcher is selected, the bridge reads its `Name`/`Exec`
 fields, removes desktop field codes such as `%U`, and stores the parsed command
@@ -66,9 +69,11 @@ workspace, showed the **Agent Workspaces** sidebar entry and page, rendered the
 active workspace card, and opened the **Chrome template** create form with the
 disabled-network `restricted-chrome` profile plus its explicit
 `restricted-chrome-no-sandbox` startup command. The page also exposes a
-**Browser session** starter that opens a browser-data folder picker and calls the
-MCP `browser-session` template with the selected `userDataDir`. The form was not
-saved during the test, and cleanup left no saved profiles or active workspaces.
+**Browser session** starter that opens a browser-data folder picker, shows the
+selected path and account-data warning, offers a managed copy or direct-folder
+mode, and then calls the MCP `browser-session` template with the selected
+`userDataDir`. The form was not saved during the test, and cleanup left no saved
+profiles or active workspaces.
 
 Run the feature tests with:
 
