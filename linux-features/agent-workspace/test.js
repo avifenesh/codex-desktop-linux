@@ -216,6 +216,7 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.equal(check.status, 0, check.stderr || check.stdout);
   assert.match(source, /export\{AgentWorkspacesSettings,AgentWorkspacesSettings as default\}/);
   assert.match(source, /function resultSummary/);
+  assert.match(source, /function resultView\(result,open,setOpen\)/);
   assert.match(source, /function workspaceRunning/);
   assert.match(source, /function workspaceSummary/);
   assert.match(source, /function workspacePrimary/);
@@ -249,6 +250,11 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /Stop to edit/);
   assert.match(source, /profileFormLocked/);
   assert.match(source, /editingSaved/);
+  assert.match(source, /advancedOpen/);
+  assert.match(source, /resultOpen/);
+  assert.match(source, /fixed inset-0 z-50 overflow-y-auto/);
+  assert.match(source, /max-h-\[calc\(100vh-2rem\)\]/);
+  assert.match(source, /resultView\(result,resultOpen,setResultOpen\)/);
   assert.doesNotMatch(source, /Overwrite/);
   assert.doesNotMatch(source, /Create profile/);
   assert.match(source, /Advanced settings/);

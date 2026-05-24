@@ -232,17 +232,19 @@ function workspaceStatusView(detail){
   );
 }
 
-function resultView(result){
+function resultView(result,open,setOpen){
   if(!result)return null;
   var border=result.ok?"border-token-border-default":"border-token-error";
   return h("details",{
+    open:!!open,
+    onToggle:function(event){setOpen(event.currentTarget.open);},
     className:"rounded-md border "+border+" bg-token-main-surface-secondary text-sm text-token-text-secondary"
   },
     h("summary",{className:"flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-token-text-primary"},
       h("span",null,result.ok===false?"Error":"Result"),
       h("span",{className:"truncate text-xs text-token-text-tertiary"},resultSummary(result))
     ),
-    h("pre",{className:"max-h-[260px] overflow-auto border-t border-token-border-default p-3 text-xs text-token-text-secondary"},pretty(result.json??result))
+    open?h("pre",{className:"max-h-[260px] overflow-auto border-t border-token-border-default p-3 text-xs text-token-text-secondary"},pretty(result.json??result)):null
   );
 }
 
@@ -369,6 +371,12 @@ function AgentWorkspacesSettings(){
   var resultState=React.useState(null);
   var result=resultState[0];
   var setResult=resultState[1];
+  var resultOpenState=React.useState(false);
+  var resultOpen=resultOpenState[0];
+  var setResultOpen=resultOpenState[1];
+  var advancedOpenState=React.useState(false);
+  var advancedOpen=advancedOpenState[0];
+  var setAdvancedOpen=advancedOpenState[1];
   var actionState=React.useState(null);
   var activeAction=actionState[0];
   var setActiveAction=actionState[1];
@@ -399,10 +407,12 @@ function AgentWorkspacesSettings(){
     try{
       var response=await __post("linux-agent-workspace",{params:{action:action,...(params||{})}});
       setResult(response);
+      setResultOpen(false);
       return response;
     }catch(error){
       var response={ok:false,action:action,message:error instanceof Error?error.message:String(error)};
       setResult(response);
+      setResultOpen(false);
       return response;
     }finally{
       setActiveAction(null);
@@ -459,6 +469,7 @@ function AgentWorkspacesSettings(){
     setSelectedProfileId(profileId);
     if(openEditor){
       setFormMode("edit");
+      setAdvancedOpen(false);
       setEditingProfile(true);
     }
     if(!profileId)return;
@@ -475,6 +486,7 @@ function AgentWorkspacesSettings(){
     setPurpose("");
     setManualApp("");
     setNetworkHost("");
+    setAdvancedOpen(false);
     setEditingProfile(true);
   }
 
@@ -788,7 +800,8 @@ function AgentWorkspacesSettings(){
       ),
 
       editingProfile
-        ? h("section",{className:"flex flex-col gap-3 rounded-md border border-token-border-default p-3"},
+        ? h("div",{className:"fixed inset-0 z-50 overflow-y-auto bg-black/40 p-4",role:"presentation"},
+          h("section",{className:"mx-auto flex max-h-[calc(100vh-2rem)] max-w-4xl flex-col gap-3 overflow-y-auto rounded-md border border-token-border-default bg-token-bg-primary p-3 shadow-xl",role:"dialog","aria-modal":true},
             h("div",{className:"flex items-center justify-between"},
               h("div",{className:"text-sm font-medium text-token-text-primary"},editingSaved?"Edit saved":"Create new"),
               profileFormLocked?statusPill("Active - locked","warn"):statusPill(editingSaved?selectedProfileId:"New","idle")
@@ -888,15 +901,19 @@ function AgentWorkspacesSettings(){
               )
             ),
             editingSaved?field("Workspace purpose",purpose,setPurpose,"QA run",profileFormLocked):null,
-            h("details",{className:"rounded-md border border-token-border-default bg-token-main-surface-secondary text-sm"},
+            h("details",{
+              className:"rounded-md border border-token-border-default bg-token-main-surface-secondary text-sm",
+              open:advancedOpen,
+              onToggle:function(event){setAdvancedOpen(event.currentTarget.open);}
+            },
               h("summary",{className:"cursor-pointer px-3 py-2 text-token-text-primary"},"Advanced settings"),
-              h("textarea",{
+              advancedOpen?h("textarea",{
                 className:"min-h-[220px] w-full border-t border-token-border-default bg-token-bg-primary p-3 font-mono text-xs text-token-text-primary outline-none disabled:cursor-not-allowed disabled:opacity-60",
                 value:profileJson,
                 onChange:function(event){setProfileJson(event.target.value);},
                 spellCheck:false,
                 disabled:profileFormLocked
-              })
+              }):null
             ),
             h("div",{className:"flex flex-wrap justify-between gap-2"},
               h("div",{className:"flex flex-wrap gap-2"},
@@ -912,9 +929,10 @@ function AgentWorkspacesSettings(){
                 : null
             )
           )
+          )
         : null,
 
-      resultView(result)
+      resultView(result,resultOpen,setResultOpen)
     )
   );
 }
