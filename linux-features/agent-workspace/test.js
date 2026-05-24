@@ -257,8 +257,11 @@ class FakeElement {
     refresh.setAttribute("data-action", "refresh");
     const stop = this.ownerDocument.createElement("button");
     stop.setAttribute("data-action", "stop");
+    const revoke = this.ownerDocument.createElement("button");
+    revoke.setAttribute("data-action", "revoke");
     actions.appendChild(refresh);
     actions.appendChild(stop);
+    actions.appendChild(revoke);
     head.appendChild(dot);
     head.appendChild(title);
     head.appendChild(actions);
@@ -481,8 +484,11 @@ test("conversation visibility runtime is valid script and idempotent", () => {
   assert.match(runtime, new RegExp(CONVERSATION_RUNTIME_VERSION));
   assert.match(runtime, /workspaceObserve/);
   assert.match(runtime, /workspaceStop/);
+  assert.match(runtime, /workspaceCleanup/);
   assert.match(runtime, /bridgeError/);
   assert.match(runtime, /codex-linux-agent-workspace-panel/);
+  assert.match(runtime, /data-action="revoke"/);
+  assert.match(runtime, /Revoke/);
   assert.match(runtime, /data_url/);
   assert.match(runtime, /function policySummary/);
   assert.match(runtime, /function appSummary/);
@@ -537,6 +543,8 @@ test("conversation visibility runtime renders and stops an active workspace", as
           activeStatus.ready = false;
           response = { ok: true, json: { ok: true, status: activeStatus } };
         }
+      } else if (params.action === "workspaceCleanup") {
+        response = { ok: true, json: { ok: true, removed: [{ id: params.cleanupId }], skipped: [] } };
       } else {
         response = { json: { ok: false } };
       }
@@ -586,6 +594,7 @@ test("conversation visibility runtime renders and stops an active workspace", as
   const meta = panel.querySelector(".codex-linux-agent-workspace-meta");
   const error = panel.querySelector(".codex-linux-agent-workspace-error");
   const image = panel.querySelector(".codex-linux-agent-workspace-shot");
+  assert.ok(panel.querySelector("[data-action='revoke']"));
   assert.equal(title.textContent, "QA live view");
   assert.match(meta.textContent, /:90/);
   assert.match(meta.textContent, /profile desktop-qa/);
@@ -605,8 +614,12 @@ test("conversation visibility runtime renders and stops an active workspace", as
   assert.equal(error.textContent, "stop failed");
 
   stopFails = false;
-  panel.querySelector("[data-action='stop']").click();
-  await waitFor(() => panel.hidden === true, "workspace panel should hide after stop");
+  panel.querySelector("[data-action='revoke']").click();
+  await waitFor(
+    () => calls.some((call) => call.action === "workspaceCleanup" && call.cleanupId === "qa-live"),
+    "cleanup action should be sent for revoked workspace",
+  );
+  await waitFor(() => panel.hidden === true, "workspace panel should hide after revoke");
 });
 
 test("settings asset patches add navigation, route, visibility, and title", () => {
