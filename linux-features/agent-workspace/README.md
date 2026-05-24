@@ -16,9 +16,9 @@ pipeline:
 
 The feature adds a Linux-only settings section named **Agent Workspaces**. The
 page can point Codex Desktop at an `agent-workspace-linux` binary, list and edit
-saved profiles, preview profile-backed workspace starts, start a hidden
-workspace after explicit acknowledgement, stop running workspaces, and run stale
-workspace cleanup.
+saved profiles, validate profile JSON without saving, preview profile-backed
+workspace starts, start a hidden workspace after explicit acknowledgement, stop
+running workspaces, and run stale workspace cleanup.
 
 The bridge is intentionally allowlisted. It invokes `agent-workspace-linux`
 through `execFile`, never through a shell, and exposes only profile/workspace
