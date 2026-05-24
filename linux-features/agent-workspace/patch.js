@@ -54,7 +54,412 @@ function buildAgentWorkspaceSettingsSource({
   settingsPageExportName = "t",
   vscodeApiAsset,
 }) {
-  return `import{s as __toESM}from"./${chunkAsset}";import{${reactExportName} as __reactFactory}from"./${reactAsset}";import{n as __post}from"./${vscodeApiAsset}";import{${settingsPageExportName} as SettingsPage}from"./${settingsPageAsset}";var React=__toESM(__reactFactory(),1),h=React.createElement,COMMAND_KEY=${JSON.stringify(SETTINGS_COMMAND_KEY)};function pretty(e){return JSON.stringify(e,null,2)}function parseProfile(e){try{let t=JSON.parse(e);return t&&typeof t=="object"&&!Array.isArray(t)?t:null}catch{return null}}function defaultProfile(){return{id:"desktop-qa",description:"Desktop QA environment",width:1280,height:800,cwd:"/workspace/project",mounts:[],network:{mode:"inherit_host"},require_enforced_policy:false,setup_commands:[],startup_apps:[]}}function button(e,t,n,r){return h("button",{type:"button",className:"rounded-md border border-token-border-default px-3 py-1.5 text-sm text-token-text-primary hover:bg-token-main-surface-secondary disabled:cursor-not-allowed disabled:opacity-50",disabled:n,onClick:r},e)}function field(e,t,n,r){return h("label",{className:"flex flex-col gap-1 text-sm text-token-text-secondary"},h("span",null,e),h("input",{className:"h-9 rounded-md border border-token-border-default bg-token-bg-primary px-2 text-token-text-primary outline-none",value:t,onChange:e=>n(e.target.value),placeholder:r||""}))}function resultView(e){if(!e)return null;let t=e.ok?"border-token-border-default":"border-token-error";return h("pre",{className:"max-h-[260px] overflow-auto rounded-md border "+t+" bg-token-main-surface-secondary p-3 text-xs text-token-text-secondary"},pretty(e.json??e))}function AgentWorkspacesSettings(){let[e,t]=React.useState(""),[n,r]=React.useState([]),[i,a]=React.useState([]),[o,s]=React.useState(""),[c,l]=React.useState(()=>pretty(defaultProfile())),[u,d]=React.useState(null),[f,p]=React.useState(null),[m,g]=React.useState(""),[_,v]=React.useState(!0),y=React.useCallback(async(e,t={})=>{p(e);try{let n=await __post("linux-agent-workspace",{params:{action:e,...t}});d(n);return n}catch(t){let n={ok:!1,action:e,message:t instanceof Error?t.message:String(t)};d(n);return n}finally{p(null)}},[]),b=React.useCallback(async()=>{let[e,t]=await Promise.all([y("profileList"),y("workspaceList")]);Array.isArray(e?.json?.profiles)&&r(e.json.profiles),Array.isArray(t?.json?.workspaces)&&a(t.json.workspaces)},[y]);React.useEffect(()=>{let e=!0;__post("get-global-state",{params:{key:COMMAND_KEY}}).then(n=>{e&&t(n?.value??"")}).catch(()=>{}),b().finally(()=>{e&&v(!1)});return()=>{e=!1}},[b]);let x=parseProfile(c),S=async()=>{await __post("set-global-state",{params:{key:COMMAND_KEY,value:e.trim()||void 0}}),await y("doctor")},C=e=>{s(e);e&&y("profileGet",{profileId:e}).then(e=>{let t=e?.json?.profile??e?.json;t&&l(pretty(t))})},w=e=>{let t=parseProfile(c)||defaultProfile();t.network={...(t.network||{}),mode:e},l(pretty(t))},T=e=>{let t=parseProfile(c)||defaultProfile();t.mounts=(t.mounts||[]).map(t=>({...t,mode:e})),l(pretty(t))},E=async e=>{if(!x){d({ok:!1,message:"Profile JSON is invalid"});return}let t=await y("profileSave",{profile:x,replace:e});t?.ok&&b()},D=()=>{x?.id&&(s(x.id),y("workspaceOpenProfile",{profileId:x.id,dryRun:!0,purpose:m||"Codex agent workspace",runSetup:!0,startupWaitWindow:!0}))},O=()=>{x?.id&&y("workspaceOpenProfile",{profileId:x.id,ackHiddenWorkspace:!0,ackUnenforcedPolicy:!0,purpose:m||"Codex agent workspace",runSetup:!0,startupWaitWindow:!0}).then(b)},k=e=>y("workspaceStop",{workspaceId:e}).then(b);return h(SettingsPage,{title:"Agent Workspaces",subtitle:"Linux agent environments"},h("div",{className:"flex max-w-5xl flex-col gap-5 p-1"},h("section",{className:"flex flex-col gap-3"},h("div",{className:"grid gap-3 md:grid-cols-[1fr_auto]"},field("Command",e,t,"agent-workspace-linux"),h("div",{className:"flex items-end gap-2"},button("Save",f==="doctor",f==="doctor",S),button("Refresh",f==="profileList"||_,_,b))),h("div",{className:"grid gap-3 md:grid-cols-3"},h("label",{className:"flex flex-col gap-1 text-sm text-token-text-secondary"},h("span",null,"Profiles"),h("select",{className:"h-9 rounded-md border border-token-border-default bg-token-bg-primary px-2 text-token-text-primary",value:o,onChange:e=>C(e.target.value)},h("option",{value:""},"New profile"),n.map(e=>h("option",{key:e.id,value:e.id},e.id)))),field("Purpose",m,g,"QA run"),h("div",{className:"flex items-end gap-2"},button("New",!1,!1,()=>{s("");l(pretty(defaultProfile()))}),button("Delete",!o,!o,()=>y("profileDelete",{profileId:o}).then(b))))),h("section",{className:"grid gap-3 md:grid-cols-[220px_220px_1fr]"},h("label",{className:"flex flex-col gap-1 text-sm text-token-text-secondary"},h("span",null,"Network"),h("select",{className:"h-9 rounded-md border border-token-border-default bg-token-bg-primary px-2 text-token-text-primary",value:x?.network?.mode||"inherit_host",onChange:e=>w(e.target.value)},["inherit_host","local_only","disabled","allowlist"].map(e=>h("option",{key:e,value:e},e)))),h("div",{className:"flex items-end gap-2"},button("Read only",!x,!x,()=>T("read_only")),button("Read write",!x,!x,()=>T("read_write"))),h("div",{className:"flex items-end justify-end gap-2"},button("Validate",!x,!x,()=>y("profileSave",{profile:x,dryRun:!0,replace:!0})),button("Save",!x,!x,()=>E(!1)),button("Overwrite",!x,!x,()=>E(!0))))),h("textarea",{className:"min-h-[280px] rounded-md border border-token-border-default bg-token-bg-primary p-3 font-mono text-xs text-token-text-primary outline-none",value:c,onChange:e=>l(e.target.value),spellCheck:!1}),h("section",{className:"flex flex-wrap gap-2"},button("Preview start",!x,!x,D),button("Start",!x,!x,O),button("Cleanup stale",!1,!1,()=>y("workspaceCleanup",{dryRun:!0}))),h("section",{className:"flex flex-col gap-2"},h("div",{className:"text-sm font-medium text-token-text-primary"},"Active"),i.length===0?h("div",{className:"text-sm text-token-text-tertiary"},"None"):i.map(e=>h("div",{key:e.id,className:"flex items-center justify-between rounded-md border border-token-border-default p-2 text-sm"},h("div",{className:"min-w-0"},h("div",{className:"truncate text-token-text-primary"},e.id),h("div",{className:"truncate text-token-text-tertiary"},e.profile_id||e.purpose||e.status||"workspace")),h("div",{className:"flex gap-2"},button("Status",!1,!1,()=>y("workspaceStatus",{workspaceId:e.id})),button("Stop",!1,!1,()=>k(e.id)))))),resultView(u))) }export{AgentWorkspacesSettings,AgentWorkspacesSettings as default};\n//# sourceMappingURL=${SETTINGS_ASSET}.map\n`;
+  return `import{s as __toESM}from"./${chunkAsset}";
+import{${reactExportName} as __reactFactory}from"./${reactAsset}";
+import{n as __post}from"./${vscodeApiAsset}";
+import{${settingsPageExportName} as SettingsPage}from"./${settingsPageAsset}";
+
+var React=__toESM(__reactFactory(),1);
+var h=React.createElement;
+var COMMAND_KEY=${JSON.stringify(SETTINGS_COMMAND_KEY)};
+
+function pretty(value){
+  return JSON.stringify(value,null,2);
+}
+
+function parseProfile(value){
+  try{
+    var parsed=JSON.parse(value);
+    return parsed&&typeof parsed==="object"&&!Array.isArray(parsed)?parsed:null;
+  }catch{
+    return null;
+  }
+}
+
+function defaultProfile(){
+  return {
+    id:"desktop-qa",
+    description:"Desktop QA environment",
+    width:1280,
+    height:800,
+    cwd:"/workspace/project",
+    mounts:[],
+    network:{mode:"inherit_host"},
+    require_enforced_policy:false,
+    setup_commands:[],
+    startup_apps:[]
+  };
+}
+
+function button(label,disabled,onClick){
+  return h("button",{
+    type:"button",
+    className:"rounded-md border border-token-border-default px-3 py-1.5 text-sm text-token-text-primary hover:bg-token-main-surface-secondary disabled:cursor-not-allowed disabled:opacity-50",
+    disabled:!!disabled,
+    onClick
+  },label);
+}
+
+function field(label,value,onChange,placeholder){
+  return h("label",{className:"flex flex-col gap-1 text-sm text-token-text-secondary"},
+    h("span",null,label),
+    h("input",{
+      className:"h-9 rounded-md border border-token-border-default bg-token-bg-primary px-2 text-token-text-primary outline-none",
+      value,
+      onChange:function(event){onChange(event.target.value);},
+      placeholder:placeholder||""
+    })
+  );
+}
+
+function resultView(result){
+  if(!result)return null;
+  var border=result.ok?"border-token-border-default":"border-token-error";
+  return h("details",{
+    className:"rounded-md border "+border+" bg-token-main-surface-secondary text-sm text-token-text-secondary"
+  },
+    h("summary",{className:"flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-token-text-primary"},
+      h("span",null,result.ok===false?"Error":"Result"),
+      h("span",{className:"truncate text-xs text-token-text-tertiary"},resultSummary(result))
+    ),
+    h("pre",{className:"max-h-[260px] overflow-auto border-t border-token-border-default p-3 text-xs text-token-text-secondary"},pretty(result.json??result))
+  );
+}
+
+function workspaceId(workspace){
+  return workspace?.id||workspace?.status?.id||workspace?.manifest?.id||workspace?.runtime_dir||"workspace";
+}
+
+function workspaceRunning(workspace){
+  return workspace?.running===true||workspace?.status?.ready===true;
+}
+
+function workspaceSummary(workspace){
+  var status=workspace?.status;
+  if(typeof workspace?.profile_id==="string"&&workspace.profile_id)return workspace.profile_id;
+  if(typeof workspace?.purpose==="string"&&workspace.purpose)return workspace.purpose;
+  if(status&&typeof status==="object"){
+    if(typeof status.profile_id==="string"&&status.profile_id)return status.profile_id;
+    if(typeof status.purpose==="string"&&status.purpose)return status.purpose;
+    if(typeof status.id==="string"&&status.id)return status.id;
+    return status.ready?"ready":"workspace";
+  }
+  if(typeof status==="string"&&status)return status;
+  return workspace?.running?"running":"workspace";
+}
+
+function workspacePrimary(workspace){
+  var summary=workspaceSummary(workspace);
+  return summary&&summary!=="workspace"?summary:workspaceId(workspace);
+}
+
+function workspaceSecondary(workspace){
+  var id=workspaceId(workspace);
+  var primary=workspacePrimary(workspace);
+  return id&&id!==primary?id:null;
+}
+
+function workspaceDisplay(workspace){
+  var display=workspace?.status?.display||workspace?.manifest?.display||workspace?.display||null;
+  if(!display)return null;
+  if(display===workspacePrimary(workspace)||display===workspaceId(workspace))return null;
+  return display;
+}
+
+function profileId(profile){
+  return profile?.id||profile?.profile_id||"profile";
+}
+
+function profileSummary(profile){
+  return profile?.description||profile?.cwd||profile?.network?.mode||"Saved profile";
+}
+
+function profileNetwork(profile){
+  return profile?.network?.mode||"inherit_host";
+}
+
+function resultSummary(result){
+  if(result.ok===false)return result.message||result.stderr||"Command failed";
+  if(Array.isArray(result.json?.workspaces)){
+    var running=result.json.workspaces.filter(workspaceRunning).length;
+    return "Workspace list: "+running+" active, "+(result.json.workspaces.length-running)+" stopped";
+  }
+  if(Array.isArray(result.json?.profiles))return "Profile list: "+result.json.profiles.length+" saved";
+  if(result.action)return result.action+" complete";
+  return "Command complete";
+}
+
+function statusPill(label,tone){
+  var toneClass=tone==="active"?"border-green-500/40 text-green-700 dark:text-green-300":tone==="warn"?"border-yellow-500/40 text-yellow-700 dark:text-yellow-300":"border-token-border-default text-token-text-tertiary";
+  return h("span",{className:"inline-flex h-6 items-center rounded-md border px-2 text-xs "+toneClass},label);
+}
+
+function AgentWorkspacesSettings(){
+  var commandState=React.useState("");
+  var command=commandState[0];
+  var setCommand=commandState[1];
+  var profileState=React.useState([]);
+  var profiles=profileState[0];
+  var setProfiles=profileState[1];
+  var workspaceState=React.useState([]);
+  var workspaces=workspaceState[0];
+  var setWorkspaces=workspaceState[1];
+  var selectedState=React.useState("");
+  var selectedProfileId=selectedState[0];
+  var setSelectedProfileId=selectedState[1];
+  var profileJsonState=React.useState(function(){return pretty(defaultProfile());});
+  var profileJson=profileJsonState[0];
+  var setProfileJson=profileJsonState[1];
+  var resultState=React.useState(null);
+  var result=resultState[0];
+  var setResult=resultState[1];
+  var actionState=React.useState(null);
+  var activeAction=actionState[0];
+  var setActiveAction=actionState[1];
+  var purposeState=React.useState("");
+  var purpose=purposeState[0];
+  var setPurpose=purposeState[1];
+  var loadingState=React.useState(true);
+  var loading=loadingState[0];
+  var setLoading=loadingState[1];
+
+  var callAgentWorkspace=React.useCallback(async function(action,params){
+    setActiveAction(action);
+    try{
+      var response=await __post("linux-agent-workspace",{params:{action:action,...(params||{})}});
+      setResult(response);
+      return response;
+    }catch(error){
+      var response={ok:false,action:action,message:error instanceof Error?error.message:String(error)};
+      setResult(response);
+      return response;
+    }finally{
+      setActiveAction(null);
+    }
+  },[]);
+
+  var refresh=React.useCallback(async function(){
+    var responses=await Promise.all([
+      callAgentWorkspace("profileList"),
+      callAgentWorkspace("workspaceList")
+    ]);
+    if(Array.isArray(responses[0]?.json?.profiles))setProfiles(responses[0].json.profiles);
+    if(Array.isArray(responses[1]?.json?.workspaces))setWorkspaces(responses[1].json.workspaces);
+  },[callAgentWorkspace]);
+
+  React.useEffect(function(){
+    var alive=true;
+    __post("get-global-state",{params:{key:COMMAND_KEY}})
+      .then(function(response){if(alive)setCommand(response?.value??"");})
+      .catch(function(){});
+    refresh().finally(function(){if(alive)setLoading(false);});
+    return function(){alive=false;};
+  },[refresh]);
+
+  var profile=parseProfile(profileJson);
+  var runningWorkspaces=workspaces.filter(workspaceRunning);
+  var activeWorkspace=runningWorkspaces[0]??null;
+  var otherRunningWorkspaces=activeWorkspace?runningWorkspaces.slice(1):[];
+  var stoppedWorkspaceCount=Math.max(0,workspaces.length-runningWorkspaces.length);
+  var startDisabled=!profile||!!activeWorkspace||activeAction==="workspaceOpenProfile";
+
+  async function saveCommand(){
+    await __post("set-global-state",{params:{key:COMMAND_KEY,value:command.trim()||void 0}});
+    await callAgentWorkspace("doctor");
+  }
+
+  function selectProfile(profileId){
+    setSelectedProfileId(profileId);
+    if(!profileId)return;
+    callAgentWorkspace("profileGet",{profileId:profileId}).then(function(response){
+      var loaded=response?.json?.profile??response?.json;
+      if(loaded)setProfileJson(pretty(loaded));
+    });
+  }
+
+  function setNetworkMode(mode){
+    var next=parseProfile(profileJson)||defaultProfile();
+    next.network={...(next.network||{}),mode:mode};
+    setProfileJson(pretty(next));
+  }
+
+  function setMountMode(mode){
+    var next=parseProfile(profileJson)||defaultProfile();
+    next.mounts=(next.mounts||[]).map(function(mount){return {...mount,mode:mode};});
+    setProfileJson(pretty(next));
+  }
+
+  async function saveProfile(replace){
+    if(!profile){
+      setResult({ok:false,message:"Profile JSON is invalid"});
+      return;
+    }
+    var response=await callAgentWorkspace("profileSave",{profile:profile,replace:replace});
+    if(response?.ok)refresh();
+  }
+
+  function previewStart(){
+    if(!profile?.id)return;
+    setSelectedProfileId(profile.id);
+    callAgentWorkspace("workspaceOpenProfile",{
+      profileId:profile.id,
+      dryRun:true,
+      purpose:purpose||"Codex agent workspace",
+      runSetup:true,
+      startupWaitWindow:true
+    });
+  }
+
+  function startWorkspace(){
+    if(!profile?.id||activeWorkspace)return;
+    callAgentWorkspace("workspaceOpenProfile",{
+      profileId:profile.id,
+      ackHiddenWorkspace:true,
+      ackUnenforcedPolicy:true,
+      purpose:purpose||"Codex agent workspace",
+      runSetup:true,
+      startupWaitWindow:true
+    }).then(refresh);
+  }
+
+  function stopWorkspace(workspaceId){
+    callAgentWorkspace("workspaceStop",{workspaceId:workspaceId}).then(refresh);
+  }
+
+  return h(SettingsPage,{title:"Agent Workspaces",subtitle:"Linux agent environments"},
+    h("div",{className:"flex max-w-5xl flex-col gap-5 p-1"},
+      h("section",{className:"grid gap-3 md:grid-cols-[1fr_auto]"},
+        field("Command",command,setCommand,"agent-workspace-linux"),
+        h("div",{className:"flex items-end gap-2"},
+          button("Save",activeAction==="doctor",saveCommand),
+          button("Refresh",activeAction==="profileList"||loading,refresh)
+        )
+      ),
+
+      h("section",{className:"flex flex-col gap-2"},
+        h("div",{className:"flex items-center justify-between"},
+          h("div",{className:"text-sm font-medium text-token-text-primary"},"Active workspace"),
+          activeWorkspace?statusPill("Active","active"):statusPill("Idle","idle")
+        ),
+        activeWorkspace
+          ? h("div",{className:"flex items-center justify-between gap-3 rounded-md border border-token-border-default p-3 text-sm"},
+              h("div",{className:"min-w-0"},
+                h("div",{className:"truncate text-token-text-primary"},workspacePrimary(activeWorkspace)),
+                workspaceSecondary(activeWorkspace)?h("div",{className:"truncate text-token-text-tertiary"},workspaceSecondary(activeWorkspace)):null,
+                workspaceDisplay(activeWorkspace)?h("div",{className:"mt-1 text-xs text-token-text-tertiary"},workspaceDisplay(activeWorkspace)):null
+              ),
+              h("div",{className:"flex shrink-0 gap-2"},
+                button("Status",false,function(){callAgentWorkspace("workspaceStatus",{workspaceId:workspaceId(activeWorkspace)});}),
+                button("Stop",false,function(){stopWorkspace(workspaceId(activeWorkspace));})
+              )
+            )
+          : h("div",{className:"rounded-md border border-dashed border-token-border-default p-3 text-sm text-token-text-tertiary"},"No active workspace"),
+        otherRunningWorkspaces.length>0
+          ? h("details",{className:"rounded-md border border-yellow-500/30 bg-token-main-surface-secondary text-sm"},
+              h("summary",{className:"cursor-pointer px-3 py-2 text-token-text-primary"},"Other running workspaces ("+otherRunningWorkspaces.length+")"),
+              h("div",{className:"flex flex-col gap-2 border-t border-token-border-default p-2"},
+                otherRunningWorkspaces.map(function(workspace){
+                  var id=workspaceId(workspace);
+                  return h("div",{key:id,className:"flex items-center justify-between gap-2 rounded-md border border-token-border-default p-2"},
+                    h("div",{className:"min-w-0"},
+                      h("div",{className:"truncate text-token-text-primary"},workspacePrimary(workspace)),
+                      workspaceSecondary(workspace)?h("div",{className:"truncate text-token-text-tertiary"},workspaceSecondary(workspace)):null
+                    ),
+                    button("Stop",false,function(){stopWorkspace(id);})
+                  );
+                })
+              )
+            )
+          : null,
+        stoppedWorkspaceCount>0
+          ? h("div",{className:"flex items-center justify-between rounded-md border border-token-border-default px-3 py-2 text-sm text-token-text-tertiary"},
+              h("span",null,"Stopped workspaces: "+stoppedWorkspaceCount),
+              button("Cleanup stale",activeAction==="workspaceCleanup",function(){callAgentWorkspace("workspaceCleanup",{dryRun:true});})
+            )
+          : null
+      ),
+
+      h("section",{className:"flex flex-col gap-3"},
+        h("div",{className:"flex items-center justify-between"},
+          h("div",{className:"text-sm font-medium text-token-text-primary"},"Saved profiles"),
+          h("div",{className:"flex gap-2"},
+            button("New",false,function(){setSelectedProfileId("");setProfileJson(pretty(defaultProfile()));}),
+            button("Delete",!selectedProfileId,function(){callAgentWorkspace("profileDelete",{profileId:selectedProfileId}).then(refresh);})
+          )
+        ),
+        profiles.length===0
+          ? h("div",{className:"rounded-md border border-dashed border-token-border-default p-3 text-sm text-token-text-tertiary"},"No saved profiles")
+          : h("div",{className:"grid gap-2 md:grid-cols-2"},
+              profiles.map(function(savedProfile){
+                var id=profileId(savedProfile);
+                var selected=id===selectedProfileId;
+                return h("button",{
+                  key:id,
+                  type:"button",
+                  className:"rounded-md border p-3 text-left text-sm hover:bg-token-main-surface-secondary "+(selected?"border-token-border-strong bg-token-main-surface-secondary":"border-token-border-default"),
+                  onClick:function(){selectProfile(id);}
+                },
+                  h("div",{className:"flex items-center justify-between gap-2"},
+                    h("span",{className:"truncate font-medium text-token-text-primary"},id),
+                    statusPill(profileNetwork(savedProfile),"idle")
+                  ),
+                  h("div",{className:"mt-1 truncate text-token-text-tertiary"},profileSummary(savedProfile))
+                );
+              })
+            )
+      ),
+
+      h("section",{className:"flex flex-col gap-3"},
+        h("div",{className:"flex items-center justify-between"},
+          h("div",{className:"text-sm font-medium text-token-text-primary"},"Profile editor"),
+          statusPill(selectedProfileId||"New","idle")
+        ),
+        h("div",{className:"grid gap-3 md:grid-cols-[1fr_220px]"},
+          field("Purpose",purpose,setPurpose,"QA run"),
+          h("label",{className:"flex flex-col gap-1 text-sm text-token-text-secondary"},
+            h("span",null,"Network"),
+            h("select",{
+              className:"h-9 rounded-md border border-token-border-default bg-token-bg-primary px-2 text-token-text-primary",
+              value:profile?.network?.mode||"inherit_host",
+              onChange:function(event){setNetworkMode(event.target.value);}
+            },
+              ["inherit_host","local_only","disabled","allowlist"].map(function(mode){
+                return h("option",{key:mode,value:mode},mode);
+              })
+            )
+          )
+        ),
+        h("div",{className:"flex flex-wrap items-center justify-between gap-2"},
+          h("div",{className:"flex flex-wrap gap-2"},
+            button("Read only",!profile,function(){setMountMode("read_only");}),
+            button("Read write",!profile,function(){setMountMode("read_write");})
+          ),
+          h("div",{className:"flex flex-wrap gap-2"},
+            button("Validate",!profile,function(){callAgentWorkspace("profileSave",{profile:profile,dryRun:true,replace:true});}),
+            button("Save",!profile,function(){saveProfile(false);}),
+            button("Overwrite",!profile,function(){saveProfile(true);})
+          )
+        ),
+        h("textarea",{
+          className:"min-h-[220px] rounded-md border border-token-border-default bg-token-bg-primary p-3 font-mono text-xs text-token-text-primary outline-none",
+          value:profileJson,
+          onChange:function(event){setProfileJson(event.target.value);},
+          spellCheck:false
+        }),
+        h("div",{className:"flex flex-wrap gap-2"},
+          button("Preview start",!profile,previewStart),
+          button("Start",startDisabled,startWorkspace)
+        )
+      ),
+
+      resultView(result)
+    )
+  );
+}
+
+export{AgentWorkspacesSettings,AgentWorkspacesSettings as default};
+//# sourceMappingURL=${SETTINGS_ASSET}.map
+`;
 }
 
 function webviewAssetsDir(extractedDir) {
@@ -231,6 +636,45 @@ function applyAgentWorkspaceSettingsIndexPatch(currentSource) {
   return patchedSource;
 }
 
+function applyAgentWorkspaceSettingsPagePatch(currentSource) {
+  let patchedSource = currentSource;
+
+  if (
+    !new RegExp(`[,{]"${SETTINGS_SLUG}":[A-Za-z_$][\\w$]*,worktrees`).test(patchedSource) &&
+    /"local-environments":([A-Za-z_$][\w$]*),worktrees:/.test(patchedSource)
+  ) {
+    patchedSource = patchedSource.replace(
+      /"local-environments":([A-Za-z_$][\w$]*),worktrees:/,
+      `"local-environments":$1,"${SETTINGS_SLUG}":$1,worktrees:`,
+    );
+  }
+
+  patchedSource = patchedSource.replaceAll(
+    "`local-environments`,`worktrees`",
+    "`local-environments`,`agent-workspaces`,`worktrees`",
+  );
+
+  if (!patchedSource.includes("case`local-environments`:case`agent-workspaces`:case`environments`:return")) {
+    patchedSource = patchedSource.replace(
+      "case`appearance`:case`git-settings`:case`worktrees`:case`local-environments`:case`environments`:return",
+      "case`appearance`:case`git-settings`:case`worktrees`:case`local-environments`:case`agent-workspaces`:case`environments`:return",
+    );
+  }
+
+  if (!patchedSource.includes("case`local-environments`:case`agent-workspaces`:case`worktrees`:case`environments`:")) {
+    patchedSource = patchedSource.replace(
+      "case`local-environments`:case`worktrees`:case`environments`:",
+      "case`local-environments`:case`agent-workspaces`:case`worktrees`:case`environments`:",
+    );
+  }
+
+  if (!patchedSource.includes(`\`${SETTINGS_SLUG}\``)) {
+    throw new Error("could not add agent workspace settings navigation");
+  }
+
+  return patchedSource;
+}
+
 function patchAgentWorkspaceRouteAssets(extractedDir) {
   const assetsDir = webviewAssetsDir(extractedDir);
   const candidates = fs
@@ -284,6 +728,12 @@ function patchAgentWorkspaceSettingsAssets(extractedDir) {
         applyAgentWorkspaceSettingsSharedPatch,
         "settings shared bundle",
       ),
+      ...patchRequiredAssets(
+        extractedDir,
+        /^settings-page-.*\.js$/,
+        applyAgentWorkspaceSettingsPagePatch,
+        "settings page bundle",
+      ),
       ...patchAgentWorkspaceRouteAssets(extractedDir),
     ];
 
@@ -334,6 +784,7 @@ module.exports = {
   SETTINGS_SLUG,
   applyAgentWorkspaceMainBridgePatch,
   applyAgentWorkspaceSettingsIndexPatch,
+  applyAgentWorkspaceSettingsPagePatch,
   applyAgentWorkspaceSettingsSectionsPatch,
   applyAgentWorkspaceSettingsSharedPatch,
   buildAgentWorkspaceSettingsSource,

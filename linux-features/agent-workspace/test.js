@@ -2,6 +2,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -20,8 +21,10 @@ const {
   SETTINGS_SLUG,
   applyAgentWorkspaceMainBridgePatch,
   applyAgentWorkspaceSettingsIndexPatch,
+  applyAgentWorkspaceSettingsPagePatch,
   applyAgentWorkspaceSettingsSectionsPatch,
   applyAgentWorkspaceSettingsSharedPatch,
+  buildAgentWorkspaceSettingsSource,
   patches: featurePatches,
 } = require("./patch.js");
 
@@ -119,6 +122,16 @@ function syntheticIndex() {
   ].join("");
 }
 
+function syntheticSettingsPage() {
+  return [
+    'var pe={"general-settings":G,"browser-use":de,"computer-use":oe,"read-aloud-settings":codexLinuxReadAloudSettingsIcon,"local-environments":q,worktrees:W,"data-controls":U};',
+    "var me=[`general-settings`,`appearance`,`agent`,`personalization`,`mcp-settings`,`hooks-settings`,`connections`,`git-settings`,`local-environments`,`worktrees`,`browser-use`,`computer-use`,`read-aloud-settings`,`data-controls`];",
+    "var he=[{key:`app`,heading:Q.appHeading,slugs:[`general-settings`,`appearance`,`connections`,`git-settings`,`usage`]},{key:`connection`,heading:Q.hostHeading,slugs:[`agent`,`personalization`,`mcp-settings`,`hooks-settings`,`browser-use`,`computer-use`,`read-aloud-settings`,`local-environments`,`worktrees`,`data-controls`]}];",
+    "function visible(e){switch(e.slug){case`read-aloud-settings`:return a;case`computer-use`:return A;case`browser-use`:return j;case`appearance`:case`git-settings`:case`worktrees`:case`local-environments`:case`environments`:return!0;case`data-controls`:return!0;}}",
+    "if(R)bb0:switch(L.slug){case`computer-use`:z=k.isLoading||m.isLoading;break bb0;case`browser-use`:z=f.isLoading||m.isLoading||_;break bb0;case`local-environments`:case`worktrees`:case`environments`:case`mcp-settings`:case`connections`:z=!1}",
+  ].join("");
+}
+
 function syntheticAppMainRouteRegistry() {
   return [
     "function render(e){return routeMap[e.slug]}",
@@ -136,6 +149,7 @@ function writeSyntheticExtractedApp(root) {
   fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "codex" }));
   fs.writeFileSync(path.join(assetsDir, "settings-sections-test.js"), syntheticSettingsSections());
   fs.writeFileSync(path.join(assetsDir, "settings-shared-test.js"), syntheticSettingsShared());
+  fs.writeFileSync(path.join(assetsDir, "settings-page-test.js"), syntheticSettingsPage());
   fs.writeFileSync(path.join(assetsDir, "index-test.js"), syntheticIndex());
   fs.writeFileSync(path.join(assetsDir, "chunk-test.js"), "export function s(e){return e}");
   fs.writeFileSync(path.join(assetsDir, "react-test.js"), 'import{s}from"./chunk-test.js";/* react.transitional.element */export{ReactFactory as t};function ReactFactory(){return{createElement(){return{}},useState(){return[null,()=>{}]},useCallback(e){return e},useEffect(){}}}');
@@ -179,6 +193,35 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   assert.match(warnings.join("\n"), /Could not find Node module aliases/);
 });
 
+test("generated agent workspace settings module is valid ESM syntax", () => {
+  const source = buildAgentWorkspaceSettingsSource({
+    chunkAsset: "chunk-test.js",
+    reactAsset: "react-test.js",
+    reactExportName: "t",
+    settingsPageAsset: "settings-content-layout-test.js",
+    settingsPageExportName: "t",
+    vscodeApiAsset: "vscode-api-test.js",
+  });
+  const check = spawnSync(process.execPath, ["--input-type=module", "--check"], {
+    encoding: "utf8",
+    input: source,
+  });
+  assert.equal(check.status, 0, check.stderr || check.stdout);
+  assert.match(source, /export\{AgentWorkspacesSettings,AgentWorkspacesSettings as default\}/);
+  assert.match(source, /function resultSummary/);
+  assert.match(source, /function workspaceRunning/);
+  assert.match(source, /function workspaceSummary/);
+  assert.match(source, /function workspacePrimary/);
+  assert.match(source, /function workspaceSecondary/);
+  assert.match(source, /Active workspace/);
+  assert.match(source, /Saved profiles/);
+  assert.match(source, /Stopped workspaces: /);
+  assert.match(source, /h\("details"/);
+  assert.match(source, /var activeWorkspace=runningWorkspaces\[0\]\?\?null/);
+  assert.doesNotMatch(source, /workspace\.profile_id\|\|workspace\.purpose\|\|workspace\.status/);
+  assert.doesNotMatch(source, /workspaces\.map\(function\(workspace\)/);
+});
+
 test("settings asset patches add navigation, route, visibility, and title", () => {
   const sections = applyAgentWorkspaceSettingsSectionsPatch(syntheticSettingsSections());
   assert.match(sections, new RegExp(`slug:\`${SETTINGS_SLUG}\``));
@@ -204,6 +247,13 @@ test("settings asset patches add navigation, route, visibility, and title", () =
   assert.match(appMain, new RegExp(SETTINGS_ASSET));
   assert.doesNotMatch(appMain, new RegExp(`"${SETTINGS_SLUG}":Icon`));
   assert.equal(applyAgentWorkspaceSettingsIndexPatch(appMain), appMain);
+
+  const settingsPage = applyAgentWorkspaceSettingsPagePatch(syntheticSettingsPage());
+  assert.match(settingsPage, new RegExp(`"${SETTINGS_SLUG}":q`));
+  assert.match(settingsPage, /`local-environments`,`agent-workspaces`,`worktrees`/);
+  assert.match(settingsPage, /case`local-environments`:case`agent-workspaces`:case`environments`:return!0/);
+  assert.match(settingsPage, /case`local-environments`:case`agent-workspaces`:case`worktrees`:case`environments`/);
+  assert.equal(applyAgentWorkspaceSettingsPagePatch(settingsPage), settingsPage);
 });
 
 test("agent-workspace feature participates in ASAR patching and reports", () => {
@@ -224,6 +274,7 @@ test("agent-workspace feature participates in ASAR patching and reports", () => 
         assert.match(fs.readFileSync(path.join(assetsDir, SETTINGS_ASSET), "utf8"), /AgentWorkspacesSettings/);
         assert.match(fs.readFileSync(path.join(assetsDir, "settings-sections-test.js"), "utf8"), /agent-workspaces/);
         assert.match(fs.readFileSync(path.join(assetsDir, "settings-shared-test.js"), "utf8"), /Agent Workspaces/);
+        assert.match(fs.readFileSync(path.join(assetsDir, "settings-page-test.js"), "utf8"), /agent-workspaces/);
         assert.match(fs.readFileSync(path.join(assetsDir, "index-test.js"), "utf8"), new RegExp(SETTINGS_ASSET));
         assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:main-bridge" && patch.status === "applied"));
         assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:settings-page" && patch.status === "applied"));
