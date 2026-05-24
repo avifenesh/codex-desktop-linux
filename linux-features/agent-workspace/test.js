@@ -781,7 +781,7 @@ test("conversation visibility runtime is valid script and idempotent", () => {
   assert.match(runtime, /function beginInteraction/);
   assert.match(runtime, /pointerdown/);
   assert.match(runtime, /codex-linux-agent-workspace-resize/);
-  assert.match(runtime, /codex-linux-agent-workspace-theme-v9/);
+  assert.match(runtime, /codex-linux-agent-workspace-theme-v10/);
   assert.match(runtime, /function removeOldPanels/);
   assert.match(runtime, /codexLinuxAgentWorkspaceConversationCleanup/);
   assert.match(runtime, /--color-token-main-surface-primary/);
@@ -791,8 +791,8 @@ test("conversation visibility runtime is valid script and idempotent", () => {
   assert.match(runtime, /--color-token-border-default/);
   assert.match(runtime, /Drag workspace viewer/);
   assert.match(runtime, /Resize workspace viewer/);
-  assert.match(runtime, /profile /);
-  assert.match(runtime, /network /);
+  assert.match(runtime, /Profile /);
+  assert.match(runtime, /Network /);
   assert.match(runtime, /mount/);
 
   const patched = applyAgentWorkspaceConversationViewPatch("let thread=1;");
@@ -1001,12 +1001,14 @@ test("conversation visibility runtime renders and stops an active workspace", as
   assert.ok(resize);
   assert.ok(head);
   assert.equal(title.textContent, "QA live view");
-  assert.match(meta.textContent, /:90/);
-  assert.match(meta.textContent, /profile desktop-qa/);
-  assert.match(meta.textContent, /network disabled/);
+  assert.match(meta.textContent, /Workspace active/);
+  assert.doesNotMatch(meta.textContent, /:90/);
+  assert.match(meta.textContent, /Profile desktop-qa/);
+  assert.match(meta.textContent, /Network disabled/);
   assert.match(meta.textContent, /2 mounts/);
-  assert.match(meta.textContent, /1 app: chrome/);
-  assert.equal(meta.title, meta.textContent);
+  assert.match(meta.textContent, /1 app running/);
+  assert.match(meta.title, /Display :90/);
+  assert.match(meta.title, /1 app: chrome/);
   assert.equal(image.src, "data:image/png;base64,abc");
   assert.equal(panel.style.width, "420px");
   assert.equal(panel.style.height, "320px");
