@@ -46,6 +46,13 @@ workspace screenshot and its Stop control issued the expected workspace stop
 request through the bridge. The live stop path was exercised from the embedded
 panel and left the workspace manifest with `ready: false`.
 
+Settings dogfood: the same side-by-side dev app opened Settings inside a hidden
+workspace, showed the **Agent Workspaces** sidebar entry and page, rendered the
+active workspace card, and opened the **Chrome template** create form with the
+disabled-network `restricted-chrome` profile plus its explicit
+`restricted-chrome-no-sandbox` startup command. The form was not saved during the
+test, and cleanup left no saved profiles or active workspaces.
+
 Run the feature tests with:
 
 ```bash
