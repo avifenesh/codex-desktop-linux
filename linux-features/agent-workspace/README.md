@@ -18,7 +18,8 @@ The feature adds a Linux-only settings section named **Agent Workspaces**. The
 page can point Codex Desktop at an `agent-workspace-linux` binary, list and edit
 saved profiles, validate profile JSON without saving, preview profile-backed
 workspace starts, start a hidden workspace after explicit acknowledgement, stop
-running workspaces, and run stale workspace cleanup.
+running workspaces, run stale workspace cleanup, and create a restricted Chrome
+starter profile that keeps the `--no-sandbox` browser tradeoff visible.
 
 The bridge is intentionally allowlisted. It invokes `agent-workspace-linux`
 through `execFile`, never through a shell, and exposes only profile/workspace

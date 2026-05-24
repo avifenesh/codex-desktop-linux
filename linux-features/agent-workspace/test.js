@@ -374,6 +374,8 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   assert.match(patched, /startsWith\(`~\/`\)/);
   assert.match(patched, /case`profileValidate`/);
   assert.match(patched, /\[`profile`,`validate`,`--json`,__codexTempPath\]/);
+  assert.match(patched, /case`profileTemplate`/);
+  assert.match(patched, /--browser-path/);
   assert.match(patched, /case`workspaceOpenProfile`/);
   assert.match(patched, /case`workspaceStart`/);
   assert.match(patched, /case`workspaceObserve`/);
@@ -435,6 +437,10 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /Workspace name/);
   assert.doesNotMatch(source, /Saved profiles/);
   assert.match(source, /Create new/);
+  assert.match(source, /Chrome template/);
+  assert.match(source, /function createRestrictedChromeProfile/);
+  assert.match(source, /profileTemplate/);
+  assert.match(source, /restricted-chrome/);
   assert.match(source, /Edit saved/);
   assert.match(source, /profileValidate/);
   assert.match(source, /Save changes/);
