@@ -7,6 +7,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 const {
   enabledLinuxFeatureIds,
   loadLinuxFeaturePatchDescriptors,
@@ -164,6 +165,179 @@ function writeSyntheticExtractedApp(root) {
   return { buildDir, assetsDir };
 }
 
+class FakeElement {
+  constructor(tagName, ownerDocument) {
+    this.tagName = tagName.toUpperCase();
+    this.ownerDocument = ownerDocument;
+    this.children = [];
+    this.parentNode = null;
+    this.attributes = new Map();
+    this.listeners = new Map();
+    this._textContent = "";
+    this._hidden = false;
+    this.className = "";
+    this.id = "";
+    this.src = "";
+    this.alt = "";
+    this.title = "";
+  }
+
+  appendChild(child) {
+    child.parentNode = this;
+    this.children.push(child);
+    if (child.id) this.ownerDocument.byId.set(child.id, child);
+    return child;
+  }
+
+  replaceWith(next) {
+    const siblings = this.parentNode?.children;
+    if (!siblings) return;
+    const index = siblings.indexOf(this);
+    if (index >= 0) {
+      next.parentNode = this.parentNode;
+      siblings[index] = next;
+    }
+  }
+
+  addEventListener(type, callback) {
+    const listeners = this.listeners.get(type) || [];
+    listeners.push(callback);
+    this.listeners.set(type, listeners);
+  }
+
+  click() {
+    for (const callback of this.listeners.get("click") || []) {
+      callback({ preventDefault() {} });
+    }
+  }
+
+  set hidden(value) {
+    this._hidden = !!value;
+  }
+
+  get hidden() {
+    return this._hidden;
+  }
+
+  set textContent(value) {
+    this._textContent = String(value ?? "");
+  }
+
+  get textContent() {
+    return this._textContent;
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+    if (name === "id") {
+      this.id = String(value);
+      this.ownerDocument.byId.set(this.id, this);
+    }
+    if (name === "class") this.className = String(value);
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
+  }
+
+  set innerHTML(value) {
+    this._innerHTML = String(value ?? "");
+    if (this.className !== "codex-linux-agent-workspace-panel") return;
+    this.children = [];
+
+    const head = this.ownerDocument.createElement("div");
+    head.className = "codex-linux-agent-workspace-head";
+    const dot = this.ownerDocument.createElement("span");
+    dot.className = "codex-linux-agent-workspace-dot";
+    const title = this.ownerDocument.createElement("div");
+    title.className = "codex-linux-agent-workspace-title";
+    const actions = this.ownerDocument.createElement("div");
+    actions.className = "codex-linux-agent-workspace-actions";
+    const refresh = this.ownerDocument.createElement("button");
+    refresh.setAttribute("data-action", "refresh");
+    const stop = this.ownerDocument.createElement("button");
+    stop.setAttribute("data-action", "stop");
+    actions.appendChild(refresh);
+    actions.appendChild(stop);
+    head.appendChild(dot);
+    head.appendChild(title);
+    head.appendChild(actions);
+
+    const empty = this.ownerDocument.createElement("div");
+    empty.className = "codex-linux-agent-workspace-empty";
+    empty.textContent = "No screenshot yet";
+    const meta = this.ownerDocument.createElement("div");
+    meta.className = "codex-linux-agent-workspace-meta";
+    const error = this.ownerDocument.createElement("div");
+    error.className = "codex-linux-agent-workspace-error";
+    error.hidden = true;
+
+    this.appendChild(head);
+    this.appendChild(empty);
+    this.appendChild(meta);
+    this.appendChild(error);
+  }
+
+  get innerHTML() {
+    return this._innerHTML || "";
+  }
+
+  querySelector(selector) {
+    return findElement(this, selector);
+  }
+}
+
+function findElement(root, selector) {
+  const matches = (element) => {
+    if (selector.startsWith(".")) {
+      return String(element.className || "").split(/\s+/).includes(selector.slice(1));
+    }
+    const dataAction = selector.match(/^\[data-action='([^']+)'\]$/);
+    if (dataAction) {
+      return element.getAttribute("data-action") === dataAction[1];
+    }
+    return false;
+  };
+  const stack = [...root.children];
+  while (stack.length > 0) {
+    const element = stack.shift();
+    if (matches(element)) return element;
+    stack.unshift(...element.children);
+  }
+  return null;
+}
+
+function createFakeDocument() {
+  const document = {
+    readyState: "complete",
+    byId: new Map(),
+    body: null,
+    head: null,
+    createElement(tagName) {
+      return new FakeElement(tagName, document);
+    },
+    getElementById(id) {
+      return document.byId.get(id) || null;
+    },
+    addEventListener() {},
+  };
+  document.body = document.createElement("body");
+  document.head = document.createElement("head");
+  return document;
+}
+
+function waitFor(condition, message) {
+  const deadline = Date.now() + 1000;
+  return new Promise((resolve, reject) => {
+    function tick() {
+      if (condition()) return resolve();
+      if (Date.now() > deadline) return reject(new Error(message));
+      setTimeout(tick, 5);
+    }
+    tick();
+  });
+}
+
 test("agent-workspace feature stays disabled until listed in features.json", () => {
   withTempFeatureConfig([], (root) => {
     assert.deepEqual(enabledLinuxFeatureIds({ featuresRoot: root }), []);
@@ -301,6 +475,7 @@ test("conversation visibility runtime is valid script and idempotent", () => {
   assert.match(runtime, new RegExp(CONVERSATION_RUNTIME_VERSION));
   assert.match(runtime, /workspaceObserve/);
   assert.match(runtime, /workspaceStop/);
+  assert.match(runtime, /bridgeError/);
   assert.match(runtime, /codex-linux-agent-workspace-panel/);
   assert.match(runtime, /data_url/);
   assert.match(runtime, /function policySummary/);
@@ -312,6 +487,120 @@ test("conversation visibility runtime is valid script and idempotent", () => {
   const patched = applyAgentWorkspaceConversationViewPatch("let thread=1;");
   assert.match(patched, new RegExp(CONVERSATION_RUNTIME_VERSION));
   assert.equal(applyAgentWorkspaceConversationViewPatch(patched), patched);
+});
+
+test("conversation visibility runtime renders and stops an active workspace", async () => {
+  const document = createFakeDocument();
+  const calls = [];
+  const listeners = new Map();
+  let stopFails = true;
+  const activeStatus = {
+    id: "qa-live",
+    ready: true,
+    display: ":90",
+    purpose: "QA live view",
+    profile_id: "desktop-qa",
+    applied_policy: {
+      profile_id: "desktop-qa",
+      network: { mode: "disabled" },
+      mounts: [{}, {}],
+    },
+    apps: [{ id: "app-1", name: "chrome", running: true }],
+  };
+  const window = {
+    document,
+    addEventListener(type, callback) {
+      const callbacks = listeners.get(type) || [];
+      callbacks.push(callback);
+      listeners.set(type, callbacks);
+    },
+    dispatchEvent(event) {
+      const payload = event.detail;
+      if (payload?.type !== "fetch") return true;
+      const params = JSON.parse(payload.body);
+      calls.push(params);
+      let response;
+      if (params.action === "workspaceList") {
+        response = { json: { workspaces: [{ id: "qa-live", running: true, status: activeStatus }] } };
+      } else if (params.action === "workspaceObserve") {
+        response = { json: { status: activeStatus, screenshot: { data_url: "data:image/png;base64,abc" } } };
+      } else if (params.action === "workspaceStop") {
+        if (stopFails) {
+          response = { ok: false, message: "stop failed", json: { ok: false, message: "stop failed" } };
+        } else {
+          activeStatus.ready = false;
+          response = { ok: true, json: { ok: true, status: activeStatus } };
+        }
+      } else {
+        response = { json: { ok: false } };
+      }
+      setTimeout(() => {
+        for (const callback of listeners.get("message") || []) {
+          callback({
+            data: {
+              type: "fetch-response",
+              requestId: payload.requestId,
+              responseType: "success",
+              status: 200,
+              bodyJsonString: JSON.stringify(response),
+            },
+          });
+        }
+      }, 0);
+      return true;
+    },
+  };
+  const context = vm.createContext({
+    CustomEvent: class CustomEvent {
+      constructor(type, options) {
+        this.type = type;
+        this.detail = options?.detail;
+      }
+    },
+    clearTimeout,
+    console,
+    document,
+    globalThis: null,
+    setInterval() {
+      return 1;
+    },
+    setTimeout,
+    window,
+  });
+  context.globalThis = context;
+
+  vm.runInContext(agentWorkspaceConversationRuntimeSource(), context);
+  await waitFor(
+    () => document.body.querySelector(".codex-linux-agent-workspace-panel")?.hidden === false,
+    "workspace panel should become visible",
+  );
+
+  const panel = document.body.querySelector(".codex-linux-agent-workspace-panel");
+  const title = panel.querySelector(".codex-linux-agent-workspace-title");
+  const meta = panel.querySelector(".codex-linux-agent-workspace-meta");
+  const error = panel.querySelector(".codex-linux-agent-workspace-error");
+  const image = panel.querySelector(".codex-linux-agent-workspace-shot");
+  assert.equal(title.textContent, "QA live view");
+  assert.match(meta.textContent, /:90/);
+  assert.match(meta.textContent, /profile desktop-qa/);
+  assert.match(meta.textContent, /network disabled/);
+  assert.match(meta.textContent, /2 mounts/);
+  assert.match(meta.textContent, /1 app: chrome/);
+  assert.equal(meta.title, meta.textContent);
+  assert.equal(image.src, "data:image/png;base64,abc");
+
+  panel.querySelector("[data-action='stop']").click();
+  await waitFor(
+    () => calls.some((call) => call.action === "workspaceStop" && call.workspaceId === "qa-live"),
+    "stop action should be sent for active workspace",
+  );
+  await waitFor(() => error.hidden === false, "failed stop should show an error");
+  assert.equal(panel.hidden, false);
+  assert.equal(error.textContent, "stop failed");
+
+  stopFails = false;
+  panel.querySelector("[data-action='stop']").click();
+  await waitFor(() => panel.hidden === true, "workspace panel should hide after stop");
 });
 
 test("settings asset patches add navigation, route, visibility, and title", () => {
