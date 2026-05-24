@@ -62,7 +62,12 @@ Dogfood check: the side-by-side dev app built with `make build-dev-app` has been
 launched inside an agent workspace. The conversation panel rendered the live
 workspace screenshot and its Stop control issued the expected workspace stop
 request through the bridge. The live stop path was exercised from the embedded
-panel and left the workspace manifest with `ready: false`.
+panel and left the workspace manifest with `ready: false`. The installed app
+bundle was also launched inside the `mcp-visible` workspace with the real
+`CODEX_HOME` and `CODEX_AGENT_WORKSPACE_BIN`; Chrome DevTools Protocol confirmed
+the conversation panel rendered the live screenshot, workspace metadata,
+Refresh/Stop/Revoke controls, and a working Refresh action without console
+errors.
 
 Settings dogfood: the same side-by-side dev app opened Settings inside a hidden
 workspace, showed the **Agent Workspaces** sidebar entry and page, rendered the
