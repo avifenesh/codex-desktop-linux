@@ -57,8 +57,9 @@ agent workspace is active. It uses the current Codex `--color-token-*` theme
 variables first, with older token names only as fallback, polls `workspace observe
 --screenshot` through the allowlisted bridge, renders the latest screenshot in
 the conversation surface, shows a user-facing `Workspace active` summary with
-profile/policy and app count, keeps display numbers and internal app names in
-hover detail, and exposes Refresh, Stop, and Revoke buttons next to the live view.
+profile/policy and app count, keeps raw display numbers out of normal cards and
+labels hover display detail as hidden workspace plumbing, and exposes Refresh,
+Stop, and Revoke buttons next to the live view.
 The panel can be dragged by its header, resized from its lower-right handle, and
 keeps its clamped position/size in local storage so it does not stay stuck over
 half the conversation. Newer injected runtimes clean up older panel instances

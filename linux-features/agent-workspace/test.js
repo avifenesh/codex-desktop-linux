@@ -747,6 +747,8 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /startSavedWorkspace\(savedProfile\)/);
   assert.match(source, /workspaceStart/);
   assert.match(source, /Delete stale/);
+  assert.doesNotMatch(source, /workspaceDisplay\(activeWorkspace\)/);
+  assert.doesNotMatch(source, /workspaceDisplay\(workspace\)/);
   assert.match(source, /h\("details"/);
   assert.match(source, /function activeWorkspaceFromList/);
   assert.match(source, /var activeWorkspace=activeWorkspaceFromList\(workspaces\)/);
@@ -1067,8 +1069,9 @@ test("conversation visibility runtime renders and stops an active workspace", as
   assert.match(meta.textContent, /Network disabled/);
   assert.match(meta.textContent, /2 mounts/);
   assert.match(meta.textContent, /1 app running/);
-  assert.match(meta.title, /Display :90/);
-  assert.match(meta.title, /1 app: chrome/);
+  assert.match(meta.title, /Hidden display :90/);
+  assert.match(meta.title, /1 app running/);
+  assert.doesNotMatch(meta.title, /chrome/);
   assert.equal(image.src, "data:image/png;base64,abc");
   assert.equal(panel.style.width, "420px");
   assert.equal(panel.style.height, "320px");

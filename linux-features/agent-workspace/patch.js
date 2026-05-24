@@ -162,7 +162,7 @@ function applyAgentWorkspaceMainBridgePatch(currentSource) {
   );
 }
 
-const CONVERSATION_RUNTIME_VERSION = "agent-workspace-conversation-v10";
+const CONVERSATION_RUNTIME_VERSION = "agent-workspace-conversation-v11";
 
 function agentWorkspaceConversationRuntimeSource() {
   return String.raw`
@@ -180,10 +180,10 @@ function shortText(value){return typeof value==="string"&&value.trim()?value.tri
 function runningApps(apps){return Array.isArray(apps)?apps.filter(e=>e?.running!==!1):[]}
 function appLabel(app){let name=shortText(app?.name)||shortText(app?.id);if(name)return name;let command=Array.isArray(app?.command)?app.command:[];let first=shortText(command[0]);return first?first.split("/").filter(Boolean).pop():null}
 function appSummary(apps){let count=runningApps(apps).length;if(count===0)return"No apps running";return count+" app"+(count===1?"":"s")+" running"}
-function appDebugSummary(apps){let running=runningApps(apps),count=running.length;if(count===0)return"0 apps";let names=running.map(appLabel).filter(Boolean).slice(0,3).join(", "),extra=count>3?" +"+(count-3):"";return count+" app"+(count===1?"":"s")+(names?": "+names+extra:"")}
+function appDebugSummary(apps){return appSummary(apps)}
 function policySummary(status){let policy=status?.applied_policy||{},profile=shortText(status?.profile_id)||shortText(policy?.profile_id),network=shortText(policy?.network?.mode),mountCount=Array.isArray(policy?.mounts)?policy.mounts.length:0,parts=[];profile&&parts.push("Profile "+profile);network&&network!=="inherit_host"&&parts.push("Network "+network.replaceAll("_","-"));mountCount>0&&parts.push(mountCount+" mount"+(mountCount===1?"":"s"));return parts.join(" · ")}
 function statusText(status,apps){return ["Workspace active",policySummary(status),appSummary(apps)].filter(Boolean).join(" · ")}
-function statusDetailText(status,apps){let display=status?.display?"Display "+status.display:"";return [display,policySummary(status),appDebugSummary(apps)].filter(Boolean).join(" · ")}
+function statusDetailText(status,apps){let display=status?.display?"Hidden display "+status.display:"";return [display,policySummary(status),appDebugSummary(apps)].filter(Boolean).join(" · ")}
 function inSettingsView(){let text=String(document.body?.innerText||document.body?.textContent||"").trim();return /^Back to app\s+App\s+General\s+Appearance\s+Connections\b/.test(text)}
 function scheduleViewCheck(){if(state.viewTimer)clearTimeout(state.viewTimer);state.viewTimer=setTimeout(()=>{state.viewTimer=null;if(inSettingsView())hide();else if(!state.visible)refresh(!0)},80)}
 function watchViewChanges(){if(state.viewObserver||typeof MutationObserver!="function"||!document.body)return;state.viewObserver=new MutationObserver(scheduleViewCheck);state.viewObserver.observe(document.body,{childList:!0,subtree:!0,characterData:!0})}
@@ -470,13 +470,6 @@ function workspaceSecondary(workspace){
   var id=workspaceId(workspace);
   var primary=workspacePrimary(workspace);
   return id&&id!==primary?id:null;
-}
-
-function workspaceDisplay(workspace){
-  var display=workspace?.status?.display||workspace?.manifest?.display||workspace?.display||null;
-  if(!display)return null;
-  if(display===workspacePrimary(workspace)||display===workspaceId(workspace))return null;
-  return display;
 }
 
 function workspaceProfileId(workspace){
@@ -1059,8 +1052,7 @@ function AgentWorkspacesSettings(){
           ? h("div",{className:"flex items-center justify-between gap-3 rounded-md border border-token-border-default p-3 text-sm"},
               h("div",{className:"min-w-0"},
                 h("div",{className:"truncate text-token-text-primary"},workspacePrimary(activeWorkspace)),
-                workspaceSecondary(activeWorkspace)?h("div",{className:"truncate text-token-text-tertiary"},workspaceSecondary(activeWorkspace)):null,
-                workspaceDisplay(activeWorkspace)?h("div",{className:"mt-1 text-xs text-token-text-tertiary"},workspaceDisplay(activeWorkspace)):null
+                workspaceSecondary(activeWorkspace)?h("div",{className:"truncate text-token-text-tertiary"},workspaceSecondary(activeWorkspace)):null
               ),
               h("div",{className:"flex shrink-0 gap-2"},
                 toggleButton(workspaceDetailId(workspaceDetail)===workspaceId(activeWorkspace)?"Hide status":"Status",workspaceDetailId(workspaceDetail)===workspaceId(activeWorkspace),false,function(){showWorkspaceStatus(workspaceId(activeWorkspace));}),
@@ -1098,8 +1090,7 @@ function AgentWorkspacesSettings(){
                   return h("div",{key:id,className:"flex items-center justify-between gap-2 rounded-md border border-token-border-default p-2"},
                     h("div",{className:"min-w-0"},
                       h("div",{className:"truncate text-token-text-primary"},workspacePrimary(workspace)),
-                      workspaceSecondary(workspace)?h("div",{className:"truncate text-token-text-tertiary"},workspaceSecondary(workspace)):null,
-                      workspaceDisplay(workspace)?h("div",{className:"mt-1 text-xs text-token-text-tertiary"},workspaceDisplay(workspace)):null
+                      workspaceSecondary(workspace)?h("div",{className:"truncate text-token-text-tertiary"},workspaceSecondary(workspace)):null
                     ),
                     h("div",{className:"flex shrink-0 gap-2"},
                       button("Start",!!activeWorkspace||activeAction==="workspaceStart"||activeAction==="workspaceOpenProfile",function(){startStoppedWorkspace(workspace);}),
