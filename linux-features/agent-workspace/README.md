@@ -59,7 +59,10 @@ variables first, with older token names only as fallback, polls `workspace obser
 the conversation surface, shows a user-facing `Workspace active` summary with
 profile/policy and app count, keeps raw display numbers out of normal cards and
 labels hover display detail as hidden workspace plumbing, and exposes Refresh,
-Stop, and Revoke buttons next to the live view.
+Details, Stop, and Revoke buttons next to the live view. The Details tray keeps
+the normal panel quiet while showing the active window, running apps by friendly
+label, applied policy, and hidden display when the user wants to inspect what
+the agent is doing.
 The panel can be dragged by its header, resized from its lower-right handle, and
 keeps its clamped position/size in local storage so it does not stay stuck over
 half the conversation. Newer injected runtimes clean up older panel instances

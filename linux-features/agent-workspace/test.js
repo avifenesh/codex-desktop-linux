@@ -306,11 +306,14 @@ class FakeElement {
     actions.className = "codex-linux-agent-workspace-actions";
     const refresh = this.ownerDocument.createElement("button");
     refresh.setAttribute("data-action", "refresh");
+    const detailsButton = this.ownerDocument.createElement("button");
+    detailsButton.setAttribute("data-action", "details");
     const stop = this.ownerDocument.createElement("button");
     stop.setAttribute("data-action", "stop");
     const revoke = this.ownerDocument.createElement("button");
     revoke.setAttribute("data-action", "revoke");
     actions.appendChild(refresh);
+    actions.appendChild(detailsButton);
     actions.appendChild(stop);
     actions.appendChild(revoke);
     head.appendChild(dot);
@@ -325,6 +328,9 @@ class FakeElement {
     viewport.appendChild(empty);
     const meta = this.ownerDocument.createElement("div");
     meta.className = "codex-linux-agent-workspace-meta";
+    const details = this.ownerDocument.createElement("div");
+    details.className = "codex-linux-agent-workspace-details";
+    details.hidden = true;
     const error = this.ownerDocument.createElement("div");
     error.className = "codex-linux-agent-workspace-error";
     error.hidden = true;
@@ -334,6 +340,7 @@ class FakeElement {
     this.appendChild(head);
     this.appendChild(viewport);
     this.appendChild(meta);
+    this.appendChild(details);
     this.appendChild(error);
     this.appendChild(resize);
   }
@@ -771,11 +778,13 @@ test("conversation visibility runtime is valid script and idempotent", () => {
   assert.match(runtime, /workspaceCleanup/);
   assert.match(runtime, /bridgeError/);
   assert.match(runtime, /codex-linux-agent-workspace-panel/);
+  assert.match(runtime, /data-action="details"/);
   assert.match(runtime, /data-action="revoke"/);
   assert.match(runtime, /Revoke/);
   assert.match(runtime, /data_url/);
   assert.match(runtime, /function policySummary/);
   assert.match(runtime, /function appSummary/);
+  assert.match(runtime, /function viewerDetailsText/);
   assert.match(runtime, /function inSettingsView/);
   assert.match(runtime, /function scheduleViewCheck/);
   assert.match(runtime, /MutationObserver/);
@@ -960,7 +969,11 @@ test("conversation visibility runtime renders and stops an active workspace", as
       network: { mode: "disabled" },
       mounts: [{}, {}],
     },
-    apps: [{ id: "app-1", name: "chrome", running: true }],
+    apps: [
+      { id: "app-1", name: "chrome", running: true },
+      { id: "app-2", name: "xterm", running: true },
+      { id: "app-3", name: "old-test", running: false },
+    ],
   };
   const window = {
     document,
@@ -984,7 +997,13 @@ test("conversation visibility runtime renders and stops an active workspace", as
       if (params.action === "workspaceList") {
         response = { json: { workspaces: [{ id: "qa-live", running: true, status: activeStatus }] } };
       } else if (params.action === "workspaceObserve") {
-        response = { json: { status: activeStatus, screenshot: { data_url: "data:image/png;base64,abc" } } };
+        response = {
+          json: {
+            status: activeStatus,
+            active_window: { title: "Spec runner" },
+            screenshot: { data_url: "data:image/png;base64,abc" },
+          },
+        };
       } else if (params.action === "workspaceStop") {
         if (stopFails) {
           response = { ok: false, message: "stop failed", json: { ok: false, message: "stop failed" } };
@@ -1055,11 +1074,13 @@ test("conversation visibility runtime renders and stops an active workspace", as
   assert.equal(document.body.querySelectorAll(".codex-linux-agent-workspace-panel").length, 1);
   const title = panel.querySelector(".codex-linux-agent-workspace-title");
   const meta = panel.querySelector(".codex-linux-agent-workspace-meta");
+  const details = panel.querySelector(".codex-linux-agent-workspace-details");
   const error = panel.querySelector(".codex-linux-agent-workspace-error");
   const image = panel.querySelector(".codex-linux-agent-workspace-shot");
   const resize = panel.querySelector(".codex-linux-agent-workspace-resize");
   const head = panel.querySelector(".codex-linux-agent-workspace-head");
   assert.ok(panel.querySelector("[data-action='revoke']"));
+  assert.ok(panel.querySelector("[data-action='details']"));
   assert.ok(resize);
   assert.ok(head);
   assert.equal(title.textContent, "QA live view");
@@ -1068,10 +1089,19 @@ test("conversation visibility runtime renders and stops an active workspace", as
   assert.match(meta.textContent, /Profile desktop-qa/);
   assert.match(meta.textContent, /Network disabled/);
   assert.match(meta.textContent, /2 mounts/);
-  assert.match(meta.textContent, /1 app running/);
+  assert.match(meta.textContent, /2 apps running/);
   assert.match(meta.title, /Hidden display :90/);
-  assert.match(meta.title, /1 app running/);
+  assert.match(meta.title, /2 apps running/);
   assert.doesNotMatch(meta.title, /chrome/);
+  assert.equal(details.hidden, true);
+  assert.match(details.textContent, /Active window: Spec runner/);
+  assert.match(details.textContent, /Running apps: chrome, xterm/);
+  assert.doesNotMatch(details.textContent, /old-test/);
+  panel.querySelector("[data-action='details']").click();
+  assert.equal(details.hidden, false);
+  assert.equal(panel.querySelector("[data-action='details']").getAttribute("aria-pressed"), "true");
+  assert.match(details.textContent, /Policy: Profile desktop-qa/);
+  assert.match(details.textContent, /Hidden display: :90/);
   assert.equal(image.src, "data:image/png;base64,abc");
   assert.equal(panel.style.width, "420px");
   assert.equal(panel.style.height, "320px");
