@@ -100,6 +100,21 @@ function button(label,disabled,onClick){
   },label);
 }
 
+function toggleButton(label,selected,disabled,onClick,tone){
+  var selectedClass=selected
+    ? tone==="readonly"
+      ? "border-yellow-500/60 bg-yellow-500/10 text-yellow-800 dark:text-yellow-200"
+      : "border-token-border-strong bg-token-main-surface-secondary text-token-text-primary"
+    : "border-token-border-default text-token-text-primary";
+  return h("button",{
+    type:"button",
+    className:"rounded-md border px-3 py-1.5 text-sm hover:bg-token-main-surface-secondary disabled:cursor-not-allowed disabled:opacity-50 "+selectedClass,
+    disabled:!!disabled,
+    "aria-pressed":!!selected,
+    onClick
+  },label);
+}
+
 function field(label,value,onChange,placeholder){
   return h("label",{className:"flex flex-col gap-1 text-sm text-token-text-secondary"},
     h("span",null,label),
@@ -135,6 +150,23 @@ function profileStartupApps(profile){
   return Array.isArray(profile?.startup_apps)?profile.startup_apps:[];
 }
 
+function profileMountMode(profile){
+  var mounts=Array.isArray(profile?.mounts)?profile.mounts:[];
+  if(mounts.length===0)return "inactive";
+  var readOnly=mounts.some(function(mount){return mount?.mode==="read_only"||mount?.mode==null;});
+  var readWrite=mounts.some(function(mount){return mount?.mode==="read_write";});
+  if(readOnly&&!readWrite)return "read_only";
+  if(readWrite&&!readOnly)return "read_write";
+  return "mixed";
+}
+
+function mountModeLabel(mode){
+  if(mode==="read_only")return "Read only";
+  if(mode==="read_write")return "Read write";
+  if(mode==="mixed")return "Mixed";
+  return "No mounts";
+}
+
 function workspaceStatusObject(result){
   return result?.status??result?.json?.status??result?.json??result;
 }
@@ -146,7 +178,7 @@ function workspaceStatusView(detail){
   return h("section",{className:"rounded-md border border-token-border-default bg-token-main-surface-secondary p-3 text-sm"},
     h("div",{className:"mb-2 flex items-center justify-between gap-2"},
       h("div",{className:"font-medium text-token-text-primary"},"Workspace status"),
-      status.ready?statusPill("Ready","active"):statusPill("Stopped","idle")
+      status.ready?statusPill("Ready","active"):statusPill("Stopped","stopped")
     ),
     h("div",{className:"grid gap-2 text-token-text-secondary md:grid-cols-2"},
       h("div",null,"Display: "+(status.display||"unknown")),
@@ -173,6 +205,11 @@ function resultView(result){
 
 function workspaceId(workspace){
   return workspace?.id||workspace?.status?.id||workspace?.manifest?.id||workspace?.runtime_dir||"workspace";
+}
+
+function workspaceDetailId(detail){
+  var status=workspaceStatusObject(detail);
+  return status&&typeof status==="object"?workspaceId(status):null;
 }
 
 function workspaceRunning(workspace){
@@ -240,9 +277,14 @@ function resultSummary(result){
   return "Command complete";
 }
 
-function statusPill(label,tone){
-  var toneClass=tone==="active"?"border-green-500/40 text-green-700 dark:text-green-300":tone==="warn"?"border-yellow-500/40 text-yellow-700 dark:text-yellow-300":"border-token-border-default text-token-text-tertiary";
-  return h("span",{className:"inline-flex h-6 items-center rounded-md border px-2 text-xs "+toneClass},label);
+function statusPill(label,tone,showDot){
+  var toneClass=tone==="active"?"border-green-500/40 text-green-700 dark:text-green-300":tone==="stopped"?"border-red-500/40 text-red-700 dark:text-red-300":tone==="readonly"||tone==="warn"?"border-yellow-500/40 text-yellow-700 dark:text-yellow-300":"border-token-border-default text-token-text-tertiary";
+  return h("span",{className:"inline-flex h-6 items-center gap-1.5 rounded-md border px-2 text-xs "+toneClass},showDot?statusDot(tone):null,label);
+}
+
+function statusDot(tone){
+  var dotClass=tone==="active"?"bg-green-500":tone==="stopped"?"bg-red-500":tone==="readonly"||tone==="warn"?"bg-yellow-400":"bg-gray-400";
+  return h("span",{className:"inline-block h-2.5 w-2.5 shrink-0 rounded-full "+dotClass,"aria-hidden":true});
 }
 
 function AgentWorkspacesSettings(){
@@ -318,6 +360,7 @@ function AgentWorkspacesSettings(){
 
   var profile=parseProfile(profileJson);
   var startupApps=profileStartupApps(profile);
+  var mountMode=profileMountMode(profile);
   var runningWorkspaces=workspaces.filter(workspaceRunning);
   var activeWorkspace=runningWorkspaces[0]??null;
   var otherRunningWorkspaces=activeWorkspace?runningWorkspaces.slice(1):[];
@@ -438,6 +481,10 @@ function AgentWorkspacesSettings(){
   }
 
   function showWorkspaceStatus(workspaceId){
+    if(workspaceDetailId(workspaceDetail)===workspaceId){
+      setWorkspaceDetail(null);
+      return;
+    }
     callAgentWorkspace("workspaceStatus",{workspaceId:workspaceId}).then(function(response){
       if(response?.ok)setWorkspaceDetail(response);
     });
@@ -453,18 +500,27 @@ function AgentWorkspacesSettings(){
 
   return h(SettingsPage,{title:"Agent Workspaces",subtitle:"Linux agent environments"},
     h("div",{className:"flex max-w-5xl flex-col gap-5 p-1"},
-      h("section",{className:"grid gap-3 md:grid-cols-[1fr_auto]"},
-        field("Command",command,setCommand,"agent-workspace-linux"),
-        h("div",{className:"flex items-end gap-2"},
-          button("Save",activeAction==="doctor",saveCommand),
+      h("section",{className:"flex flex-col gap-2"},
+        h("div",{className:"flex items-center justify-between gap-2"},
+          h("div",{className:"text-sm font-medium text-token-text-primary"},"Workspace control"),
           button("Refresh",activeAction==="profileList"||loading,refresh)
+        ),
+        h("details",{className:"rounded-md border border-token-border-default bg-token-main-surface-secondary text-sm"},
+          h("summary",{className:"flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-token-text-primary"},
+            h("span",null,"Connection"),
+            h("span",{className:"truncate text-xs text-token-text-tertiary"},command.trim()?"Configured":"Default command")
+          ),
+          h("div",{className:"grid gap-3 border-t border-token-border-default p-3 md:grid-cols-[1fr_auto]"},
+            field("Command",command,setCommand,"agent-workspace-linux"),
+            h("div",{className:"flex items-end"},button("Save",activeAction==="doctor",saveCommand))
+          )
         )
       ),
 
       h("section",{className:"flex flex-col gap-2"},
         h("div",{className:"flex items-center justify-between"},
           h("div",{className:"text-sm font-medium text-token-text-primary"},"Active workspace"),
-          activeWorkspace?statusPill("Active","active"):statusPill("Idle","idle")
+          activeWorkspace?statusPill("Active","active",true):statusPill("Idle","idle")
         ),
         activeWorkspace
           ? h("div",{className:"flex items-center justify-between gap-3 rounded-md border border-token-border-default p-3 text-sm"},
@@ -474,7 +530,7 @@ function AgentWorkspacesSettings(){
                 workspaceDisplay(activeWorkspace)?h("div",{className:"mt-1 text-xs text-token-text-tertiary"},workspaceDisplay(activeWorkspace)):null
               ),
               h("div",{className:"flex shrink-0 gap-2"},
-                button("Status",false,function(){showWorkspaceStatus(workspaceId(activeWorkspace));}),
+                toggleButton(workspaceDetailId(workspaceDetail)===workspaceId(activeWorkspace)?"Hide status":"Status",workspaceDetailId(workspaceDetail)===workspaceId(activeWorkspace),false,function(){showWorkspaceStatus(workspaceId(activeWorkspace));}),
                 button("Stop",false,function(){stopWorkspace(workspaceId(activeWorkspace));})
               )
             )
@@ -499,7 +555,7 @@ function AgentWorkspacesSettings(){
           : null,
         stoppedWorkspaceCount>0
           ? h("div",{className:"flex items-center justify-between rounded-md border border-token-border-default px-3 py-2 text-sm text-token-text-tertiary"},
-              h("span",null,"Stopped workspaces: "+stoppedWorkspaceCount),
+              h("span",{className:"flex items-center gap-2"},statusDot("stopped"),"Stopped workspaces: "+stoppedWorkspaceCount),
               button("Remove stale",activeAction==="workspaceCleanup",cleanupStale)
             )
           : null
@@ -560,9 +616,12 @@ function AgentWorkspacesSettings(){
                   })
                 )
               ),
-              h("div",{className:"flex flex-wrap items-end gap-2"},
-                button("Read only",!profile,function(){setMountMode("read_only");}),
-                button("Read write",!profile,function(){setMountMode("read_write");})
+              h("div",{className:"flex flex-col justify-end gap-2"},
+                h("div",{className:"text-sm text-token-text-secondary"},"File access: "+mountModeLabel(mountMode)),
+                h("div",{className:"flex flex-wrap gap-2"},
+                  toggleButton("Read only",mountMode==="read_only",!profile||mountMode==="inactive",function(){setMountMode("read_only");},"readonly"),
+                  toggleButton("Read write",mountMode==="read_write",!profile||mountMode==="inactive",function(){setMountMode("read_write");})
+                )
               )
             ),
             h("div",{className:"flex flex-col gap-2 rounded-md border border-token-border-default p-3"},
