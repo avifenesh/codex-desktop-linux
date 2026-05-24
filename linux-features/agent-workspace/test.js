@@ -875,6 +875,66 @@ test("approval renderer formats agent workspace params without affecting generic
   );
   assert.equal(explicitDisplayRows.find((row) => row.displayName === "Action").value, "workspaceOpenProfile");
 
+  const approvalBundleRows = sandbox.render(
+    {
+      start_preview: {
+        id: "approval-preview-ui",
+        purpose: "Approval UI dogfood",
+        message: "workspace start would require hidden-workspace acknowledgement",
+        approval: {
+          action: "workspace_start",
+          subject: "workspace approval-preview-ui",
+          approved: false,
+          blocked: false,
+          would_execute: false,
+          requires_user_approval: true,
+          required_acknowledgements: [
+            {
+              id: "hidden_workspace",
+              label: "Hidden workspace",
+              description: "User acknowledges that the agent will run in a separate workspace environment.",
+              acknowledged: false,
+              cli_flag: "--ack-hidden-workspace",
+              mcp_parameter: { name: "acknowledge_hidden_workspace", value: true },
+            },
+          ],
+          missing_acknowledgements: [
+            {
+              id: "hidden_workspace",
+              label: "Hidden workspace",
+              description: "User acknowledges that the agent will run in a separate workspace environment.",
+              acknowledged: false,
+              cli_flag: "--ack-hidden-workspace",
+              mcp_parameter: { name: "acknowledge_hidden_workspace", value: true },
+            },
+          ],
+          approve_cli_flags: ["--ack-hidden-workspace"],
+          approve_mcp_parameters: [{ name: "acknowledge_hidden_workspace", value: true }],
+        },
+      },
+    },
+    [{ name: "params", displayName: "Params", value: { raw: "json" } }],
+  );
+  assert.equal(approvalBundleRows.find((row) => row.displayName === "Action").value, "workspace_start");
+  assert.equal(
+    approvalBundleRows.find((row) => row.displayName === "Workspace request").value,
+    "workspace approval-preview-ui",
+  );
+  assert.equal(approvalBundleRows.find((row) => row.displayName === "Approval").value, "Needs approval");
+  assert.equal(
+    approvalBundleRows.find((row) => row.displayName === "Needs user approval").value,
+    "Hidden workspace",
+  );
+  assert.equal(
+    approvalBundleRows.find((row) => row.displayName === "Approve by setting").value,
+    "acknowledge_hidden_workspace=true",
+  );
+  assert.equal(
+    approvalBundleRows.find((row) => row.displayName === "Preview").value,
+    "workspace start would require hidden-workspace acknowledgement",
+  );
+  assert.equal(approvalBundleRows.some((row) => row.displayName === "Params"), false);
+
   const genericRows = sandbox.render({ query: "abc" }, null);
   assert.deepEqual(
     Array.from(genericRows, (row) => ({ name: row.name, value: row.value, displayName: row.displayName })),

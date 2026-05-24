@@ -1571,10 +1571,12 @@ function agentWorkspaceApprovalEntriesHelperSource() {
 function codexLinuxAgentWorkspaceApprovalEntries(params){
   if(!params||typeof params!="object"||Array.isArray(params))return null;
   if(params.params&&typeof params.params=="object"&&!Array.isArray(params.params))params=params.params;
+  const bundle=codexLinuxAgentWorkspaceApprovalBundle(params);
+  const preview=codexLinuxAgentWorkspaceApprovalPreview(params);
   const keys=Object.keys(params);
-  const marker=new Set(["acknowledge_hidden_workspace","acknowledge_unenforced_policy","ackHiddenWorkspace","ackUnenforcedPolicy","run_setup","runSetup","startup_wait_window","startupWaitWindow","startup_screenshot_window","startupScreenshotWindow","wait_window","waitWindow","screenshot_window","screenshotWindow","kill_on_timeout","killOnTimeout","timeout_ms","timeoutMs","tail_bytes","tailBytes","observe_screenshot","observeScreenshot","include_hidden","includeHidden","events_tail","eventsTail","cleanup_id","cleanupId","user_data_dir","userDataDir","browser_path","browserPath","host_path","hostPath","mounts","network","setup_commands","setupCommands","startup_apps","startupApps","require_enforced_policy","requireEnforcedPolicy","dry_run","dryRun","replace","purpose"]);
-  const action=typeof params.action=="string"?params.action:"";
-  const looksLikeAgentWorkspace=/^(workspace|profile)/i.test(action)||keys.some(key=>marker.has(key))||(Array.isArray(params.command)&&keys.some(key=>["id","profile","cwd","name","timeout_ms","timeoutMs","tail_bytes","tailBytes","kill_on_timeout","killOnTimeout","wait_window","waitWindow","screenshot_window","screenshotWindow"].includes(key)))||(params.profile&&typeof params.profile=="object"&&!Array.isArray(params.profile));
+  const marker=new Set(["acknowledge_hidden_workspace","acknowledge_unenforced_policy","ackHiddenWorkspace","ackUnenforcedPolicy","run_setup","runSetup","startup_wait_window","startupWaitWindow","startup_screenshot_window","startupScreenshotWindow","wait_window","waitWindow","screenshot_window","screenshotWindow","kill_on_timeout","killOnTimeout","timeout_ms","timeoutMs","tail_bytes","tailBytes","observe_screenshot","observeScreenshot","include_hidden","includeHidden","events_tail","eventsTail","cleanup_id","cleanupId","user_data_dir","userDataDir","browser_path","browserPath","host_path","hostPath","mounts","network","setup_commands","setupCommands","startup_apps","startupApps","require_enforced_policy","requireEnforcedPolicy","dry_run","dryRun","replace","purpose","approval","approval_bundle","approvalBundle","start_preview","startPreview","launch_preview","launchPreview","run_preview","runPreview"]);
+  const action=typeof params.action=="string"?params.action:typeof bundle?.action=="string"?bundle.action:"";
+  const looksLikeAgentWorkspace=bundle!=null||preview!=null||/^(workspace|profile)/i.test(action)||keys.some(key=>marker.has(key))||(Array.isArray(params.command)&&keys.some(key=>["id","profile","cwd","name","timeout_ms","timeoutMs","tail_bytes","tailBytes","kill_on_timeout","killOnTimeout","wait_window","waitWindow","screenshot_window","screenshotWindow"].includes(key)))||(params.profile&&typeof params.profile=="object"&&!Array.isArray(params.profile));
   if(!looksLikeAgentWorkspace)return null;
   const rows=[];
   const consumed=new Set();
@@ -1583,7 +1585,22 @@ function codexLinuxAgentWorkspaceApprovalEntries(params){
     if(value===void 0||value===null||value===""||(Array.isArray(value)&&value.length===0))return;
     rows.push({name,displayName,value:codexLinuxAgentWorkspaceApprovalValue(value)});
   };
+  if(bundle||preview){
+    ["approval","approval_bundle","approvalBundle","start_preview","startPreview","launch_preview","launchPreview","run_preview","runPreview"].forEach(key=>consumed.add(key));
+  }
   add("action",action,"Action");
+  if(bundle){
+    add("approval_subject",bundle.subject,"Workspace request");
+    add("approval_state",codexLinuxAgentWorkspaceApprovalState(bundle),"Approval");
+    add("missing_acknowledgements",codexLinuxAgentWorkspaceApprovalRequirementList(bundle.missing_acknowledgements),"Needs user approval");
+    if(!Array.isArray(bundle.missing_acknowledgements)||bundle.missing_acknowledgements.length===0)add("required_acknowledgements",codexLinuxAgentWorkspaceApprovalRequirementList(bundle.required_acknowledgements),"Acknowledgements");
+    add("approve_mcp_parameters",codexLinuxAgentWorkspaceApprovalParameterList(bundle.approve_mcp_parameters),"Approve by setting");
+    add("blockers",Array.isArray(bundle.blockers)?bundle.blockers.join("; "):null,"Blocked by");
+  }
+  if(preview){
+    add("preview_message",preview.message,"Preview");
+    add("preview_policy",preview.applied_policy,"Policy");
+  }
   const profile=params.profile&&typeof params.profile=="object"&&!Array.isArray(params.profile)?params.profile:null;
   if(profile){
     add("profile",profile.id||"(inline profile)","Profile");
@@ -1628,6 +1645,33 @@ function codexLinuxAgentWorkspaceApprovalEntries(params){
   const extra=keys.filter(key=>!consumed.has(key)&&!aliases.has(key)&&params[key]!=null);
   if(extra.length>0)rows.push({name:"other_options",displayName:"Other options",value:extra.join(", ")});
   return rows.length>0?rows:null;
+}
+function codexLinuxAgentWorkspaceApprovalPreview(params){
+  const candidates=[params?.start_preview,params?.startPreview,params?.launch_preview,params?.launchPreview,params?.run_preview,params?.runPreview];
+  return candidates.find(value=>value&&typeof value=="object"&&!Array.isArray(value))||null;
+}
+function codexLinuxAgentWorkspaceApprovalBundle(params){
+  const preview=codexLinuxAgentWorkspaceApprovalPreview(params);
+  const candidates=[params?.approval_bundle,params?.approvalBundle,params?.approval,preview?.approval];
+  return candidates.find(codexLinuxAgentWorkspaceIsApprovalBundle)||null;
+}
+function codexLinuxAgentWorkspaceIsApprovalBundle(value){
+  return !!(value&&typeof value=="object"&&!Array.isArray(value)&&(typeof value.action=="string"||typeof value.subject=="string"||Array.isArray(value.required_acknowledgements)||Array.isArray(value.missing_acknowledgements)||Array.isArray(value.approve_mcp_parameters)));
+}
+function codexLinuxAgentWorkspaceApprovalState(bundle){
+  if(bundle.blocked)return "Blocked";
+  if(bundle.requires_user_approval)return "Needs approval";
+  if(bundle.approved&&bundle.would_execute)return "Ready to run";
+  if(bundle.approved)return "Approved";
+  return "Preview";
+}
+function codexLinuxAgentWorkspaceApprovalRequirementList(requirements){
+  if(!Array.isArray(requirements)||requirements.length===0)return null;
+  return requirements.map(requirement=>requirement?.label||requirement?.id).filter(Boolean).join(", ");
+}
+function codexLinuxAgentWorkspaceApprovalParameterList(parameters){
+  if(!Array.isArray(parameters)||parameters.length===0)return null;
+  return parameters.map(parameter=>parameter&&typeof parameter.name=="string"?parameter.name+"="+String(parameter.value):null).filter(Boolean).join("; ");
 }
 function codexLinuxAgentWorkspaceApprovalValue(value){
   if(typeof value=="boolean")return value?"Yes":"No";

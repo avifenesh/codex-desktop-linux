@@ -71,6 +71,13 @@ changes. This is not a full streaming viewer yet; the deeper viewer can build on
 the same observe/screenshot bridge after the lifecycle and profile surface is
 stable.
 
+Agent Workspace approval prompts are also rendered through a Linux webview patch.
+The renderer recognizes workspace/profile parameters and the
+`agent-workspace-linux` approval bundle shape returned by start/launch previews,
+then shows user-facing rows such as **Workspace request**, **Needs user
+approval**, and **Approve by setting** instead of falling back to a raw JSON
+`Params` object. Generic MCP approval prompts keep the upstream renderer.
+
 Dogfood check: the side-by-side dev app built with `make build-dev-app` has been
 launched inside an agent workspace. The conversation panel rendered the live
 workspace screenshot and its Stop control issued the expected workspace stop
