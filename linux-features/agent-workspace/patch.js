@@ -53,22 +53,93 @@ function agentWorkspaceBridgeWithWorkspaceStartSource(args) {
   );
 }
 
+function agentWorkspaceActionBridgeSource(args) {
+  const fullSource = agentWorkspaceBridgeWithWorkspaceStartSource(args);
+  const marker = `"linux-agent-workspace":async`;
+  const index = fullSource.indexOf(marker);
+  if (index === -1) {
+    throw new Error("could not find generated agent workspace action bridge");
+  }
+  return fullSource.slice(index);
+}
+
+function ensureAgentWorkspaceBridgeEntry(currentSource, entrySource) {
+  const match = entrySource.match(/^"([^"]+)":/);
+  if (!match) {
+    return currentSource;
+  }
+  const marker = `"${match[1]}":async`;
+  if (currentSource.includes(marker)) {
+    return currentSource;
+  }
+  return currentSource.replace(`"linux-agent-workspace":async`, `${entrySource},"linux-agent-workspace":async`);
+}
+
+function replaceAgentWorkspaceActionBridge(currentSource, actionBridgeSource) {
+  const marker = `"linux-agent-workspace":async`;
+  const start = currentSource.indexOf(marker);
+  if (start === -1) {
+    return currentSource;
+  }
+
+  const getGlobalStateIndex = currentSource.indexOf(`,"get-global-state":async`, start);
+  if (getGlobalStateIndex !== -1) {
+    return `${currentSource.slice(0, start)}${actionBridgeSource}${currentSource.slice(getGlobalStateIndex)}`;
+  }
+
+  const arrowBodyIndex = currentSource.indexOf("=>{", start);
+  if (arrowBodyIndex === -1) {
+    return currentSource;
+  }
+  const bodyStart = arrowBodyIndex + 2;
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  for (let index = bodyStart; index < currentSource.length; index += 1) {
+    const char = currentSource[index];
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return `${currentSource.slice(0, start)}${actionBridgeSource}${currentSource.slice(index + 1)}`;
+      }
+    }
+  }
+  return currentSource;
+}
+
 function applyAgentWorkspaceMainBridgePatch(currentSource) {
   const patchName = "agent workspace main bridge patch";
   if (currentSource.includes('"linux-agent-workspace":async')) {
-    if (currentSource.includes('"linux-agent-workspace-copy-browser-data":async')) {
-      return currentSource;
-    }
+    const childProcessVar = requireName(currentSource, "node:child_process");
     const fsVar = requireName(currentSource, "node:fs");
     const pathVar = requireName(currentSource, "node:path");
-    if (fsVar == null || pathVar == null) {
-      warn("Could not find Node module aliases for browser data copy upgrade", patchName);
+    if (childProcessVar == null || fsVar == null || pathVar == null) {
+      warn("Could not find Node module aliases for agent workspace bridge upgrade", patchName);
       return currentSource;
     }
-    return currentSource.replace(
-      `,"linux-agent-workspace":async`,
-      `,${agentWorkspaceBrowserDataCopyBridgeSource({ fsVar, pathVar })},"linux-agent-workspace":async`,
-    );
+    const args = { childProcessVar, fsVar, pathVar };
+    let patchedSource = currentSource;
+    patchedSource = ensureAgentWorkspaceBridgeEntry(patchedSource, agentWorkspaceAppPickerBridgeSource(args));
+    patchedSource = ensureAgentWorkspaceBridgeEntry(patchedSource, agentWorkspaceMountPickerBridgeSource());
+    patchedSource = ensureAgentWorkspaceBridgeEntry(patchedSource, agentWorkspaceBrowserDataPickerBridgeSource());
+    patchedSource = ensureAgentWorkspaceBridgeEntry(patchedSource, agentWorkspaceBrowserDataCopyBridgeSource(args));
+    return replaceAgentWorkspaceActionBridge(patchedSource, agentWorkspaceActionBridgeSource(args));
   }
 
   const childProcessVar = requireName(currentSource, "node:child_process");

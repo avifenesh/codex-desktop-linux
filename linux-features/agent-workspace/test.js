@@ -448,6 +448,30 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   assert.match(warnings.join("\n"), /Could not find Node module aliases/);
 });
 
+test("main bridge patch upgrades stale installed agent workspace handlers", () => {
+  const legacyHandler = [
+    '"linux-agent-workspace-copy-browser-data":async()=>({ok:true,action:`copyBrowserData`}),',
+    '"linux-agent-workspace":async({action:__codexAction}={})=>{let __codexActionName=__codexAction;',
+    'try{switch(__codexActionName){case`profileList`:return{ok:true,json:{profiles:[]}};',
+    'case`workspaceList`:return{ok:true,json:{workspaces:[]}};',
+    'default:throw Error(`unsupported agent workspace action`)}}',
+    'catch(e){return{ok:false,action:__codexActionName,message:e instanceof Error?e.message:String(e)}}},',
+  ].join("");
+  const legacy = syntheticMainBundle().replace('"get-global-state":async({key:t})=>', `${legacyHandler}"get-global-state":async({key:t})=>`);
+
+  const upgraded = applyAgentWorkspaceMainBridgePatch(legacy);
+  assert.match(upgraded, /"linux-agent-workspace-pick-app":async/);
+  assert.match(upgraded, /"linux-agent-workspace-pick-mount":async/);
+  assert.match(upgraded, /"linux-agent-workspace-pick-browser-data":async/);
+  assert.match(upgraded, /"linux-agent-workspace-copy-browser-data":async/);
+  assert.match(upgraded, /case`mcpConfig`/);
+  assert.match(upgraded, /__codexMcpConfig/);
+  assert.match(upgraded, /case`workspaceStart`/);
+  assert.match(upgraded, /case`profileTemplate`/);
+  assert.doesNotMatch(upgraded, /case`profileList`:return\{ok:true,json:\{profiles:\[\]\}\}/);
+  assert.equal(applyAgentWorkspaceMainBridgePatch(upgraded), upgraded);
+});
+
 test("app picker converts desktop launchers into startup app commands", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-agent-workspace-desktop-app-"));
   try {
