@@ -183,6 +183,8 @@ test("agent-workspace feature exposes optional bridge and settings descriptors w
 test("main bridge patch adds an allowlisted linux-agent-workspace handler", () => {
   const patched = applyAgentWorkspaceMainBridgePatch(syntheticMainBundle());
   assert.match(patched, /"linux-agent-workspace":async/);
+  assert.match(patched, /"linux-agent-workspace-pick-app":async/);
+  assert.match(patched, /showOpenDialog/);
   assert.match(patched, new RegExp(SETTINGS_COMMAND_KEY));
   assert.match(patched, /case`workspaceOpenProfile`/);
   assert.match(patched, /execFile\(__codexCommand,__codexArgs/);
@@ -215,11 +217,18 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /function workspaceSecondary/);
   assert.match(source, /Active workspace/);
   assert.match(source, /Saved profiles/);
+  assert.match(source, /Create profile/);
+  assert.match(source, /Advanced settings/);
+  assert.match(source, /Pick app/);
+  assert.match(source, /Workspace status/);
   assert.match(source, /Stopped workspaces: /);
+  assert.match(source, /Remove stale/);
   assert.match(source, /h\("details"/);
   assert.match(source, /var activeWorkspace=runningWorkspaces\[0\]\?\?null/);
   assert.doesNotMatch(source, /workspace\.profile_id\|\|workspace\.purpose\|\|workspace\.status/);
   assert.doesNotMatch(source, /workspaces\.map\(function\(workspace\)/);
+  assert.doesNotMatch(source, /Cleanup stale/);
+  assert.doesNotMatch(source, /workspaceCleanup",\{dryRun:true\}/);
 });
 
 test("settings asset patches add navigation, route, visibility, and title", () => {

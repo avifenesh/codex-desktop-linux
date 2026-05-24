@@ -17,7 +17,7 @@ function warn(message, patchName) {
 }
 
 function agentWorkspaceBridgeSource({ childProcessVar, fsVar, pathVar }) {
-  return `"linux-agent-workspace":async({action:__codexAction,timeoutMs:__codexTimeoutMs,profileId:__codexProfileId,profile:__codexProfile,replace:__codexReplace,dryRun:__codexDryRun,workspaceId:__codexWorkspaceId,purpose:__codexPurpose,runSetup:__codexRunSetup,ackHiddenWorkspace:__codexAckHiddenWorkspace,ackUnenforcedPolicy:__codexAckUnenforcedPolicy,startupWaitWindow:__codexStartupWaitWindow,startupScreenshotWindow:__codexStartupScreenshotWindow,cleanupId:__codexCleanupId,outputPath:__codexOutputPath}={})=>{let __codexCommand=this.globalState.get(\`${SETTINGS_COMMAND_KEY}\`)||process.env.CODEX_AGENT_WORKSPACE_BIN||\`agent-workspace-linux\`;if(typeof __codexCommand!==\`string\`||__codexCommand.trim().length===0)__codexCommand=\`agent-workspace-linux\`;__codexCommand=__codexCommand.trim();let __codexArgs=[],__codexTempPath=null,__codexString=e=>typeof e===\`string\`&&e.trim().length>0?e.trim():null,__codexPushId=(e,t)=>{let n=__codexString(t);if(n)__codexArgs.push(e,n)},__codexActionName=__codexString(__codexAction);try{switch(__codexActionName){case\`doctor\`:__codexArgs=[\`doctor\`];break;case\`guardrails\`:__codexArgs=[\`guardrails\`];break;case\`profilePath\`:__codexArgs=[\`profile\`,\`path\`];break;case\`profileList\`:__codexArgs=[\`profile\`,\`list\`];break;case\`profileGet\`:{let e=__codexString(__codexProfileId);if(!e)throw Error(\`profile id is required\`);__codexArgs=[\`profile\`,\`get\`,e];break}case\`profileCheck\`:{let e=__codexString(__codexProfileId);if(!e)throw Error(\`profile id is required\`);__codexArgs=[\`profile\`,\`check\`,e];break}case\`profileDelete\`:{let e=__codexString(__codexProfileId);if(!e)throw Error(\`profile id is required\`);__codexArgs=[\`profile\`,\`delete\`],__codexDryRun&&__codexArgs.push(\`--dry-run\`),__codexArgs.push(e);break}case\`profileExport\`:{let e=__codexString(__codexProfileId);if(!e)throw Error(\`profile id is required\`);__codexArgs=[\`profile\`,\`export\`,e],__codexPushId(\`--output\`,__codexOutputPath),__codexReplace&&__codexArgs.push(\`--replace\`);break}case\`profileSave\`:{if(!__codexProfile||typeof __codexProfile!==\`object\`||Array.isArray(__codexProfile))throw Error(\`profile object is required\`);let e=process.env.XDG_RUNTIME_DIR||process.env.TMPDIR||\`/tmp\`,t=${fsVar}.mkdtempSync(${pathVar}.join(e,\`codex-agent-workspace-\`));__codexTempPath=${pathVar}.join(t,\`profile.json\`),${fsVar}.writeFileSync(__codexTempPath,JSON.stringify(__codexProfile,null,2)+\`\\n\`,{encoding:\`utf8\`,mode:384}),__codexArgs=[\`profile\`,\`put\`,\`--json\`,__codexTempPath],__codexReplace&&__codexArgs.push(\`--replace\`),__codexDryRun&&__codexArgs.push(\`--dry-run\`);break}case\`workspaceList\`:__codexArgs=[\`workspace\`,\`list\`];break;case\`workspaceStatus\`:__codexArgs=[\`workspace\`,\`status\`],__codexPushId(\`--id\`,__codexWorkspaceId);break;case\`workspaceManifest\`:__codexArgs=[\`workspace\`,\`manifest\`],__codexPushId(\`--id\`,__codexWorkspaceId);break;case\`workspaceArtifacts\`:__codexArgs=[\`workspace\`,\`artifacts\`],__codexPushId(\`--id\`,__codexWorkspaceId);break;case\`workspaceOpenProfile\`:{let e=__codexString(__codexProfileId);if(!e)throw Error(\`profile id is required\`);__codexArgs=[\`workspace\`,\`open-profile\`],__codexDryRun&&__codexArgs.push(\`--dry-run\`),__codexAckHiddenWorkspace&&__codexArgs.push(\`--ack-hidden-workspace\`),__codexAckUnenforcedPolicy&&__codexArgs.push(\`--ack-unenforced-policy\`),__codexArgs.push(\`--profile\`,e),__codexPushId(\`--id\`,__codexWorkspaceId),__codexPushId(\`--purpose\`,__codexPurpose),__codexRunSetup&&__codexArgs.push(\`--setup\`),__codexStartupWaitWindow&&__codexArgs.push(\`--startup-wait-window\`),__codexStartupScreenshotWindow&&__codexArgs.push(\`--startup-screenshot-window\`);break}case\`workspaceStop\`:__codexArgs=[\`workspace\`,\`stop\`],__codexPushId(\`--id\`,__codexWorkspaceId);break;case\`workspaceCleanup\`:__codexArgs=[\`workspace\`,\`cleanup\`],__codexDryRun&&__codexArgs.push(\`--dry-run\`),__codexPushId(\`--id\`,__codexCleanupId);break;default:throw Error(\`unsupported agent workspace action\`)}}catch(e){return{ok:!1,action:__codexActionName,message:e instanceof Error?e.message:String(e)}}let __codexParse=e=>{let t=String(e||\`\`).trim();if(t.length===0)return null;try{return JSON.parse(t)}catch{return{raw:t}}};try{let e=await new Promise((e,t)=>{let n=${childProcessVar}.execFile(__codexCommand,__codexArgs,{encoding:\`utf8\`,timeout:Number.isFinite(Number(__codexTimeoutMs))?Number(__codexTimeoutMs):15e3,maxBuffer:8388608},(n,r,i)=>{n?(n.stdout=r,n.stderr=i,t(n)):e({stdout:r,stderr:i})})});return{ok:!0,action:__codexActionName,command:__codexCommand,args:__codexArgs,stdout:e.stdout,stderr:e.stderr,json:__codexParse(e.stdout)}}catch(e){return{ok:!1,action:__codexActionName,command:__codexCommand,args:__codexArgs,message:e instanceof Error?e.message:String(e),code:e?.code??null,stdout:e?.stdout??\`\`,stderr:e?.stderr??\`\`,json:__codexParse(e?.stdout)}}finally{if(__codexTempPath)try{${fsVar}.rmSync(${pathVar}.dirname(__codexTempPath),{recursive:!0,force:!0})}catch{}}}`;
+  return `"linux-agent-workspace-pick-app":async()=>{let __codexElectron;try{__codexElectron=require(\`electron\`)}catch(e){return{ok:!1,action:\`pickStartupApp\`,message:\`file picker unavailable\`}}try{let e=await __codexElectron.dialog.showOpenDialog({title:\`Choose startup app\`,properties:[\`openFile\`]});let t=Array.isArray(e.filePaths)?e.filePaths:[];return{ok:!e.canceled&&t.length>0,action:\`pickStartupApp\`,json:{canceled:!!e.canceled,path:t[0]||null,paths:t}}}catch(e){return{ok:!1,action:\`pickStartupApp\`,message:e instanceof Error?e.message:String(e)}}},"linux-agent-workspace":async({action:__codexAction,timeoutMs:__codexTimeoutMs,profileId:__codexProfileId,profile:__codexProfile,replace:__codexReplace,dryRun:__codexDryRun,workspaceId:__codexWorkspaceId,purpose:__codexPurpose,runSetup:__codexRunSetup,ackHiddenWorkspace:__codexAckHiddenWorkspace,ackUnenforcedPolicy:__codexAckUnenforcedPolicy,startupWaitWindow:__codexStartupWaitWindow,startupScreenshotWindow:__codexStartupScreenshotWindow,cleanupId:__codexCleanupId,outputPath:__codexOutputPath}={})=>{let __codexCommand=this.globalState.get(\`${SETTINGS_COMMAND_KEY}\`)||process.env.CODEX_AGENT_WORKSPACE_BIN||\`agent-workspace-linux\`;if(typeof __codexCommand!==\`string\`||__codexCommand.trim().length===0)__codexCommand=\`agent-workspace-linux\`;__codexCommand=__codexCommand.trim();let __codexArgs=[],__codexTempPath=null,__codexString=e=>typeof e===\`string\`&&e.trim().length>0?e.trim():null,__codexPushId=(e,t)=>{let n=__codexString(t);if(n)__codexArgs.push(e,n)},__codexActionName=__codexString(__codexAction);try{switch(__codexActionName){case\`doctor\`:__codexArgs=[\`doctor\`];break;case\`guardrails\`:__codexArgs=[\`guardrails\`];break;case\`profilePath\`:__codexArgs=[\`profile\`,\`path\`];break;case\`profileList\`:__codexArgs=[\`profile\`,\`list\`];break;case\`profileGet\`:{let e=__codexString(__codexProfileId);if(!e)throw Error(\`profile id is required\`);__codexArgs=[\`profile\`,\`get\`,e];break}case\`profileCheck\`:{let e=__codexString(__codexProfileId);if(!e)throw Error(\`profile id is required\`);__codexArgs=[\`profile\`,\`check\`,e];break}case\`profileDelete\`:{let e=__codexString(__codexProfileId);if(!e)throw Error(\`profile id is required\`);__codexArgs=[\`profile\`,\`delete\`],__codexDryRun&&__codexArgs.push(\`--dry-run\`),__codexArgs.push(e);break}case\`profileExport\`:{let e=__codexString(__codexProfileId);if(!e)throw Error(\`profile id is required\`);__codexArgs=[\`profile\`,\`export\`,e],__codexPushId(\`--output\`,__codexOutputPath),__codexReplace&&__codexArgs.push(\`--replace\`);break}case\`profileSave\`:{if(!__codexProfile||typeof __codexProfile!==\`object\`||Array.isArray(__codexProfile))throw Error(\`profile object is required\`);let e=process.env.XDG_RUNTIME_DIR||process.env.TMPDIR||\`/tmp\`,t=${fsVar}.mkdtempSync(${pathVar}.join(e,\`codex-agent-workspace-\`));__codexTempPath=${pathVar}.join(t,\`profile.json\`),${fsVar}.writeFileSync(__codexTempPath,JSON.stringify(__codexProfile,null,2)+\`\\n\`,{encoding:\`utf8\`,mode:384}),__codexArgs=[\`profile\`,\`put\`,\`--json\`,__codexTempPath],__codexReplace&&__codexArgs.push(\`--replace\`),__codexDryRun&&__codexArgs.push(\`--dry-run\`);break}case\`workspaceList\`:__codexArgs=[\`workspace\`,\`list\`];break;case\`workspaceStatus\`:__codexArgs=[\`workspace\`,\`status\`],__codexPushId(\`--id\`,__codexWorkspaceId);break;case\`workspaceManifest\`:__codexArgs=[\`workspace\`,\`manifest\`],__codexPushId(\`--id\`,__codexWorkspaceId);break;case\`workspaceArtifacts\`:__codexArgs=[\`workspace\`,\`artifacts\`],__codexPushId(\`--id\`,__codexWorkspaceId);break;case\`workspaceOpenProfile\`:{let e=__codexString(__codexProfileId);if(!e)throw Error(\`profile id is required\`);__codexArgs=[\`workspace\`,\`open-profile\`],__codexDryRun&&__codexArgs.push(\`--dry-run\`),__codexAckHiddenWorkspace&&__codexArgs.push(\`--ack-hidden-workspace\`),__codexAckUnenforcedPolicy&&__codexArgs.push(\`--ack-unenforced-policy\`),__codexArgs.push(\`--profile\`,e),__codexPushId(\`--id\`,__codexWorkspaceId),__codexPushId(\`--purpose\`,__codexPurpose),__codexRunSetup&&__codexArgs.push(\`--setup\`),__codexStartupWaitWindow&&__codexArgs.push(\`--startup-wait-window\`),__codexStartupScreenshotWindow&&__codexArgs.push(\`--startup-screenshot-window\`);break}case\`workspaceStop\`:__codexArgs=[\`workspace\`,\`stop\`],__codexPushId(\`--id\`,__codexWorkspaceId);break;case\`workspaceCleanup\`:__codexArgs=[\`workspace\`,\`cleanup\`],__codexDryRun&&__codexArgs.push(\`--dry-run\`),__codexPushId(\`--id\`,__codexCleanupId);break;default:throw Error(\`unsupported agent workspace action\`)}}catch(e){return{ok:!1,action:__codexActionName,message:e instanceof Error?e.message:String(e)}}let __codexParse=e=>{let t=String(e||\`\`).trim();if(t.length===0)return null;try{return JSON.parse(t)}catch{return{raw:t}}};try{let e=await new Promise((e,t)=>{let n=${childProcessVar}.execFile(__codexCommand,__codexArgs,{encoding:\`utf8\`,timeout:Number.isFinite(Number(__codexTimeoutMs))?Number(__codexTimeoutMs):15e3,maxBuffer:8388608},(n,r,i)=>{n?(n.stdout=r,n.stderr=i,t(n)):e({stdout:r,stderr:i})})});return{ok:!0,action:__codexActionName,command:__codexCommand,args:__codexArgs,stdout:e.stdout,stderr:e.stderr,json:__codexParse(e.stdout)}}catch(e){return{ok:!1,action:__codexActionName,command:__codexCommand,args:__codexArgs,message:e instanceof Error?e.message:String(e),code:e?.code??null,stdout:e?.stdout??\`\`,stderr:e?.stderr??\`\`,json:__codexParse(e?.stdout)}}finally{if(__codexTempPath)try{${fsVar}.rmSync(${pathVar}.dirname(__codexTempPath),{recursive:!0,force:!0})}catch{}}}`;
 }
 
 function applyAgentWorkspaceMainBridgePatch(currentSource) {
@@ -112,6 +112,51 @@ function field(label,value,onChange,placeholder){
   );
 }
 
+function commandText(command){
+  return Array.isArray(command)?command.join(" "):"";
+}
+
+function baseName(filePath){
+  var value=String(filePath||"").split("/").filter(Boolean).pop()||"app";
+  return value.endsWith(".desktop")?value.slice(0,-8):value;
+}
+
+function startupAppFromPath(filePath){
+  var name=baseName(filePath);
+  if(String(filePath||"").endsWith(".desktop"))return {name:name,command:["gtk-launch",name]};
+  return {name:name,command:[filePath]};
+}
+
+function startupAppFromManual(command){
+  return {name:command.trim().split(/\\s+/)[0]||"app",command:["sh","-lc",command.trim()]};
+}
+
+function profileStartupApps(profile){
+  return Array.isArray(profile?.startup_apps)?profile.startup_apps:[];
+}
+
+function workspaceStatusObject(result){
+  return result?.status??result?.json?.status??result?.json??result;
+}
+
+function workspaceStatusView(detail){
+  var status=workspaceStatusObject(detail);
+  if(!status||typeof status!=="object")return null;
+  var apps=Array.isArray(status.apps)?status.apps:[];
+  return h("section",{className:"rounded-md border border-token-border-default bg-token-main-surface-secondary p-3 text-sm"},
+    h("div",{className:"mb-2 flex items-center justify-between gap-2"},
+      h("div",{className:"font-medium text-token-text-primary"},"Workspace status"),
+      status.ready?statusPill("Ready","active"):statusPill("Stopped","idle")
+    ),
+    h("div",{className:"grid gap-2 text-token-text-secondary md:grid-cols-2"},
+      h("div",null,"Display: "+(status.display||"unknown")),
+      h("div",null,"Apps: "+apps.length),
+      h("div",null,"Size: "+((status.width||"?")+" x "+(status.height||"?"))),
+      h("div",{className:"truncate"},"Socket: "+(status.socket_path||"unknown"))
+    )
+  );
+}
+
 function resultView(result){
   if(!result)return null;
   var border=result.ok?"border-token-border-default":"border-token-error";
@@ -185,6 +230,12 @@ function resultSummary(result){
     return "Workspace list: "+running+" active, "+(result.json.workspaces.length-running)+" stopped";
   }
   if(Array.isArray(result.json?.profiles))return "Profile list: "+result.json.profiles.length+" saved";
+  if(Array.isArray(result.json?.removed)||Array.isArray(result.json?.candidates)){
+    var removed=Array.isArray(result.json.removed)?result.json.removed.length:0;
+    var candidates=Array.isArray(result.json.candidates)?result.json.candidates.length:0;
+    var skipped=Array.isArray(result.json.skipped)?result.json.skipped.length:0;
+    return result.json.dry_run?"Cleanup preview: "+candidates+" stale":"Cleanup: "+removed+" removed, "+skipped+" skipped";
+  }
   if(result.action)return result.action+" complete";
   return "Command complete";
 }
@@ -222,6 +273,15 @@ function AgentWorkspacesSettings(){
   var loadingState=React.useState(true);
   var loading=loadingState[0];
   var setLoading=loadingState[1];
+  var editingState=React.useState(false);
+  var editingProfile=editingState[0];
+  var setEditingProfile=editingState[1];
+  var manualAppState=React.useState("");
+  var manualApp=manualAppState[0];
+  var setManualApp=manualAppState[1];
+  var detailState=React.useState(null);
+  var workspaceDetail=detailState[0];
+  var setWorkspaceDetail=detailState[1];
 
   var callAgentWorkspace=React.useCallback(async function(action,params){
     setActiveAction(action);
@@ -257,6 +317,7 @@ function AgentWorkspacesSettings(){
   },[refresh]);
 
   var profile=parseProfile(profileJson);
+  var startupApps=profileStartupApps(profile);
   var runningWorkspaces=workspaces.filter(workspaceRunning);
   var activeWorkspace=runningWorkspaces[0]??null;
   var otherRunningWorkspaces=activeWorkspace?runningWorkspaces.slice(1):[];
@@ -268,8 +329,15 @@ function AgentWorkspacesSettings(){
     await callAgentWorkspace("doctor");
   }
 
-  function selectProfile(profileId){
+  function updateProfile(mutator){
+    var next=parseProfile(profileJson)||defaultProfile();
+    mutator(next);
+    setProfileJson(pretty(next));
+  }
+
+  function selectProfile(profileId,openEditor){
     setSelectedProfileId(profileId);
+    if(openEditor)setEditingProfile(true);
     if(!profileId)return;
     callAgentWorkspace("profileGet",{profileId:profileId}).then(function(response){
       var loaded=response?.json?.profile??response?.json;
@@ -277,16 +345,52 @@ function AgentWorkspacesSettings(){
     });
   }
 
+  function createProfile(){
+    setSelectedProfileId("");
+    setProfileJson(pretty(defaultProfile()));
+    setPurpose("");
+    setManualApp("");
+    setEditingProfile(true);
+  }
+
   function setNetworkMode(mode){
-    var next=parseProfile(profileJson)||defaultProfile();
-    next.network={...(next.network||{}),mode:mode};
-    setProfileJson(pretty(next));
+    updateProfile(function(next){next.network={...(next.network||{}),mode:mode};});
   }
 
   function setMountMode(mode){
-    var next=parseProfile(profileJson)||defaultProfile();
-    next.mounts=(next.mounts||[]).map(function(mount){return {...mount,mode:mode};});
-    setProfileJson(pretty(next));
+    updateProfile(function(next){next.mounts=(next.mounts||[]).map(function(mount){return {...mount,mode:mode};});});
+  }
+
+  function setProfileTextField(key,value){
+    updateProfile(function(next){
+      if(value.trim())next[key]=value;
+      else delete next[key];
+    });
+  }
+
+  function addStartupApp(app){
+    if(!app?.command?.length)return;
+    updateProfile(function(next){next.startup_apps=[...profileStartupApps(next),app];});
+  }
+
+  function removeStartupApp(index){
+    updateProfile(function(next){next.startup_apps=profileStartupApps(next).filter(function(_,appIndex){return appIndex!==index;});});
+  }
+
+  async function pickStartupApp(){
+    try{
+      var response=await __post("linux-agent-workspace-pick-app",{params:{}});
+      setResult(response);
+      if(response?.ok&&response?.json?.path)addStartupApp(startupAppFromPath(response.json.path));
+    }catch(error){
+      setResult({ok:false,action:"pickStartupApp",message:error instanceof Error?error.message:String(error)});
+    }
+  }
+
+  function addManualStartupApp(){
+    if(!manualApp.trim())return;
+    addStartupApp(startupAppFromManual(manualApp));
+    setManualApp("");
   }
 
   async function saveProfile(replace){
@@ -295,7 +399,11 @@ function AgentWorkspacesSettings(){
       return;
     }
     var response=await callAgentWorkspace("profileSave",{profile:profile,replace:replace});
-    if(response?.ok)refresh();
+    if(response?.ok){
+      setSelectedProfileId(profile.id||"");
+      setEditingProfile(false);
+      refresh();
+    }
   }
 
   function previewStart(){
@@ -323,7 +431,24 @@ function AgentWorkspacesSettings(){
   }
 
   function stopWorkspace(workspaceId){
-    callAgentWorkspace("workspaceStop",{workspaceId:workspaceId}).then(refresh);
+    callAgentWorkspace("workspaceStop",{workspaceId:workspaceId}).then(function(){
+      setWorkspaceDetail(null);
+      refresh();
+    });
+  }
+
+  function showWorkspaceStatus(workspaceId){
+    callAgentWorkspace("workspaceStatus",{workspaceId:workspaceId}).then(function(response){
+      if(response?.ok)setWorkspaceDetail(response);
+    });
+  }
+
+  function cleanupStale(){
+    if(!window.confirm("Remove stopped workspace runtime directories? Running workspaces are skipped."))return;
+    callAgentWorkspace("workspaceCleanup",{dryRun:false}).then(function(){
+      setWorkspaceDetail(null);
+      refresh();
+    });
   }
 
   return h(SettingsPage,{title:"Agent Workspaces",subtitle:"Linux agent environments"},
@@ -349,11 +474,12 @@ function AgentWorkspacesSettings(){
                 workspaceDisplay(activeWorkspace)?h("div",{className:"mt-1 text-xs text-token-text-tertiary"},workspaceDisplay(activeWorkspace)):null
               ),
               h("div",{className:"flex shrink-0 gap-2"},
-                button("Status",false,function(){callAgentWorkspace("workspaceStatus",{workspaceId:workspaceId(activeWorkspace)});}),
+                button("Status",false,function(){showWorkspaceStatus(workspaceId(activeWorkspace));}),
                 button("Stop",false,function(){stopWorkspace(workspaceId(activeWorkspace));})
               )
             )
           : h("div",{className:"rounded-md border border-dashed border-token-border-default p-3 text-sm text-token-text-tertiary"},"No active workspace"),
+        workspaceStatusView(workspaceDetail),
         otherRunningWorkspaces.length>0
           ? h("details",{className:"rounded-md border border-yellow-500/30 bg-token-main-surface-secondary text-sm"},
               h("summary",{className:"cursor-pointer px-3 py-2 text-token-text-primary"},"Other running workspaces ("+otherRunningWorkspaces.length+")"),
@@ -374,7 +500,7 @@ function AgentWorkspacesSettings(){
         stoppedWorkspaceCount>0
           ? h("div",{className:"flex items-center justify-between rounded-md border border-token-border-default px-3 py-2 text-sm text-token-text-tertiary"},
               h("span",null,"Stopped workspaces: "+stoppedWorkspaceCount),
-              button("Cleanup stale",activeAction==="workspaceCleanup",function(){callAgentWorkspace("workspaceCleanup",{dryRun:true});})
+              button("Remove stale",activeAction==="workspaceCleanup",cleanupStale)
             )
           : null
       ),
@@ -382,10 +508,7 @@ function AgentWorkspacesSettings(){
       h("section",{className:"flex flex-col gap-3"},
         h("div",{className:"flex items-center justify-between"},
           h("div",{className:"text-sm font-medium text-token-text-primary"},"Saved profiles"),
-          h("div",{className:"flex gap-2"},
-            button("New",false,function(){setSelectedProfileId("");setProfileJson(pretty(defaultProfile()));}),
-            button("Delete",!selectedProfileId,function(){callAgentWorkspace("profileDelete",{profileId:selectedProfileId}).then(refresh);})
-          )
+          button("Create profile",false,createProfile)
         ),
         profiles.length===0
           ? h("div",{className:"rounded-md border border-dashed border-token-border-default p-3 text-sm text-token-text-tertiary"},"No saved profiles")
@@ -393,64 +516,102 @@ function AgentWorkspacesSettings(){
               profiles.map(function(savedProfile){
                 var id=profileId(savedProfile);
                 var selected=id===selectedProfileId;
-                return h("button",{
+                return h("div",{
                   key:id,
-                  type:"button",
-                  className:"rounded-md border p-3 text-left text-sm hover:bg-token-main-surface-secondary "+(selected?"border-token-border-strong bg-token-main-surface-secondary":"border-token-border-default"),
-                  onClick:function(){selectProfile(id);}
+                  className:"rounded-md border p-3 text-sm "+(selected?"border-token-border-strong bg-token-main-surface-secondary":"border-token-border-default")
                 },
                   h("div",{className:"flex items-center justify-between gap-2"},
                     h("span",{className:"truncate font-medium text-token-text-primary"},id),
                     statusPill(profileNetwork(savedProfile),"idle")
                   ),
-                  h("div",{className:"mt-1 truncate text-token-text-tertiary"},profileSummary(savedProfile))
+                  h("div",{className:"mt-1 truncate text-token-text-tertiary"},profileSummary(savedProfile)),
+                  h("div",{className:"mt-3 flex gap-2"},
+                    button("Edit profile",false,function(){selectProfile(id,true);}),
+                    button("Delete",false,function(){
+                      if(window.confirm("Delete profile "+id+"?"))callAgentWorkspace("profileDelete",{profileId:id}).then(refresh);
+                    })
+                  )
                 );
               })
             )
       ),
 
-      h("section",{className:"flex flex-col gap-3"},
-        h("div",{className:"flex items-center justify-between"},
-          h("div",{className:"text-sm font-medium text-token-text-primary"},"Profile editor"),
-          statusPill(selectedProfileId||"New","idle")
-        ),
-        h("div",{className:"grid gap-3 md:grid-cols-[1fr_220px]"},
-          field("Purpose",purpose,setPurpose,"QA run"),
-          h("label",{className:"flex flex-col gap-1 text-sm text-token-text-secondary"},
-            h("span",null,"Network"),
-            h("select",{
-              className:"h-9 rounded-md border border-token-border-default bg-token-bg-primary px-2 text-token-text-primary",
-              value:profile?.network?.mode||"inherit_host",
-              onChange:function(event){setNetworkMode(event.target.value);}
-            },
-              ["inherit_host","local_only","disabled","allowlist"].map(function(mode){
-                return h("option",{key:mode,value:mode},mode);
+      editingProfile
+        ? h("section",{className:"flex flex-col gap-3 rounded-md border border-token-border-default p-3"},
+            h("div",{className:"flex items-center justify-between"},
+              h("div",{className:"text-sm font-medium text-token-text-primary"},selectedProfileId?"Edit profile":"Create profile"),
+              statusPill(selectedProfileId||"New","idle")
+            ),
+            h("div",{className:"grid gap-3 md:grid-cols-3"},
+              field("Profile name",profile?.id||"",function(value){setProfileTextField("id",value);},"desktop-qa"),
+              field("Description",profile?.description||"",function(value){setProfileTextField("description",value);},"Desktop QA"),
+              field("Working folder",profile?.cwd||"",function(value){setProfileTextField("cwd",value);},"/workspace/project")
+            ),
+            h("div",{className:"grid gap-3 md:grid-cols-[220px_1fr]"},
+              h("label",{className:"flex flex-col gap-1 text-sm text-token-text-secondary"},
+                h("span",null,"Network"),
+                h("select",{
+                  className:"h-9 rounded-md border border-token-border-default bg-token-bg-primary px-2 text-token-text-primary",
+                  value:profile?.network?.mode||"inherit_host",
+                  onChange:function(event){setNetworkMode(event.target.value);}
+                },
+                  ["inherit_host","local_only","disabled","allowlist"].map(function(mode){
+                    return h("option",{key:mode,value:mode},mode);
+                  })
+                )
+              ),
+              h("div",{className:"flex flex-wrap items-end gap-2"},
+                button("Read only",!profile,function(){setMountMode("read_only");}),
+                button("Read write",!profile,function(){setMountMode("read_write");})
+              )
+            ),
+            h("div",{className:"flex flex-col gap-2 rounded-md border border-token-border-default p-3"},
+              h("div",{className:"flex items-center justify-between gap-2"},
+                h("div",{className:"text-sm font-medium text-token-text-primary"},"Startup apps"),
+                button("Pick app",!profile,pickStartupApp)
+              ),
+              startupApps.length===0
+                ? h("div",{className:"text-sm text-token-text-tertiary"},"No startup apps")
+                : h("div",{className:"flex flex-col gap-2"},
+                    startupApps.map(function(app,index){
+                      return h("div",{key:String(index),className:"flex items-center justify-between gap-2 rounded-md border border-token-border-default p-2 text-sm"},
+                        h("div",{className:"min-w-0"},
+                          h("div",{className:"truncate text-token-text-primary"},app.name||commandText(app.command)),
+                          h("div",{className:"truncate text-token-text-tertiary"},commandText(app.command))
+                        ),
+                        button("Remove",false,function(){removeStartupApp(index);})
+                      );
+                    })
+                  ),
+              h("div",{className:"grid gap-2 md:grid-cols-[1fr_auto]"},
+                field("Manual app command",manualApp,setManualApp,"firefox"),
+                h("div",{className:"flex items-end"},button("Add manually",!manualApp.trim(),addManualStartupApp))
+              )
+            ),
+            field("Workspace purpose",purpose,setPurpose,"QA run"),
+            h("details",{className:"rounded-md border border-token-border-default bg-token-main-surface-secondary text-sm"},
+              h("summary",{className:"cursor-pointer px-3 py-2 text-token-text-primary"},"Advanced settings"),
+              h("textarea",{
+                className:"min-h-[220px] w-full border-t border-token-border-default bg-token-bg-primary p-3 font-mono text-xs text-token-text-primary outline-none",
+                value:profileJson,
+                onChange:function(event){setProfileJson(event.target.value);},
+                spellCheck:false
               })
+            ),
+            h("div",{className:"flex flex-wrap justify-between gap-2"},
+              h("div",{className:"flex flex-wrap gap-2"},
+                button("Validate",!profile,function(){callAgentWorkspace("profileSave",{profile:profile,dryRun:true,replace:true});}),
+                button("Save",!profile,function(){saveProfile(false);}),
+                button("Overwrite",!profile,function(){saveProfile(true);}),
+                button("Cancel",false,function(){setEditingProfile(false);})
+              ),
+              h("div",{className:"flex flex-wrap gap-2"},
+                button("Preview start",!profile,previewStart),
+                button("Start",startDisabled,startWorkspace)
+              )
             )
           )
-        ),
-        h("div",{className:"flex flex-wrap items-center justify-between gap-2"},
-          h("div",{className:"flex flex-wrap gap-2"},
-            button("Read only",!profile,function(){setMountMode("read_only");}),
-            button("Read write",!profile,function(){setMountMode("read_write");})
-          ),
-          h("div",{className:"flex flex-wrap gap-2"},
-            button("Validate",!profile,function(){callAgentWorkspace("profileSave",{profile:profile,dryRun:true,replace:true});}),
-            button("Save",!profile,function(){saveProfile(false);}),
-            button("Overwrite",!profile,function(){saveProfile(true);})
-          )
-        ),
-        h("textarea",{
-          className:"min-h-[220px] rounded-md border border-token-border-default bg-token-bg-primary p-3 font-mono text-xs text-token-text-primary outline-none",
-          value:profileJson,
-          onChange:function(event){setProfileJson(event.target.value);},
-          spellCheck:false
-        }),
-        h("div",{className:"flex flex-wrap gap-2"},
-          button("Preview start",!profile,previewStart),
-          button("Start",startDisabled,startWorkspace)
-        )
-      ),
+        : null,
 
       resultView(result)
     )
