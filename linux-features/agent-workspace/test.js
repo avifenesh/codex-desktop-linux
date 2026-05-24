@@ -662,6 +662,7 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /Workspace name/);
   assert.doesNotMatch(source, /Saved profiles/);
   assert.match(source, /Create new/);
+  assert.match(source, /Project template/);
   assert.match(source, /Chrome template/);
   assert.match(source, /Browser session/);
   assert.match(source, /Prepare browser session/);
@@ -670,6 +671,8 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /profile locks/);
   assert.match(source, /Create from copy/);
   assert.match(source, /Create direct/);
+  assert.match(source, /function createProjectProfile/);
+  assert.match(source, /templateKind:"project-dev"/);
   assert.match(source, /function createRestrictedChromeProfile/);
   assert.match(source, /function createBrowserSessionProfile/);
   assert.match(source, /function finishBrowserSessionProfile/);

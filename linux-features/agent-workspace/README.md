@@ -80,11 +80,12 @@ workspace, showed the **Agent Workspaces** sidebar entry and page, rendered the
 active workspace card, and opened the **Chrome template** create form with the
 disabled-network `restricted-chrome` profile plus its explicit
 `restricted-chrome-no-sandbox` startup command. The page also exposes a
-**Browser session** starter that opens a browser-data folder picker, shows the
-selected path and account-data warning, offers a managed copy or direct-folder
-mode, and then calls the MCP `browser-session` template with the selected
-`userDataDir`. The form was not saved during the test, and cleanup left no saved
-profiles or active workspaces.
+**Project template** starter that opens the file/folder picker and calls the MCP
+`project-dev` template, plus a **Browser session** starter that opens a
+browser-data folder picker, shows the selected path and account-data warning,
+offers a managed copy or direct-folder mode, and then calls the MCP
+`browser-session` template with the selected `userDataDir`. The form was not
+saved during the test, and cleanup left no saved profiles or active workspaces.
 
 Run the feature tests with:
 

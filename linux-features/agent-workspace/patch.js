@@ -727,6 +727,22 @@ function AgentWorkspacesSettings(){
     return base+"-"+index;
   }
 
+  async function createProjectProfile(){
+    try{
+      var pick=await __post("linux-agent-workspace-pick-mount",{params:{}});
+      setResult(pick);
+      var hostPath=pick?.json?.path;
+      if(!pick?.ok||!hostPath)return;
+      var base=hostPath.split(/[\\/]+/).filter(Boolean).pop()||"project-dev";
+      var id=uniqueProfileId(base.toLowerCase().replace(/[^a-z0-9_-]+/g,"-").replace(/^-+|-+$/g,"")||"project-dev");
+      var response=await callAgentWorkspace("profileTemplate",{templateKind:"project-dev",profileId:id,hostPath:hostPath});
+      var template=profileFromResponse(response);
+      openCreateProfileTemplate(template);
+    }catch(error){
+      setResult({ok:false,action:"pickMount",message:error instanceof Error?error.message:String(error)});
+    }
+  }
+
   async function createRestrictedChromeProfile(){
     var id=uniqueProfileId("restricted-chrome");
     var response=await callAgentWorkspace("profileTemplate",{templateKind:"restricted-chrome",profileId:id});
@@ -1073,6 +1089,7 @@ function AgentWorkspacesSettings(){
         h("div",{className:"flex items-center justify-between"},
           h("div",{className:"text-sm font-medium text-token-text-primary"},"Saved workspaces"),
           h("div",{className:"flex gap-2"},
+            button("Project template",activeAction==="profileTemplate",createProjectProfile),
             button("Chrome template",activeAction==="profileTemplate",createRestrictedChromeProfile),
             button("Browser session",activeAction==="profileTemplate",createBrowserSessionProfile),
             button("Create new",false,createProfile)
