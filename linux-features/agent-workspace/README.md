@@ -53,16 +53,22 @@ auto-loop agents and other MCP hosts. If no MCP permission file is configured,
 the page stays in the existing app-owned permission mode.
 
 The first conversation-view slice shows a compact live workspace panel when an
-agent workspace is active. It polls `workspace observe --screenshot` through the
-allowlisted bridge, renders the latest screenshot in the conversation surface,
-shows the display, profile/policy summary, and running app names, and exposes
-Refresh, Stop, and Revoke buttons next to the live view. Stop failures keep the
-panel visible and show the bridge or CLI error instead of pretending the
-workspace stopped. The panel hides on Settings pages, where the dedicated Agent
-Workspaces page owns the controls, and watches navigation/content changes so it
-does not linger over settings after route changes. This is not a full streaming
-viewer yet; the deeper viewer can build on the same observe/screenshot bridge
-after the lifecycle and profile surface is stable.
+agent workspace is active. It uses the current Codex `--color-token-*` theme
+variables first, with older token names only as fallback, polls `workspace observe
+--screenshot` through the allowlisted bridge, renders the latest screenshot in
+the conversation surface, shows the display, profile/policy summary, and running
+app names, and exposes Refresh, Stop, and Revoke buttons next to the live view.
+The panel can be dragged by its header, resized from its lower-right handle, and
+keeps its clamped position/size in local storage so it does not stay stuck over
+half the conversation. Newer injected runtimes clean up older panel instances
+before rendering, which prevents stacked live-view overlays after an app patch.
+Stop failures keep the panel visible and show the bridge or CLI error instead of
+pretending the workspace stopped. The panel hides on Settings pages, where the
+dedicated Agent Workspaces page owns the controls, and watches
+navigation/content changes so it does not linger over settings after route
+changes. This is not a full streaming viewer yet; the deeper viewer can build on
+the same observe/screenshot bridge after the lifecycle and profile surface is
+stable.
 
 Dogfood check: the side-by-side dev app built with `make build-dev-app` has been
 launched inside an agent workspace. The conversation panel rendered the live

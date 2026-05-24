@@ -221,6 +221,7 @@ class FakeElement {
     this.src = "";
     this.alt = "";
     this.title = "";
+    this.style = {};
   }
 
   appendChild(child) {
@@ -237,7 +238,16 @@ class FakeElement {
     if (index >= 0) {
       next.parentNode = this.parentNode;
       siblings[index] = next;
+      this.parentNode = null;
     }
+  }
+
+  remove() {
+    const siblings = this.parentNode?.children;
+    if (!siblings) return;
+    const index = siblings.indexOf(this);
+    if (index >= 0) siblings.splice(index, 1);
+    this.parentNode = null;
   }
 
   addEventListener(type, callback) {
@@ -309,17 +319,23 @@ class FakeElement {
 
     const empty = this.ownerDocument.createElement("div");
     empty.className = "codex-linux-agent-workspace-empty";
-    empty.textContent = "No screenshot yet";
+    empty.textContent = "Workspace is running. No windows yet.";
+    const viewport = this.ownerDocument.createElement("div");
+    viewport.className = "codex-linux-agent-workspace-viewport";
+    viewport.appendChild(empty);
     const meta = this.ownerDocument.createElement("div");
     meta.className = "codex-linux-agent-workspace-meta";
     const error = this.ownerDocument.createElement("div");
     error.className = "codex-linux-agent-workspace-error";
     error.hidden = true;
+    const resize = this.ownerDocument.createElement("button");
+    resize.className = "codex-linux-agent-workspace-resize";
 
     this.appendChild(head);
-    this.appendChild(empty);
+    this.appendChild(viewport);
     this.appendChild(meta);
     this.appendChild(error);
+    this.appendChild(resize);
   }
 
   get innerHTML() {
@@ -329,9 +345,13 @@ class FakeElement {
   querySelector(selector) {
     return findElement(this, selector);
   }
+
+  querySelectorAll(selector) {
+    return findElements(this, selector);
+  }
 }
 
-function findElement(root, selector) {
+function findElements(root, selector) {
   const matches = (element) => {
     if (selector.startsWith(".")) {
       return String(element.className || "").split(/\s+/).includes(selector.slice(1));
@@ -342,13 +362,27 @@ function findElement(root, selector) {
     }
     return false;
   };
+  const found = [];
   const stack = [...root.children];
   while (stack.length > 0) {
     const element = stack.shift();
-    if (matches(element)) return element;
+    if (matches(element)) found.push(element);
     stack.unshift(...element.children);
   }
-  return null;
+  return found;
+}
+
+function findElement(root, selector) {
+  const [first] = findElements(root, selector);
+  return first || null;
+}
+
+function appendStaleWorkspacePanel(document) {
+  const panel = document.createElement("section");
+  panel.className = "codex-linux-agent-workspace-panel";
+  panel.hidden = true;
+  document.body.appendChild(panel);
+  return panel;
 }
 
 function createFakeDocument() {
@@ -743,6 +777,19 @@ test("conversation visibility runtime is valid script and idempotent", () => {
   assert.match(runtime, /function inSettingsView/);
   assert.match(runtime, /function scheduleViewCheck/);
   assert.match(runtime, /MutationObserver/);
+  assert.match(runtime, /localStorage/);
+  assert.match(runtime, /function beginInteraction/);
+  assert.match(runtime, /pointerdown/);
+  assert.match(runtime, /codex-linux-agent-workspace-resize/);
+  assert.match(runtime, /codex-linux-agent-workspace-theme-v8/);
+  assert.match(runtime, /function removeOldPanels/);
+  assert.match(runtime, /codexLinuxAgentWorkspaceConversationCleanup/);
+  assert.match(runtime, /--color-token-main-surface-primary/);
+  assert.match(runtime, /54%,transparent/);
+  assert.match(runtime, /--color-token-bg-fog/);
+  assert.match(runtime, /--color-token-border-default/);
+  assert.match(runtime, /Drag workspace viewer/);
+  assert.match(runtime, /Resize workspace viewer/);
   assert.match(runtime, /profile /);
   assert.match(runtime, /network /);
   assert.match(runtime, /mount/);
@@ -854,10 +901,16 @@ test("conversation visibility runtime renders and stops an active workspace", as
   };
   const window = {
     document,
+    innerWidth: 1000,
+    innerHeight: 700,
     addEventListener(type, callback) {
       const callbacks = listeners.get(type) || [];
       callbacks.push(callback);
       listeners.set(type, callbacks);
+    },
+    removeEventListener(type, callback) {
+      const callbacks = listeners.get(type) || [];
+      listeners.set(type, callbacks.filter((candidate) => candidate !== callback));
     },
     dispatchEvent(event) {
       const payload = event.detail;
@@ -897,6 +950,7 @@ test("conversation visibility runtime renders and stops an active workspace", as
       return true;
     },
   };
+  const localStore = new Map();
   const context = vm.createContext({
     CustomEvent: class CustomEvent {
       constructor(type, options) {
@@ -908,6 +962,14 @@ test("conversation visibility runtime renders and stops an active workspace", as
     console,
     document,
     globalThis: null,
+    localStorage: {
+      getItem(key) {
+        return localStore.get(key) || null;
+      },
+      setItem(key, value) {
+        localStore.set(key, String(value));
+      },
+    },
     setInterval() {
       return 1;
     },
@@ -916,6 +978,10 @@ test("conversation visibility runtime renders and stops an active workspace", as
   });
   context.globalThis = context;
 
+  appendStaleWorkspacePanel(document);
+  appendStaleWorkspacePanel(document);
+  assert.equal(document.body.querySelectorAll(".codex-linux-agent-workspace-panel").length, 2);
+
   vm.runInContext(agentWorkspaceConversationRuntimeSource(), context);
   await waitFor(
     () => document.body.querySelector(".codex-linux-agent-workspace-panel")?.hidden === false,
@@ -923,11 +989,16 @@ test("conversation visibility runtime renders and stops an active workspace", as
   );
 
   const panel = document.body.querySelector(".codex-linux-agent-workspace-panel");
+  assert.equal(document.body.querySelectorAll(".codex-linux-agent-workspace-panel").length, 1);
   const title = panel.querySelector(".codex-linux-agent-workspace-title");
   const meta = panel.querySelector(".codex-linux-agent-workspace-meta");
   const error = panel.querySelector(".codex-linux-agent-workspace-error");
   const image = panel.querySelector(".codex-linux-agent-workspace-shot");
+  const resize = panel.querySelector(".codex-linux-agent-workspace-resize");
+  const head = panel.querySelector(".codex-linux-agent-workspace-head");
   assert.ok(panel.querySelector("[data-action='revoke']"));
+  assert.ok(resize);
+  assert.ok(head);
   assert.equal(title.textContent, "QA live view");
   assert.match(meta.textContent, /:90/);
   assert.match(meta.textContent, /profile desktop-qa/);
@@ -936,6 +1007,39 @@ test("conversation visibility runtime renders and stops an active workspace", as
   assert.match(meta.textContent, /1 app: chrome/);
   assert.equal(meta.title, meta.textContent);
   assert.equal(image.src, "data:image/png;base64,abc");
+  assert.equal(panel.style.width, "420px");
+  assert.equal(panel.style.height, "320px");
+
+  const initialLeft = Number.parseFloat(panel.style.left);
+  const initialTop = Number.parseFloat(panel.style.top);
+  head.listeners.get("pointerdown")[0]({
+    button: 0,
+    clientX: 100,
+    clientY: 100,
+    currentTarget: head,
+    target: head,
+    preventDefault() {},
+  });
+  for (const callback of listeners.get("pointermove") || []) callback({ clientX: 70, clientY: 75 });
+  assert.equal(Number.parseFloat(panel.style.left), initialLeft - 30);
+  assert.equal(Number.parseFloat(panel.style.top), initialTop - 25);
+  for (const callback of listeners.get("pointerup") || []) callback({});
+  assert.ok(localStore.get("codex-linux-agent-workspace-layout-v1"));
+
+  const widthAfterDrag = Number.parseFloat(panel.style.width);
+  const heightAfterDrag = Number.parseFloat(panel.style.height);
+  resize.listeners.get("pointerdown")[0]({
+    button: 0,
+    clientX: 200,
+    clientY: 200,
+    currentTarget: resize,
+    target: resize,
+    preventDefault() {},
+  });
+  for (const callback of listeners.get("pointermove") || []) callback({ clientX: 260, clientY: 240 });
+  assert.equal(Number.parseFloat(panel.style.width), widthAfterDrag + 60);
+  assert.equal(Number.parseFloat(panel.style.height), heightAfterDrag + 40);
+  for (const callback of listeners.get("pointerup") || []) callback({});
 
   panel.querySelector("[data-action='stop']").click();
   await waitFor(
