@@ -186,6 +186,9 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   assert.match(patched, /"linux-agent-workspace-pick-app":async/);
   assert.match(patched, /showOpenDialog/);
   assert.match(patched, new RegExp(SETTINGS_COMMAND_KEY));
+  assert.match(patched, /\.local`\,`bin`\,`agent-workspace-linux`/);
+  assert.match(patched, /CODEX_AGENT_WORKSPACE_BIN/);
+  assert.match(patched, /startsWith\(`~\/`\)/);
   assert.match(patched, /case`workspaceOpenProfile`/);
   assert.match(patched, /execFile\(__codexCommand,__codexArgs/);
   assert.equal(applyAgentWorkspaceMainBridgePatch(patched), patched);
@@ -217,6 +220,8 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /function workspaceSecondary/);
   assert.match(source, /function statusDot/);
   assert.match(source, /function profileMountMode/);
+  assert.match(source, /DEFAULT_COMMAND_LABEL="~\/\.local\/bin\/agent-workspace-linux"/);
+  assert.match(source, /Custom command/);
   assert.match(source, /Active workspace/);
   assert.match(source, /statusPill\("Active","active",true\)/);
   assert.match(source, /statusPill\("Idle","idle"\)/);
