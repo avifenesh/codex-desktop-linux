@@ -50,7 +50,10 @@ On each bridge call, the feature inspects the local Codex MCP config for
 bridge prepends the same `--permissions PATH` to CLI profile/workspace actions.
 That keeps app-driven actions inside the same spawn-time ceiling used by
 auto-loop agents and other MCP hosts. If no MCP permission file is configured,
-the page stays in the existing app-owned permission mode.
+the page stays in the existing app-owned permission mode: after the user
+approves the hidden workspace, normal workspace-local actions follow the Codex
+session permission choice, including full-access sessions that should not ask
+again for every click, launch, screenshot, or keystroke.
 
 The first conversation-view slice shows a compact live workspace panel when an
 agent workspace is active. It uses the current Codex `--color-token-*` theme

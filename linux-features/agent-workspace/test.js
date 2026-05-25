@@ -664,8 +664,10 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /--ack-hidden-workspace/);
   assert.match(source, /MCP permissions/);
   assert.match(source, /MCP locked/);
+  assert.match(source, /Host controlled/);
   assert.match(source, /Inspecting MCP permissions/);
-  assert.match(source, /No MCP permission ceiling detected/);
+  assert.match(source, /No MCP permission ceiling detected; Codex session permissions apply/);
+  assert.match(source, /No MCP ceiling is active\. Codex session permissions apply after hidden-workspace approval\./);
   assert.match(source, /callAgentWorkspace\("mcpConfig"\)/);
   assert.match(source, /MCP permission ceiling is active for workspace actions/);
   assert.match(source, /h\("details",[\s\S]*?\)\s*,\s*mcpConfig\?mcpConfigView\(mcpConfig\):null/);
