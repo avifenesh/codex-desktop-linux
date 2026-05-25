@@ -17,8 +17,8 @@ pipeline:
 The feature adds a Linux-only settings section named **Agent Workspaces**. The
 page can point Codex Desktop at an `agent-workspace-linux` binary, list and edit
 saved profiles, validate profile JSON without saving, preview profile-backed
-workspace starts, start a hidden workspace after explicit acknowledgement, stop
-running workspaces, run stale workspace cleanup, and create a restricted Chrome
+workspace starts, require an explicit approval card before starting a hidden
+workspace, stop running workspaces, run stale workspace cleanup, and create a restricted Chrome
 starter profile that keeps the `--no-sandbox` browser tradeoff visible. It can
 also prepare a browser-session profile from a picked browser data directory,
 defaulting to a managed copy under Agent Workspace data and keeping direct
@@ -81,6 +81,11 @@ The renderer recognizes workspace/profile parameters and the
 then shows user-facing rows such as **Workspace request**, **Needs user
 approval**, and **Approve by setting** instead of falling back to a raw JSON
 `Params` object. Generic MCP approval prompts keep the upstream renderer.
+The dedicated Settings page uses the same idea for local starts: pressing
+**Start** first runs a dry-run preview and renders an **Approve hidden
+workspace** card with the request, profile, purpose, setup/startup choices, and
+required acknowledgements. The bridge sends `--ack-hidden-workspace` and any
+needed policy acknowledgement only after the user presses **Approve and start**.
 
 Dogfood check: the side-by-side dev app built with `make build-dev-app` has been
 launched inside an agent workspace. The conversation panel rendered the live

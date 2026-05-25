@@ -656,6 +656,12 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /function mcpConfigView/);
   assert.match(source, /function permissionsPathFromArgs/);
   assert.match(source, /function mcpConfigFromResponses/);
+  assert.match(source, /function approvalPreviewView/);
+  assert.match(source, /function approvalBundleFromResponse/);
+  assert.match(source, /function approvalAckParams/);
+  assert.match(source, /approve_cli_flags/);
+  assert.match(source, /--ack-unenforced-policy/);
+  assert.match(source, /--ack-hidden-workspace/);
   assert.match(source, /MCP permissions/);
   assert.match(source, /MCP locked/);
   assert.match(source, /Inspecting MCP permissions/);
@@ -752,6 +758,14 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /function deleteStoppedWorkspace/);
   assert.match(source, /function startSavedWorkspace/);
   assert.match(source, /startSavedWorkspace\(savedProfile\)/);
+  assert.match(source, /var pendingApprovalState=React\.useState\(null\)/);
+  assert.match(source, /function requestStartApproval/);
+  assert.match(source, /callAgentWorkspace\(action,\{\.\.\.params,dryRun:true\}\)/);
+  assert.match(source, /Approve hidden workspace/);
+  assert.match(source, /Approval required/);
+  assert.match(source, /Codex wants to start an agent-controlled Linux workspace/);
+  assert.match(source, /Approve and start/);
+  assert.match(source, /approvalPreviewView\(pendingApproval,approvePendingStart/);
   assert.match(source, /workspaceStart/);
   assert.match(source, /Delete stale/);
   assert.doesNotMatch(source, /workspaceDisplay\(activeWorkspace\)/);

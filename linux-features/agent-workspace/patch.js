@@ -595,6 +595,99 @@ function mcpConfigFromResponses(mcpResponse,commandResponse){
   return null;
 }
 
+function approvalPreviewFromResponse(response){
+  var json=response?.json;
+  if(!json||typeof json!=="object")return null;
+  return json.start_preview||json.startPreview||json.launch_preview||json.launchPreview||json.run_preview||json.runPreview||json;
+}
+
+function approvalBundleFromResponse(response){
+  var json=response?.json;
+  var preview=approvalPreviewFromResponse(response);
+  var candidates=[json?.approval_bundle,json?.approvalBundle,json?.approval,preview?.approval];
+  return candidates.find(function(value){
+    return value&&typeof value==="object"&&!Array.isArray(value);
+  })||null;
+}
+
+function approvalRequirementLabels(bundle){
+  var requirements=Array.isArray(bundle?.missing_acknowledgements)&&bundle.missing_acknowledgements.length>0
+    ? bundle.missing_acknowledgements
+    : Array.isArray(bundle?.required_acknowledgements)?bundle.required_acknowledgements:[];
+  return requirements.map(function(requirement){return requirement?.label||requirement?.id;}).filter(Boolean);
+}
+
+function approvalAckParams(bundle){
+  var params={ackHiddenWorkspace:true};
+  var requirements=(Array.isArray(bundle?.missing_acknowledgements)?bundle.missing_acknowledgements:[])
+    .concat(Array.isArray(bundle?.required_acknowledgements)?bundle.required_acknowledgements:[])
+    .concat(Array.isArray(bundle?.approve_mcp_parameters)?bundle.approve_mcp_parameters:[]);
+  function applyAckName(value){
+    var id=String(value||"");
+    if(id==="unenforced_policy"||id==="acknowledge_unenforced_policy"||id==="ackUnenforcedPolicy"||id==="--ack-unenforced-policy")params.ackUnenforcedPolicy=true;
+    if(id==="hidden_workspace"||id==="acknowledge_hidden_workspace"||id==="ackHiddenWorkspace"||id==="--ack-hidden-workspace")params.ackHiddenWorkspace=true;
+  }
+  requirements.forEach(function(requirement){
+    applyAckName(requirement?.id);
+    applyAckName(requirement?.name);
+    applyAckName(requirement?.mcp_parameter?.name);
+    applyAckName(requirement?.cli_flag);
+  });
+  (Array.isArray(bundle?.approve_cli_flags)?bundle.approve_cli_flags:[]).forEach(applyAckName);
+  return params;
+}
+
+function pendingApprovalSummary(pending){
+  var preview=approvalPreviewFromResponse(pending?.preview);
+  var bundle=approvalBundleFromResponse(pending?.preview);
+  var params=pending?.params||{};
+  var profile=params.profileId||preview?.profile_id||preview?.profile||"none";
+  var purpose=params.purpose||preview?.purpose||"Codex agent workspace";
+  var request=bundle?.subject||preview?.message||pending?.title||"Start hidden workspace";
+  var requirements=approvalRequirementLabels(bundle);
+  return {
+    request,
+    profile,
+    purpose,
+    requirements,
+    runSetup:!!params.runSetup,
+    waitWindow:!!params.startupWaitWindow,
+    screenshotWindow:!!params.startupScreenshotWindow
+  };
+}
+
+function approvalPreviewView(pending,onApprove,onCancel){
+  if(!pending)return null;
+  var summary=pendingApprovalSummary(pending);
+  return h("section",{className:"rounded-md border border-yellow-500/40 bg-token-main-surface-secondary p-3 text-sm shadow-sm"},
+    h("div",{className:"flex items-start justify-between gap-3"},
+      h("div",{className:"min-w-0"},
+        h("div",{className:"font-medium text-token-text-primary"},"Approve hidden workspace"),
+        h("div",{className:"mt-1 text-token-text-secondary"},"Codex wants to start an agent-controlled Linux workspace that is separate from your visible desktop.")
+      ),
+      statusPill("Approval required","warn")
+    ),
+    h("div",{className:"mt-3 grid gap-2 text-token-text-secondary md:grid-cols-2"},
+      h("div",{className:"truncate",title:summary.request},"Request: "+summary.request),
+      h("div",{className:"truncate",title:summary.profile},"Profile: "+summary.profile),
+      h("div",{className:"truncate",title:summary.purpose},"Purpose: "+summary.purpose),
+      h("div",null,"Setup: "+(summary.runSetup?"Run before startup":"Skip")),
+      h("div",null,"Startup windows: "+(summary.waitWindow?"Wait for first window":"Do not wait")),
+      h("div",null,"Screenshots: "+(summary.screenshotWindow?"Capture startup window":"Not requested"))
+    ),
+    summary.requirements.length>0
+      ? h("div",{className:"mt-3 rounded-md border border-token-border-default p-2 text-token-text-secondary"},
+          h("div",{className:"mb-1 text-xs font-medium uppercase tracking-normal text-token-text-tertiary"},"Acknowledgements"),
+          summary.requirements.map(function(label){return h("div",{key:label},"- "+label);})
+        )
+      : null,
+    h("div",{className:"mt-3 flex flex-wrap justify-end gap-2"},
+      button("Cancel",false,onCancel),
+      button("Approve and start",false,onApprove)
+    )
+  );
+}
+
 function AgentWorkspacesSettings(){
   var commandState=React.useState("");
   var command=commandState[0];
@@ -650,6 +743,9 @@ function AgentWorkspacesSettings(){
   var browserSessionState=React.useState(null);
   var browserSessionDraft=browserSessionState[0];
   var setBrowserSessionDraft=browserSessionState[1];
+  var pendingApprovalState=React.useState(null);
+  var pendingApproval=pendingApprovalState[0];
+  var setPendingApproval=pendingApprovalState[1];
 
   var callAgentWorkspace=React.useCallback(async function(action,params){
     setActiveAction(action);
@@ -707,7 +803,7 @@ function AgentWorkspacesSettings(){
   var editingSaved=formMode==="edit"&&!!selectedProfileId;
   var selectedProfileActive=editingSaved&&runningWorkspaces.some(function(workspace){return workspaceProfileId(workspace)===selectedProfileId||workspacePrimary(workspace)===selectedProfileId;});
   var profileFormLocked=selectedProfileActive;
-  var startDisabled=!profile||!!activeWorkspace||activeAction==="workspaceOpenProfile"||activeAction==="workspaceStart";
+  var startDisabled=!profile||!!activeWorkspace||!!pendingApproval||activeAction==="workspaceOpenProfile"||activeAction==="workspaceStart";
 
   async function saveCommand(){
     await __post("set-global-state",{params:{key:COMMAND_KEY,value:command.trim()||void 0}});
@@ -958,29 +1054,41 @@ function AgentWorkspacesSettings(){
     });
   }
 
+  async function requestStartApproval(action,params,title){
+    if(activeWorkspace||pendingApproval)return;
+    var preview=await callAgentWorkspace(action,{...params,dryRun:true});
+    if(!responseOk(preview))return;
+    setPendingApproval({action:action,params:params,preview:preview,title:title});
+  }
+
+  function approvePendingStart(){
+    var pending=pendingApproval;
+    if(!pending)return;
+    var approval=approvalBundleFromResponse(pending.preview);
+    var ackParams=approvalAckParams(approval);
+    setPendingApproval(null);
+    callAgentWorkspace(pending.action,{...pending.params,...ackParams}).then(refresh);
+  }
+
   function startWorkspace(){
     if(!profile?.id||activeWorkspace)return;
-    callAgentWorkspace("workspaceOpenProfile",{
+    requestStartApproval("workspaceOpenProfile",{
       profileId:profile.id,
-      ackHiddenWorkspace:true,
-      ackUnenforcedPolicy:true,
       purpose:purpose||"Codex agent workspace",
       runSetup:true,
       startupWaitWindow:true
-    }).then(refresh);
+    },"Start "+profile.id);
   }
 
   function startSavedWorkspace(savedProfile){
     var id=profileId(savedProfile);
     if(!id||activeWorkspace)return;
-    callAgentWorkspace("workspaceOpenProfile",{
+    requestStartApproval("workspaceOpenProfile",{
       profileId:id,
-      ackHiddenWorkspace:true,
-      ackUnenforcedPolicy:true,
       purpose:profileSummary(savedProfile)||"Codex agent workspace",
       runSetup:true,
       startupWaitWindow:true
-    }).then(refresh);
+    },"Start "+id);
   }
 
   function stopWorkspace(workspaceId){
@@ -992,13 +1100,11 @@ function AgentWorkspacesSettings(){
 
   function startStoppedWorkspace(workspace){
     if(activeWorkspace)return;
-    callAgentWorkspace("workspaceStart",{
+    requestStartApproval("workspaceStart",{
       workspaceId:workspaceId(workspace),
       profileId:workspaceProfileId(workspace),
-      purpose:workspacePurpose(workspace)||"Codex agent workspace",
-      ackHiddenWorkspace:true,
-      ackUnenforcedPolicy:true
-    }).then(refresh);
+      purpose:workspacePurpose(workspace)||"Codex agent workspace"
+    },"Restart "+workspacePrimary(workspace));
   }
 
   function deleteStoppedWorkspace(workspace){
@@ -1066,6 +1172,7 @@ function AgentWorkspacesSettings(){
             )
           : h("div",{className:"rounded-md border border-dashed border-token-border-default p-3 text-sm text-token-text-tertiary"},"No active workspace"),
         workspaceStatusView(workspaceDetail),
+        approvalPreviewView(pendingApproval,approvePendingStart,function(){setPendingApproval(null);}),
         otherRunningWorkspaces.length>0
           ? h("details",{className:"rounded-md border border-yellow-500/30 bg-token-main-surface-secondary text-sm"},
               h("summary",{className:"cursor-pointer px-3 py-2 text-token-text-primary"},"Other running workspaces ("+otherRunningWorkspaces.length+")"),
