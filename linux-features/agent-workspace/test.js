@@ -17,12 +17,9 @@ const {
   patchExtractedApp,
 } = require("../../scripts/patch-linux-window-ui.js");
 const {
-  CONVERSATION_RUNTIME_VERSION,
   SETTINGS_ASSET,
   SETTINGS_COMMAND_KEY,
   SETTINGS_SLUG,
-  agentWorkspaceConversationRuntimeSource,
-  applyAgentWorkspaceConversationViewPatch,
   applyAgentWorkspaceApprovalRenderingPatch,
   applyAgentWorkspaceMainBridgePatch,
   applyAgentWorkspaceSettingsIndexPatch,
@@ -31,6 +28,7 @@ const {
   applyAgentWorkspaceSettingsSharedPatch,
   buildAgentWorkspaceSettingsSource,
   patches: featurePatches,
+  stripStaleAgentWorkspaceConversationRuntime,
 } = require("./patch.js");
 
 function withTempFeatureConfig(enabled, fn) {
@@ -86,15 +84,28 @@ function syntheticMainBundle() {
   ].join("");
 }
 
-function buildBridgeHarness({ env = {}, globalState = new Map(), execFile, electron = null } = {}) {
+function buildBridgeHarness({ env = {}, globalState = new Map(), execFile, spawn, electron = null } = {}) {
   const patched = applyAgentWorkspaceMainBridgePatch(syntheticMainBundle());
   const execCalls = [];
+  const spawnCalls = [];
   const childProcess = {
     execFile:
       execFile ||
       ((command, args, options, callback) => {
         execCalls.push({ command, args, options });
         callback(null, '{"profiles":[]}\n', "");
+      }),
+    spawn:
+      spawn ||
+      ((command, args, options) => {
+        const call = { command, args, options, unref: false };
+        spawnCalls.push(call);
+        return {
+          pid: 4242,
+          unref() {
+            call.unref = true;
+          },
+        };
       }),
   };
   const sandbox = {
@@ -107,6 +118,8 @@ function buildBridgeHarness({ env = {}, globalState = new Map(), execFile, elect
     },
     process: { env: { ...process.env, ...env } },
     Buffer,
+    clearTimeout,
+    setTimeout,
   };
   vm.runInNewContext(`${patched};this.Host=Host;`, sandbox);
   const host = new sandbox.Host();
@@ -118,7 +131,7 @@ function buildBridgeHarness({ env = {}, globalState = new Map(), execFile, elect
       globalState.set(key, value);
     },
   };
-  return { handlers: host.handlers(), execCalls };
+  return { handlers: host.handlers(), execCalls, spawnCalls };
 }
 
 function syntheticSettingsSections() {
@@ -184,6 +197,14 @@ function syntheticComposerBundle() {
   return "const YH={default:e=>e};function sU(e,t){return t??(e==null?[]:Object.entries(e).map(([e,t])=>({name:e,value:t,displayName:(0,YH.default)(e.trim())})))}";
 }
 
+function staleConversationMonitorBundle() {
+  return [
+    "let thread=1;",
+    ';(()=>{const VERSION="agent-workspace-conversation-v12";if(globalThis.codexLinuxAgentWorkspaceConversationVersion===VERSION)return;try{globalThis.codexLinuxAgentWorkspaceConversationCleanup?.()}catch{}globalThis.codexLinuxAgentWorkspaceConversationVersion=VERSION;function start(){document.body?.insertAdjacentHTML?.("beforeend","<section class=\\"codex-linux-agent-workspace-panel\\"></section>")}if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",start,{once:true});else start();})();',
+    "",
+  ].join("\n");
+}
+
 function writeSyntheticExtractedApp(root) {
   const buildDir = path.join(root, ".vite", "build");
   const assetsDir = path.join(root, "webview", "assets");
@@ -195,7 +216,7 @@ function writeSyntheticExtractedApp(root) {
   fs.writeFileSync(path.join(assetsDir, "settings-shared-test.js"), syntheticSettingsShared());
   fs.writeFileSync(path.join(assetsDir, "settings-page-test.js"), syntheticSettingsPage());
   fs.writeFileSync(path.join(assetsDir, "index-test.js"), syntheticIndex());
-  fs.writeFileSync(path.join(assetsDir, "local-conversation-thread-test.js"), "let thread=1;");
+  fs.writeFileSync(path.join(assetsDir, "local-conversation-thread-test.js"), staleConversationMonitorBundle());
   fs.writeFileSync(path.join(assetsDir, "composer-test.js"), syntheticComposerBundle());
   fs.writeFileSync(path.join(assetsDir, "chunk-test.js"), "export function s(e){return e}");
   fs.writeFileSync(path.join(assetsDir, "react-test.js"), 'import{s}from"./chunk-test.js";/* react.transitional.element */export{ReactFactory as t};function ReactFactory(){return{createElement(){return{}},useState(){return[null,()=>{}]},useCallback(e){return e},useEffect(){}}}');
@@ -205,222 +226,95 @@ function writeSyntheticExtractedApp(root) {
   fs.writeFileSync(path.join(assetsDir, "app-test.png"), "");
   return { buildDir, assetsDir };
 }
-
-class FakeElement {
-  constructor(tagName, ownerDocument) {
-    this.tagName = tagName.toUpperCase();
-    this.ownerDocument = ownerDocument;
-    this.children = [];
-    this.parentNode = null;
-    this.attributes = new Map();
-    this.listeners = new Map();
-    this._textContent = "";
-    this._hidden = false;
-    this.className = "";
-    this.id = "";
-    this.src = "";
-    this.alt = "";
-    this.title = "";
-    this.style = {};
-  }
-
-  appendChild(child) {
-    child.parentNode = this;
-    this.children.push(child);
-    if (child.id) this.ownerDocument.byId.set(child.id, child);
-    return child;
-  }
-
-  replaceWith(next) {
-    const siblings = this.parentNode?.children;
-    if (!siblings) return;
-    const index = siblings.indexOf(this);
-    if (index >= 0) {
-      next.parentNode = this.parentNode;
-      siblings[index] = next;
-      this.parentNode = null;
-    }
-  }
-
-  remove() {
-    const siblings = this.parentNode?.children;
-    if (!siblings) return;
-    const index = siblings.indexOf(this);
-    if (index >= 0) siblings.splice(index, 1);
-    this.parentNode = null;
-  }
-
-  addEventListener(type, callback) {
-    const listeners = this.listeners.get(type) || [];
-    listeners.push(callback);
-    this.listeners.set(type, listeners);
-  }
-
-  click() {
-    for (const callback of this.listeners.get("click") || []) {
-      callback({ preventDefault() {} });
-    }
-  }
-
-  set hidden(value) {
-    this._hidden = !!value;
-  }
-
-  get hidden() {
-    return this._hidden;
-  }
-
-  set textContent(value) {
-    this._textContent = String(value ?? "");
-  }
-
-  get textContent() {
-    return this._textContent;
-  }
-
-  setAttribute(name, value) {
-    this.attributes.set(name, String(value));
-    if (name === "id") {
-      this.id = String(value);
-      this.ownerDocument.byId.set(this.id, this);
-    }
-    if (name === "class") this.className = String(value);
-  }
-
-  getAttribute(name) {
-    return this.attributes.get(name) ?? null;
-  }
-
-  set innerHTML(value) {
-    this._innerHTML = String(value ?? "");
-    if (this.className !== "codex-linux-agent-workspace-panel") return;
-    this.children = [];
-
-    const head = this.ownerDocument.createElement("div");
-    head.className = "codex-linux-agent-workspace-head";
-    const dot = this.ownerDocument.createElement("span");
-    dot.className = "codex-linux-agent-workspace-dot";
-    const title = this.ownerDocument.createElement("div");
-    title.className = "codex-linux-agent-workspace-title";
-    const actions = this.ownerDocument.createElement("div");
-    actions.className = "codex-linux-agent-workspace-actions";
-    const refresh = this.ownerDocument.createElement("button");
-    refresh.setAttribute("data-action", "refresh");
-    const detailsButton = this.ownerDocument.createElement("button");
-    detailsButton.setAttribute("data-action", "details");
-    const stop = this.ownerDocument.createElement("button");
-    stop.setAttribute("data-action", "stop");
-    const revoke = this.ownerDocument.createElement("button");
-    revoke.setAttribute("data-action", "revoke");
-    actions.appendChild(refresh);
-    actions.appendChild(detailsButton);
-    actions.appendChild(stop);
-    actions.appendChild(revoke);
-    head.appendChild(dot);
-    head.appendChild(title);
-    head.appendChild(actions);
-
-    const empty = this.ownerDocument.createElement("div");
-    empty.className = "codex-linux-agent-workspace-empty";
-    empty.textContent = "Workspace is running. No windows yet.";
-    const viewport = this.ownerDocument.createElement("div");
-    viewport.className = "codex-linux-agent-workspace-viewport";
-    viewport.appendChild(empty);
-    const meta = this.ownerDocument.createElement("div");
-    meta.className = "codex-linux-agent-workspace-meta";
-    const details = this.ownerDocument.createElement("div");
-    details.className = "codex-linux-agent-workspace-details";
-    details.hidden = true;
-    const error = this.ownerDocument.createElement("div");
-    error.className = "codex-linux-agent-workspace-error";
-    error.hidden = true;
-    const resize = this.ownerDocument.createElement("button");
-    resize.className = "codex-linux-agent-workspace-resize";
-
-    this.appendChild(head);
-    this.appendChild(viewport);
-    this.appendChild(meta);
-    this.appendChild(details);
-    this.appendChild(error);
-    this.appendChild(resize);
-  }
-
-  get innerHTML() {
-    return this._innerHTML || "";
-  }
-
-  querySelector(selector) {
-    return findElement(this, selector);
-  }
-
-  querySelectorAll(selector) {
-    return findElements(this, selector);
-  }
+function flushPromises() {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
-function findElements(root, selector) {
-  const matches = (element) => {
-    if (selector.startsWith(".")) {
-      return String(element.className || "").split(/\s+/).includes(selector.slice(1));
-    }
-    const dataAction = selector.match(/^\[data-action='([^']+)'\]$/);
-    if (dataAction) {
-      return element.getAttribute("data-action") === dataAction[1];
-    }
-    return false;
-  };
-  const found = [];
-  const stack = [...root.children];
-  while (stack.length > 0) {
-    const element = stack.shift();
-    if (matches(element)) found.push(element);
-    stack.unshift(...element.children);
-  }
-  return found;
+function buildSettingsVmSource() {
+  return buildAgentWorkspaceSettingsSource({
+    chunkAsset: "chunk-test.js",
+    reactAsset: "react-test.js",
+    reactExportName: "t",
+    settingsPageAsset: "settings-content-layout-test.js",
+    settingsPageExportName: "t",
+    vscodeApiAsset: "vscode-api-test.js",
+  })
+    .replace('import{s as __toESM}from"./chunk-test.js";\n', "")
+    .replace('import{t as __reactFactory}from"./react-test.js";\n', "")
+    .replace('import{n as __post}from"./vscode-api-test.js";\n', "")
+    .replace('import{t as SettingsPage}from"./settings-content-layout-test.js";\n', "")
+    .replace("export{AgentWorkspacesSettings,AgentWorkspacesSettings as default};", "globalThis.AgentWorkspacesSettings=AgentWorkspacesSettings;");
 }
 
-function findElement(root, selector) {
-  const [first] = findElements(root, selector);
-  return first || null;
-}
-
-function appendStaleWorkspacePanel(document) {
-  const panel = document.createElement("section");
-  panel.className = "codex-linux-agent-workspace-panel";
-  panel.hidden = true;
-  document.body.appendChild(panel);
-  return panel;
-}
-
-function createFakeDocument() {
-  const document = {
-    readyState: "complete",
-    byId: new Map(),
-    body: null,
-    head: null,
-    createElement(tagName) {
-      return new FakeElement(tagName, document);
+function createSettingsRenderHarness(post) {
+  const state = [];
+  let hookIndex = 0;
+  let effects = [];
+  const react = {
+    createElement(type, props, ...children) {
+      return { type, props: props || {}, children: children.flat(Infinity).filter((child) => child != null && child !== false) };
     },
-    getElementById(id) {
-      return document.byId.get(id) || null;
+    useCallback(callback) {
+      return callback;
     },
-    addEventListener() {},
+    useEffect(callback) {
+      effects.push(callback);
+    },
+    useState(initialValue) {
+      const index = hookIndex;
+      hookIndex += 1;
+      if (state.length <= index) {
+        state[index] = typeof initialValue === "function" ? initialValue() : initialValue;
+      }
+      return [
+        state[index],
+        (nextValue) => {
+          state[index] = typeof nextValue === "function" ? nextValue(state[index]) : nextValue;
+        },
+      ];
+    },
   };
-  document.body = document.createElement("body");
-  document.head = document.createElement("head");
-  return document;
-}
-
-function waitFor(condition, message) {
-  const deadline = Date.now() + 1000;
-  return new Promise((resolve, reject) => {
-    function tick() {
-      if (condition()) return resolve();
-      if (Date.now() > deadline) return reject(new Error(message));
-      setTimeout(tick, 5);
-    }
-    tick();
+  const context = vm.createContext({
+    __post: post,
+    __reactFactory: () => react,
+    __toESM: (value) => value,
+    console,
+    globalThis: null,
+    SettingsPage: function SettingsPage(props) {
+      return props?.children || null;
+    },
+    window: {
+      confirm() {
+        return true;
+      },
+    },
   });
+  context.globalThis = context;
+  vm.runInContext(buildSettingsVmSource(), context);
+  function render() {
+    hookIndex = 0;
+    effects = [];
+    const tree = context.AgentWorkspacesSettings();
+    return { tree, effects: [...effects] };
+  }
+  return { render };
+}
+
+function nodeText(node) {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (!node || typeof node !== "object") return "";
+  return (node.children || []).map(nodeText).join("");
+}
+
+function findNode(root, predicate) {
+  const stack = [root];
+  while (stack.length > 0) {
+    const node = stack.shift();
+    if (!node || typeof node !== "object") continue;
+    if (predicate(node)) return node;
+    stack.unshift(...(node.children || []));
+  }
+  return null;
 }
 
 test("agent-workspace feature stays disabled until listed in features.json", () => {
@@ -438,7 +332,7 @@ test("agent-workspace feature exposes optional bridge and settings descriptors w
       [
         ["feature:agent-workspace:main-bridge", "main-bundle", "optional"],
         ["feature:agent-workspace:settings-page", "extracted-app", "optional"],
-        ["feature:agent-workspace:conversation-view", "webview-asset", "optional"],
+        ["feature:agent-workspace:stale-runtime-cleanup", "webview-asset", "optional"],
         ["feature:agent-workspace:approval-rendering", "webview-asset", "optional"],
       ],
     );
@@ -472,10 +366,17 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   assert.match(patched, /--browser-path/);
   assert.match(patched, /--user-data-dir/);
   assert.match(patched, /case`workspaceOpenProfile`/);
+  assert.match(patched, /case`workspaceOpenViewer`/);
+  assert.match(patched, /--always-on-top/);
+  assert.match(patched, /spawn\(__codexCommand,__codexArgs/);
+  assert.match(patched, /detached:!0/);
+  assert.match(patched, /stdio:`ignore`/);
+  assert.match(patched, /unref\?\.\(\)/);
   assert.match(patched, /case`workspaceStart`/);
-  assert.match(patched, /case`workspaceObserve`/);
-  assert.match(patched, /--include-hidden/);
-  assert.match(patched, /data:image\/png;base64/);
+  assert.doesNotMatch(patched, /case`workspaceObserve`/);
+  assert.doesNotMatch(patched, /--include-hidden/);
+  assert.doesNotMatch(patched, /__codexAttachScreenshot/);
+  assert.doesNotMatch(patched, /data:image\/png;base64/);
   assert.match(patched, /execFile\(__codexCommand,__codexArgs/);
   assert.equal(applyAgentWorkspaceMainBridgePatch(patched), patched);
   const stalePatched = patched.replace(
@@ -487,6 +388,24 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   const { value, warnings } = captureWarns(() => applyAgentWorkspaceMainBridgePatch("real bundle"));
   assert.equal(value, "real bundle");
   assert.match(warnings.join("\n"), /Could not find Node module aliases/);
+});
+
+test("main bridge generator does not carry removed conversation monitor observe code", () => {
+  const patchSource = fs.readFileSync(path.join(__dirname, "patch.js"), "utf8");
+  assert.doesNotMatch(patchSource, /case\\`workspaceObserve\\`/);
+  assert.doesNotMatch(patchSource, /__codexAttachScreenshot/);
+  assert.doesNotMatch(patchSource, /data:image\/png;base64/);
+  assert.doesNotMatch(patchSource, /codexLinuxAgentWorkspaceConversationCleanup=cleanup/);
+  assert.doesNotMatch(patchSource, /codex-linux-agent-workspace-panel/);
+});
+
+test("stale runtime cleanup strips the removed conversation monitor without adding a panel", () => {
+  const stripped = stripStaleAgentWorkspaceConversationRuntime(staleConversationMonitorBundle());
+  assert.equal(stripped, "let thread=1;");
+  assert.equal(stripStaleAgentWorkspaceConversationRuntime(stripped), stripped);
+  assert.doesNotMatch(stripped, /agent-workspace-conversation/);
+  assert.doesNotMatch(stripped, /codex-linux-agent-workspace-panel/);
+  assert.doesNotMatch(stripped, /workspaceObserve/);
 });
 
 test("main bridge patch upgrades stale installed agent workspace handlers", () => {
@@ -507,6 +426,7 @@ test("main bridge patch upgrades stale installed agent workspace handlers", () =
   assert.match(upgraded, /"linux-agent-workspace-copy-browser-data":async/);
   assert.match(upgraded, /case`mcpConfig`/);
   assert.match(upgraded, /__codexMcpConfig/);
+  assert.match(upgraded, /case`workspaceOpenViewer`/);
   assert.match(upgraded, /case`workspaceStart`/);
   assert.match(upgraded, /case`profileTemplate`/);
   assert.doesNotMatch(upgraded, /case`profileList`:return\{ok:true,json:\{profiles:\[\]\}\}/);
@@ -598,7 +518,7 @@ test("main bridge reads MCP permission config and applies it to CLI calls", asyn
       JSON.stringify({ network: { mode: "disabled" }, apps: { allow: ["sh"] } }, null, 2),
     );
 
-    const { handlers, execCalls } = buildBridgeHarness({
+    const { handlers, execCalls, spawnCalls } = buildBridgeHarness({
       env: {
         CODEX_HOME: codexHome,
         CODEX_AGENT_WORKSPACE_BIN: "/tmp/agent-workspace-linux",
@@ -632,6 +552,106 @@ test("main bridge reads MCP permission config and applies it to CLI calls", asyn
       "browser-session",
     ]);
     assert.match(execCalls[1].args.join("\n"), /--user-data-dir\n\/tmp\/browser-profile/);
+
+    const viewer = await handlers["linux-agent-workspace"]({
+      action: "workspaceOpenViewer",
+      workspaceId: "default",
+      alwaysOnTop: true,
+    });
+    assert.equal(viewer.ok, true);
+    assert.equal(viewer.json.id, "default");
+    assert.equal(viewer.json.pid, 4242);
+    assert.equal(viewer.json.always_on_top, true);
+    assert.equal(spawnCalls.length, 1);
+    assert.deepEqual(Array.from(spawnCalls[0].args.slice(0, 5)), [
+      "--permissions",
+      permissionsPath,
+      "viewer",
+      "--id",
+      "default",
+    ]);
+    assert.match(spawnCalls[0].args.join("\n"), /--always-on-top/);
+    assert.equal(spawnCalls[0].options.detached, true);
+    assert.equal(spawnCalls[0].options.stdio, "ignore");
+    assert.equal(spawnCalls[0].unref, true);
+    assert.equal(execCalls.length, 2);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("main bridge opens viewer in clean default mode without adding a ceiling or topmost state", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-agent-workspace-clean-viewer-"));
+  try {
+    const { handlers, execCalls, spawnCalls } = buildBridgeHarness({
+      env: {
+        CODEX_HOME: path.join(tempDir, "codex-home"),
+        CODEX_AGENT_WORKSPACE_BIN: "/tmp/agent-workspace-linux",
+      },
+    });
+
+    const config = await handlers["linux-agent-workspace"]({ action: "mcpConfig" });
+    assert.equal(config.ok, true);
+    assert.equal(config.json.configured, false);
+    assert.equal(config.json.restricted, false);
+    assert.equal(config.json.permissions_path, null);
+
+    const viewer = await handlers["linux-agent-workspace"]({
+      action: "workspaceOpenViewer",
+      workspaceId: "qa-live",
+    });
+    assert.equal(viewer.ok, true);
+    assert.equal(viewer.json.id, "qa-live");
+    assert.equal(viewer.json.always_on_top, false);
+    assert.equal(execCalls.length, 0);
+    assert.equal(spawnCalls.length, 1);
+    assert.deepEqual(Array.from(spawnCalls[0].args), ["viewer", "--id", "qa-live"]);
+    assert.equal(spawnCalls[0].options.detached, true);
+    assert.equal(spawnCalls[0].options.stdio, "ignore");
+    assert.equal(spawnCalls[0].unref, true);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("main bridge reports detached viewer spawn errors without exec fallback", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-agent-workspace-viewer-error-"));
+  const calls = [];
+  try {
+    const { handlers, execCalls } = buildBridgeHarness({
+      env: {
+        CODEX_HOME: path.join(tempDir, "codex-home"),
+        CODEX_AGENT_WORKSPACE_BIN: "/tmp/missing-agent-workspace-linux",
+      },
+      spawn(command, args, options) {
+        const call = { command, args, options, unref: false };
+        calls.push(call);
+        return {
+          pid: null,
+          once(event, callback) {
+            if (event === "error") {
+              process.nextTick(() => callback(new Error("spawn ENOENT")));
+            }
+            return this;
+          },
+          unref() {
+            call.unref = true;
+          },
+        };
+      },
+    });
+
+    const viewer = await handlers["linux-agent-workspace"]({
+      action: "workspaceOpenViewer",
+      workspaceId: "qa-live",
+    });
+    assert.equal(viewer.ok, false);
+    assert.equal(viewer.action, "workspaceOpenViewer");
+    assert.match(viewer.message, /spawn ENOENT/);
+    assert.equal(execCalls.length, 0);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(Array.from(calls[0].args), ["viewer", "--id", "qa-live"]);
+    assert.equal(calls[0].unref, false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -751,6 +771,10 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /Add a file or folder before choosing read-only or read-write access/);
   assert.match(source, /Workspace status/);
   assert.match(source, /Hide status/);
+  assert.match(source, /function openWorkspaceViewer/);
+  assert.match(source, /workspaceOpenViewer/);
+  assert.match(source, /function openWorkspaceViewer\(workspaceId\)\{\s*callAgentWorkspace\("workspaceOpenViewer",\{workspaceId:workspaceId\}\);\s*\}/);
+  assert.match(source, /Open Viewer/);
   assert.match(source, /File access/);
   assert.match(source, /aria-pressed/);
   assert.match(source, /Stopped workspaces \(/);
@@ -781,50 +805,81 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.doesNotMatch(source, /workspaceCleanup",\{dryRun:true\}/);
 });
 
-test("conversation visibility runtime is valid script and idempotent", () => {
-  const runtime = agentWorkspaceConversationRuntimeSource();
-  const check = spawnSync(process.execPath, ["--check"], {
-    encoding: "utf8",
-    input: `let source=1;\n${runtime}`,
-  });
-  assert.equal(check.status, 0, check.stderr || check.stdout);
-  assert.match(runtime, new RegExp(CONVERSATION_RUNTIME_VERSION));
-  assert.match(runtime, /workspaceObserve/);
-  assert.match(runtime, /workspaceStop/);
-  assert.match(runtime, /workspaceCleanup/);
-  assert.match(runtime, /bridgeError/);
-  assert.match(runtime, /codex-linux-agent-workspace-panel/);
-  assert.match(runtime, /data-action="details"/);
-  assert.match(runtime, /data-action="revoke"/);
-  assert.match(runtime, /Revoke/);
-  assert.match(runtime, /data_url/);
-  assert.match(runtime, /function policySummary/);
-  assert.match(runtime, /function appSummary/);
-  assert.match(runtime, /function viewerDetailsText/);
-  assert.match(runtime, /function inSettingsView/);
-  assert.match(runtime, /function scheduleViewCheck/);
-  assert.match(runtime, /MutationObserver/);
-  assert.match(runtime, /localStorage/);
-  assert.match(runtime, /function beginInteraction/);
-  assert.match(runtime, /pointerdown/);
-  assert.match(runtime, /codex-linux-agent-workspace-resize/);
-  assert.match(runtime, /codex-linux-agent-workspace-theme-v10/);
-  assert.match(runtime, /function removeOldPanels/);
-  assert.match(runtime, /codexLinuxAgentWorkspaceConversationCleanup/);
-  assert.match(runtime, /--color-token-main-surface-primary/);
-  assert.match(runtime, /88%,transparent/);
-  assert.match(runtime, /backdrop-filter:blur\(8px\) saturate\(1\.05\)/);
-  assert.match(runtime, /--color-token-bg-fog/);
-  assert.match(runtime, /--color-token-border-default/);
-  assert.match(runtime, /Drag workspace viewer/);
-  assert.match(runtime, /Resize workspace viewer/);
-  assert.match(runtime, /Profile /);
-  assert.match(runtime, /Network /);
-  assert.match(runtime, /mount/);
+test("generated settings UI opens the GPUI viewer with the clean default action shape", async () => {
+  const calls = [];
+  const post = async (method, request = {}) => {
+    const params = request.params || {};
+    calls.push({ method, params });
+    if (method === "get-global-state") return { value: "" };
+    if (method !== "linux-agent-workspace") return { ok: true };
+    if (params.action === "mcpConfig") {
+      return {
+        ok: true,
+        json: {
+          configured: false,
+          restricted: false,
+          permissions_path: null,
+          message: "MCP config not found",
+        },
+      };
+    }
+    if (params.action === "profileList") return { ok: true, json: { profiles: [] } };
+    if (params.action === "workspaceList") {
+      return {
+        ok: true,
+        json: {
+          workspaces: [
+            {
+              id: "qa-live",
+              running: true,
+              status: {
+                id: "qa-live",
+                ready: true,
+                purpose: "QA live view",
+                apps: [],
+              },
+            },
+          ],
+        },
+      };
+    }
+    if (params.action === "workspaceOpenViewer") {
+      return {
+        ok: true,
+        json: {
+          ok: true,
+          id: params.workspaceId,
+          always_on_top: !!params.alwaysOnTop,
+        },
+      };
+    }
+    return { ok: true, json: { ok: true } };
+  };
 
-  const patched = applyAgentWorkspaceConversationViewPatch("let thread=1;");
-  assert.match(patched, new RegExp(CONVERSATION_RUNTIME_VERSION));
-  assert.equal(applyAgentWorkspaceConversationViewPatch(patched), patched);
+  const harness = createSettingsRenderHarness(post);
+  const firstRender = harness.render();
+  for (const effect of firstRender.effects) effect();
+  await flushPromises();
+  await flushPromises();
+
+  const { tree } = harness.render();
+  const openViewerButton = findNode(
+    tree,
+    (node) => node.type === "button" && nodeText(node) === "Open Viewer",
+  );
+  assert.ok(openViewerButton, "Open Viewer button should render for the active workspace");
+  assert.equal(openViewerButton.props.disabled, false);
+
+  openViewerButton.props.onClick();
+  await flushPromises();
+  const viewerCall = calls.find((call) => call.params.action === "workspaceOpenViewer");
+  assert.deepEqual(JSON.parse(JSON.stringify(viewerCall)), {
+    method: "linux-agent-workspace",
+    params: {
+      action: "workspaceOpenViewer",
+      workspaceId: "qa-live",
+    },
+  });
 });
 
 test("approval renderer formats agent workspace params without affecting generic MCP params", () => {
@@ -968,346 +1023,6 @@ test("approval renderer formats agent workspace params without affecting generic
     [{ name: "query", value: "abc", displayName: "query" }],
   );
 });
-
-test("conversation visibility runtime renders and stops an active workspace", async () => {
-  const document = createFakeDocument();
-  const calls = [];
-  const listeners = new Map();
-  let stopFails = true;
-  const activeStatus = {
-    id: "qa-live",
-    ready: true,
-    display: ":90",
-    purpose: "QA live view",
-    profile_id: "desktop-qa",
-    applied_policy: {
-      profile_id: "desktop-qa",
-      network: { mode: "disabled" },
-      mounts: [{}, {}],
-    },
-    apps: [
-      { id: "app-1", name: "chrome", running: true },
-      { id: "app-2", name: "xterm", running: true },
-      { id: "app-3", name: "old-test", running: false },
-    ],
-  };
-  const window = {
-    document,
-    innerWidth: 1000,
-    innerHeight: 700,
-    addEventListener(type, callback) {
-      const callbacks = listeners.get(type) || [];
-      callbacks.push(callback);
-      listeners.set(type, callbacks);
-    },
-    removeEventListener(type, callback) {
-      const callbacks = listeners.get(type) || [];
-      listeners.set(type, callbacks.filter((candidate) => candidate !== callback));
-    },
-    dispatchEvent(event) {
-      const payload = event.detail;
-      if (payload?.type !== "fetch") return true;
-      const params = JSON.parse(payload.body);
-      calls.push(params);
-      let response;
-      if (params.action === "workspaceList") {
-        response = { json: { workspaces: [{ id: "qa-live", running: true, status: activeStatus }] } };
-      } else if (params.action === "workspaceObserve") {
-        response = {
-          json: {
-            status: activeStatus,
-            active_window: { title: "Spec runner" },
-            screenshot: { data_url: "data:image/png;base64,abc" },
-          },
-        };
-      } else if (params.action === "workspaceStop") {
-        if (stopFails) {
-          response = { ok: false, message: "stop failed", json: { ok: false, message: "stop failed" } };
-        } else {
-          activeStatus.ready = false;
-          response = { ok: true, json: { ok: true, status: activeStatus } };
-        }
-      } else if (params.action === "workspaceCleanup") {
-        response = { ok: true, json: { ok: true, removed: [{ id: params.cleanupId }], skipped: [] } };
-      } else {
-        response = { json: { ok: false } };
-      }
-      setTimeout(() => {
-        for (const callback of listeners.get("message") || []) {
-          callback({
-            data: {
-              type: "fetch-response",
-              requestId: payload.requestId,
-              responseType: "success",
-              status: 200,
-              bodyJsonString: JSON.stringify(response),
-            },
-          });
-        }
-      }, 0);
-      return true;
-    },
-  };
-  const localStore = new Map();
-  const context = vm.createContext({
-    CustomEvent: class CustomEvent {
-      constructor(type, options) {
-        this.type = type;
-        this.detail = options?.detail;
-      }
-    },
-    clearTimeout,
-    console,
-    document,
-    globalThis: null,
-    localStorage: {
-      getItem(key) {
-        return localStore.get(key) || null;
-      },
-      setItem(key, value) {
-        localStore.set(key, String(value));
-      },
-    },
-    setInterval() {
-      return 1;
-    },
-    setTimeout,
-    window,
-  });
-  context.globalThis = context;
-
-  appendStaleWorkspacePanel(document);
-  appendStaleWorkspacePanel(document);
-  assert.equal(document.body.querySelectorAll(".codex-linux-agent-workspace-panel").length, 2);
-
-  vm.runInContext(agentWorkspaceConversationRuntimeSource(), context);
-  await waitFor(
-    () => document.body.querySelector(".codex-linux-agent-workspace-panel")?.hidden === false,
-    "workspace panel should become visible",
-  );
-
-  const panel = document.body.querySelector(".codex-linux-agent-workspace-panel");
-  assert.equal(document.body.querySelectorAll(".codex-linux-agent-workspace-panel").length, 1);
-  const title = panel.querySelector(".codex-linux-agent-workspace-title");
-  const meta = panel.querySelector(".codex-linux-agent-workspace-meta");
-  const details = panel.querySelector(".codex-linux-agent-workspace-details");
-  const error = panel.querySelector(".codex-linux-agent-workspace-error");
-  const image = panel.querySelector(".codex-linux-agent-workspace-shot");
-  const resize = panel.querySelector(".codex-linux-agent-workspace-resize");
-  const head = panel.querySelector(".codex-linux-agent-workspace-head");
-  assert.ok(panel.querySelector("[data-action='revoke']"));
-  assert.ok(panel.querySelector("[data-action='details']"));
-  assert.ok(resize);
-  assert.ok(head);
-  assert.equal(title.textContent, "QA live view");
-  assert.match(meta.textContent, /Workspace active/);
-  assert.doesNotMatch(meta.textContent, /:90/);
-  assert.match(meta.textContent, /Profile desktop-qa/);
-  assert.match(meta.textContent, /Network disabled/);
-  assert.match(meta.textContent, /2 mounts/);
-  assert.match(meta.textContent, /2 apps running/);
-  assert.match(meta.title, /Hidden display :90/);
-  assert.match(meta.title, /2 apps running/);
-  assert.doesNotMatch(meta.title, /chrome/);
-  assert.equal(details.hidden, true);
-  assert.match(details.textContent, /Active window: Spec runner/);
-  assert.match(details.textContent, /Running apps: chrome, xterm/);
-  assert.doesNotMatch(details.textContent, /old-test/);
-  panel.querySelector("[data-action='details']").click();
-  assert.equal(details.hidden, false);
-  assert.equal(panel.querySelector("[data-action='details']").getAttribute("aria-pressed"), "true");
-  assert.match(details.textContent, /Policy: Profile desktop-qa/);
-  assert.match(details.textContent, /Hidden display: :90/);
-  assert.equal(image.src, "data:image/png;base64,abc");
-  assert.equal(panel.style.width, "420px");
-  assert.equal(panel.style.height, "320px");
-
-  const initialLeft = Number.parseFloat(panel.style.left);
-  const initialTop = Number.parseFloat(panel.style.top);
-  head.listeners.get("pointerdown")[0]({
-    button: 0,
-    clientX: 100,
-    clientY: 100,
-    currentTarget: head,
-    target: head,
-    preventDefault() {},
-  });
-  for (const callback of listeners.get("pointermove") || []) callback({ clientX: 70, clientY: 75 });
-  assert.equal(Number.parseFloat(panel.style.left), initialLeft - 30);
-  assert.equal(Number.parseFloat(panel.style.top), initialTop - 25);
-  for (const callback of listeners.get("pointerup") || []) callback({});
-  assert.ok(localStore.get("codex-linux-agent-workspace-layout-v1"));
-
-  const widthAfterDrag = Number.parseFloat(panel.style.width);
-  const heightAfterDrag = Number.parseFloat(panel.style.height);
-  resize.listeners.get("pointerdown")[0]({
-    button: 0,
-    clientX: 200,
-    clientY: 200,
-    currentTarget: resize,
-    target: resize,
-    preventDefault() {},
-  });
-  for (const callback of listeners.get("pointermove") || []) callback({ clientX: 260, clientY: 240 });
-  assert.equal(Number.parseFloat(panel.style.width), widthAfterDrag + 60);
-  assert.equal(Number.parseFloat(panel.style.height), heightAfterDrag + 40);
-  for (const callback of listeners.get("pointerup") || []) callback({});
-
-  panel.querySelector("[data-action='stop']").click();
-  await waitFor(
-    () => calls.some((call) => call.action === "workspaceStop" && call.workspaceId === "qa-live"),
-    "stop action should be sent for active workspace",
-  );
-  await waitFor(() => error.hidden === false, "failed stop should show an error");
-  assert.equal(panel.hidden, false);
-  assert.equal(error.textContent, "stop failed");
-
-  stopFails = false;
-  panel.querySelector("[data-action='revoke']").click();
-  await waitFor(
-    () => calls.some((call) => call.action === "workspaceCleanup" && call.cleanupId === "qa-live"),
-    "cleanup action should be sent for revoked workspace",
-  );
-  await waitFor(() => panel.hidden === true, "workspace panel should hide after revoke");
-});
-
-test("conversation visibility runtime hides on settings pages", async () => {
-  const document = createFakeDocument();
-  document.body.textContent = "Back to app\nApp\nGeneral\nAppearance\nConnections\nAgent Workspaces";
-  const listeners = new Map();
-  const activeStatus = { id: "qa-live", ready: true, display: ":90", purpose: "QA live view", apps: [] };
-  const window = {
-    document,
-    addEventListener(type, callback) {
-      const callbacks = listeners.get(type) || [];
-      callbacks.push(callback);
-      listeners.set(type, callbacks);
-    },
-    dispatchEvent(event) {
-      const payload = event.detail;
-      if (payload?.type !== "fetch") return true;
-      const params = JSON.parse(payload.body);
-      const response =
-        params.action === "workspaceList"
-          ? { json: { workspaces: [{ id: "qa-live", running: true, status: activeStatus }] } }
-          : { json: { status: activeStatus, screenshot: { data_url: "data:image/png;base64,abc" } } };
-      setTimeout(() => {
-        for (const callback of listeners.get("message") || []) {
-          callback({
-            data: {
-              type: "fetch-response",
-              requestId: payload.requestId,
-              responseType: "success",
-              status: 200,
-              bodyJsonString: JSON.stringify(response),
-            },
-          });
-        }
-      }, 0);
-      return true;
-    },
-  };
-  const context = vm.createContext({
-    CustomEvent: class CustomEvent {
-      constructor(type, options) {
-        this.type = type;
-        this.detail = options?.detail;
-      }
-    },
-    clearTimeout,
-    console,
-    document,
-    globalThis: null,
-    setInterval() {
-      return 1;
-    },
-    setTimeout,
-    window,
-  });
-  context.globalThis = context;
-
-  vm.runInContext(agentWorkspaceConversationRuntimeSource(), context);
-  await waitFor(
-    () => document.body.querySelector(".codex-linux-agent-workspace-panel")?.hidden === true,
-    "workspace panel should stay hidden in settings",
-  );
-});
-
-test("conversation visibility runtime hides immediately after settings navigation", async () => {
-  const document = createFakeDocument();
-  const listeners = new Map();
-  const observers = [];
-  const activeStatus = { id: "qa-live", ready: true, display: ":90", purpose: "QA live view", apps: [] };
-  const window = {
-    document,
-    addEventListener(type, callback) {
-      const callbacks = listeners.get(type) || [];
-      callbacks.push(callback);
-      listeners.set(type, callbacks);
-    },
-    dispatchEvent(event) {
-      const payload = event.detail;
-      if (payload?.type !== "fetch") return true;
-      const params = JSON.parse(payload.body);
-      const response =
-        params.action === "workspaceList"
-          ? { json: { workspaces: [{ id: "qa-live", running: true, status: activeStatus }] } }
-          : { json: { status: activeStatus, screenshot: { data_url: "data:image/png;base64,abc" } } };
-      setTimeout(() => {
-        for (const callback of listeners.get("message") || []) {
-          callback({
-            data: {
-              type: "fetch-response",
-              requestId: payload.requestId,
-              responseType: "success",
-              status: 200,
-              bodyJsonString: JSON.stringify(response),
-            },
-          });
-        }
-      }, 0);
-      return true;
-    },
-  };
-  const context = vm.createContext({
-    CustomEvent: class CustomEvent {
-      constructor(type, options) {
-        this.type = type;
-        this.detail = options?.detail;
-      }
-    },
-    MutationObserver: class MutationObserver {
-      constructor(callback) {
-        this.callback = callback;
-        observers.push(this);
-      }
-      observe() {}
-    },
-    clearTimeout,
-    console,
-    document,
-    globalThis: null,
-    setInterval() {
-      return 1;
-    },
-    setTimeout,
-    window,
-  });
-  context.globalThis = context;
-
-  vm.runInContext(agentWorkspaceConversationRuntimeSource(), context);
-  await waitFor(
-    () => document.body.querySelector(".codex-linux-agent-workspace-panel")?.hidden === false,
-    "workspace panel should become visible before settings navigation",
-  );
-  const panel = document.body.querySelector(".codex-linux-agent-workspace-panel");
-
-  document.body.textContent = "Back to app\nApp\nGeneral\nAppearance\nConnections\nAgent Workspaces";
-  for (const observer of observers) observer.callback([]);
-
-  await waitFor(() => panel.hidden === true, "workspace panel should hide after settings navigation");
-});
-
 test("settings asset patches add navigation, route, visibility, and title", () => {
   const sections = applyAgentWorkspaceSettingsSectionsPatch(syntheticSettingsSections());
   assert.match(sections, new RegExp(`slug:\`${SETTINGS_SLUG}\``));
@@ -1364,14 +1079,12 @@ test("agent-workspace feature participates in ASAR patching and reports", () => 
         assert.match(fs.readFileSync(path.join(assetsDir, "settings-shared-test.js"), "utf8"), /Agent Workspaces/);
         assert.match(fs.readFileSync(path.join(assetsDir, "settings-page-test.js"), "utf8"), /agent-workspaces/);
         assert.match(fs.readFileSync(path.join(assetsDir, "index-test.js"), "utf8"), new RegExp(SETTINGS_ASSET));
-        assert.match(
-          fs.readFileSync(path.join(assetsDir, "local-conversation-thread-test.js"), "utf8"),
-          new RegExp(CONVERSATION_RUNTIME_VERSION),
-        );
+        assert.equal(fs.readFileSync(path.join(assetsDir, "local-conversation-thread-test.js"), "utf8"), "let thread=1;");
         assert.match(fs.readFileSync(path.join(assetsDir, "composer-test.js"), "utf8"), /codexLinuxAgentWorkspaceApprovalEntries/);
         assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:main-bridge" && patch.status === "applied"));
         assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:settings-page" && patch.status === "applied"));
-        assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:conversation-view" && patch.status === "applied"));
+        assert.equal(report.patches.some((patch) => patch.name === "feature:agent-workspace:conversation-view"), false);
+        assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:stale-runtime-cleanup" && patch.status === "applied"));
         assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:approval-rendering" && patch.status === "applied"));
       } finally {
         fs.rmSync(tempApp, { recursive: true, force: true });
@@ -1386,7 +1099,7 @@ test("feature patch list is intentionally small", () => {
     [
       ["main-bridge", "main-bundle"],
       ["settings-page", "extracted-app"],
-      ["conversation-view", "webview-asset"],
+      ["stale-runtime-cleanup", "webview-asset"],
       ["approval-rendering", "webview-asset"],
     ],
   );

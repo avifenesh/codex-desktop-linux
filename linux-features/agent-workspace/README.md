@@ -1,7 +1,7 @@
 # Agent Workspaces Linux Feature
 
-`agent-workspace` is an opt-in Codex Desktop for Linux feature that embeds the
-`agent-workspace-linux` control surface into the app settings UI.
+`agent-workspace` is an opt-in Codex Desktop for Linux feature that adds the
+`agent-workspace-linux` control surface to the app settings UI.
 
 Enable it in `linux-features/features.json` before running the install/build
 pipeline:
@@ -55,28 +55,21 @@ approves the hidden workspace, normal workspace-local actions follow the Codex
 session permission choice, including full-access sessions that should not ask
 again for every click, launch, screenshot, or keystroke.
 
-The first conversation-view slice shows a compact live workspace panel when an
-agent workspace is active. It uses the current Codex `--color-token-*` theme
-variables first, with older token names only as fallback, polls `workspace observe
---screenshot` through the allowlisted bridge, renders the latest screenshot in
-the conversation surface, shows a user-facing `Workspace active` summary with
-profile/policy and app count, keeps raw display numbers out of normal cards and
-labels hover display detail as hidden workspace plumbing, and exposes Refresh,
-Details, Stop, and Revoke buttons next to the live view. The Details tray keeps
-the normal panel quiet while showing the active window, running apps by friendly
-label, applied policy, and hidden display when the user wants to inspect what
-the agent is doing.
-The panel can be dragged by its header, resized from its lower-right handle, and
-keeps its clamped position/size in local storage so it does not stay stuck over
-half the conversation. Newer injected runtimes clean up older panel instances
-before rendering, which prevents stacked live-view overlays after an app patch.
-Stop failures keep the panel visible and show the bridge or CLI error instead of
-pretending the workspace stopped. The panel hides on Settings pages, where the
-dedicated Agent Workspaces page owns the controls, and watches
-navigation/content changes so it does not linger over settings after route
-changes. This is not a full streaming viewer yet; the deeper viewer can build on
-the same observe/screenshot bridge after the lifecycle and profile surface is
-stable.
+The settings page can also open the native GPUI viewer with
+`agent-workspace-linux viewer --id WORKSPACE_ID`. This is a detached child
+process rather than another Codex conversation surface, keeps always-on-top
+disabled unless explicitly requested, and uses the same MCP `--permissions` path
+when one is configured. Viewer launch errors are reported through the bridge
+instead of falling back to a shell or crashing the app on an asynchronous spawn
+failure.
+
+The feature intentionally does not inject a conversation workspace screen. The
+planned visible monitor is the native GPUI viewer launched by the settings
+page/bridge, so the Codex conversation stays focused on the thread instead of
+competing with the floating viewer.
+The feature patcher also strips the old `agent-workspace-conversation-*`
+runtime from reused webview bundles, so an incremental app rebuild does not
+leave the removed screenshot panel behind.
 
 Agent Workspace approval prompts are also rendered through a Linux webview patch.
 The renderer recognizes workspace/profile parameters and the
@@ -91,15 +84,11 @@ required acknowledgements. The bridge sends `--ack-hidden-workspace` and any
 needed policy acknowledgement only after the user presses **Approve and start**.
 
 Dogfood check: the side-by-side dev app built with `make build-dev-app` has been
-launched inside an agent workspace. The conversation panel rendered the live
-workspace screenshot and its Stop control issued the expected workspace stop
-request through the bridge. The live stop path was exercised from the embedded
-panel and left the workspace manifest with `ready: false`. The installed app
-bundle was also launched inside the `mcp-visible` workspace with the real
-`CODEX_HOME` and `CODEX_AGENT_WORKSPACE_BIN`; Chrome DevTools Protocol confirmed
-the conversation panel rendered the live screenshot, workspace metadata,
-Refresh/Stop/Revoke controls, and a working Refresh action without console
-errors.
+launched inside an agent workspace. The old in-conversation monitor has been
+removed; active workspaces are controlled from Settings and viewed through the
+detached native GPUI viewer. The bridge no longer exposes the screenshot-backed
+`workspaceObserve` action that fed the removed panel, and the webview patcher
+cleans stale copies of that runtime from previously patched bundles.
 
 Settings dogfood: the same side-by-side dev app opened Settings inside a hidden
 workspace, showed the **Agent Workspaces** sidebar entry and page, rendered the
