@@ -374,6 +374,7 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   assert.match(patched, /case`workspaceOpenProfile`/);
   assert.match(patched, /case`workspaceOpenViewer`/);
   assert.match(patched, /--always-on-top/);
+  assert.match(patched, /--exit-when-workspace-gone/);
   assert.match(patched, /spawn\(__codexCommand,__codexArgs/);
   assert.match(patched, /detached:!0/);
   assert.match(patched, /stdio:`ignore`/);
@@ -559,6 +560,7 @@ test("main bridge reads MCP permission config and applies it to CLI calls", asyn
     assert.equal(viewer.json.id, "default");
     assert.equal(viewer.json.pid, 4242);
     assert.equal(viewer.json.always_on_top, true);
+    assert.equal(viewer.json.exit_when_workspace_gone, true);
     assert.equal(spawnCalls.length, 1);
     assert.deepEqual(Array.from(spawnCalls[0].args.slice(0, 5)), [
       "--permissions",
@@ -567,6 +569,7 @@ test("main bridge reads MCP permission config and applies it to CLI calls", asyn
       "--id",
       "default",
     ]);
+    assert.match(spawnCalls[0].args.join("\n"), /--exit-when-workspace-gone/);
     assert.match(spawnCalls[0].args.join("\n"), /--always-on-top/);
     assert.equal(spawnCalls[0].options.detached, true);
     assert.equal(spawnCalls[0].options.stdio, "ignore");
@@ -605,9 +608,10 @@ test("main bridge opens viewer in clean default mode without adding a ceiling or
     assert.equal(viewer.ok, true);
     assert.equal(viewer.json.id, "qa-live");
     assert.equal(viewer.json.always_on_top, false);
+    assert.equal(viewer.json.exit_when_workspace_gone, true);
     assert.equal(execCalls.length, 1);
     assert.equal(spawnCalls.length, 1);
-    assert.deepEqual(Array.from(spawnCalls[0].args), ["viewer", "--id", "qa-live"]);
+    assert.deepEqual(Array.from(spawnCalls[0].args), ["viewer", "--id", "qa-live", "--exit-when-workspace-gone"]);
     assert.equal(spawnCalls[0].options.detached, true);
     assert.equal(spawnCalls[0].options.stdio, "ignore");
     assert.equal(spawnCalls[0].unref, true);
@@ -652,7 +656,7 @@ test("main bridge reports detached viewer spawn errors without exec fallback", a
     assert.match(viewer.message, /spawn ENOENT/);
     assert.equal(execCalls.length, 0);
     assert.equal(calls.length, 1);
-    assert.deepEqual(Array.from(calls[0].args), ["viewer", "--id", "qa-live"]);
+    assert.deepEqual(Array.from(calls[0].args), ["viewer", "--id", "qa-live", "--exit-when-workspace-gone"]);
     assert.equal(calls[0].unref, false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -777,6 +781,8 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /function openWorkspaceViewer/);
   assert.match(source, /workspaceOpenViewer/);
   assert.match(source, /function openWorkspaceViewer\(workspaceId\)\{\s*callAgentWorkspace\("workspaceOpenViewer",\{workspaceId:workspaceId\}\);\s*\}/);
+  assert.match(source, /workspaceIdFromStartResponse/);
+  assert.match(source, /viewer "\+\(viewerResponse\?\.ok===false\?"failed":"opened"\)/);
   assert.match(source, /Open Viewer/);
   assert.match(source, /File access/);
   assert.match(source, /aria-pressed/);
@@ -793,6 +799,7 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /Approve hidden workspace/);
   assert.match(source, /Approval required/);
   assert.match(source, /Codex wants to start an agent-controlled Linux workspace/);
+  assert.match(source, /The native GPUI viewer opens after the workspace starts/);
   assert.match(source, /Approve and start/);
   assert.match(source, /approvalPreviewView\(pendingApproval,approvePendingStart/);
   assert.match(source, /workspaceStart/);
@@ -877,6 +884,85 @@ test("generated settings UI opens the GPUI viewer with the clean default action 
   await flushPromises();
   const viewerCall = calls.find((call) => call.params.action === "workspaceOpenViewer");
   assert.deepEqual(JSON.parse(JSON.stringify(viewerCall)), {
+    method: "linux-agent-workspace",
+    params: {
+      action: "workspaceOpenViewer",
+      workspaceId: "qa-live",
+    },
+  });
+});
+
+test("generated settings UI auto-opens the GPUI viewer after approved workspace start", async () => {
+  const calls = [];
+  const savedProfile = {
+    id: "qa-profile",
+    description: "QA profile",
+    network: { mode: "inherit_host" },
+    startup_apps: [],
+  };
+  const post = async (method, request = {}) => {
+    const params = request.params || {};
+    calls.push({ method, params });
+    if (method === "get-global-state") return { value: "" };
+    if (method !== "linux-agent-workspace") return { ok: true };
+    if (params.action === "mcpConfig") return { ok: true, json: { configured: false, restricted: false } };
+    if (params.action === "profileList") return { ok: true, json: { profiles: [savedProfile] } };
+    if (params.action === "workspaceList") return { ok: true, json: { workspaces: [] } };
+    if (params.action === "workspaceOpenProfile" && params.dryRun) {
+      return {
+        ok: true,
+        json: {
+          ok: true,
+          approval_bundle: {
+            required_acknowledgements: [{ id: "hidden_workspace", label: "Hidden workspace" }],
+          },
+        },
+      };
+    }
+    if (params.action === "workspaceOpenProfile") {
+      return { ok: true, json: { ok: true, workspace_id: "qa-live" } };
+    }
+    if (params.action === "workspaceOpenViewer") {
+      return { ok: true, json: { ok: true, id: params.workspaceId, exit_when_workspace_gone: true } };
+    }
+    return { ok: true, json: { ok: true } };
+  };
+
+  const harness = createSettingsRenderHarness(post);
+  const firstRender = harness.render();
+  for (const effect of firstRender.effects) effect();
+  await flushPromises();
+  await flushPromises();
+
+  let rendered = harness.render();
+  const startButton = findNode(
+    rendered.tree,
+    (node) => node.type === "button" && nodeText(node) === "Start" && node.props.disabled === false,
+  );
+  assert.ok(startButton, "Start button should render for a saved inactive profile");
+  startButton.props.onClick();
+  await flushPromises();
+
+  rendered = harness.render();
+  const approveButton = findNode(
+    rendered.tree,
+    (node) => node.type === "button" && nodeText(node) === "Approve and start",
+  );
+  assert.ok(approveButton, "approval card should render before starting a hidden workspace");
+  approveButton.props.onClick();
+  await flushPromises();
+  await flushPromises();
+  await flushPromises();
+
+  const workspaceCalls = calls.filter((call) => call.method === "linux-agent-workspace");
+  const dryRun = workspaceCalls.find((call) => call.params.action === "workspaceOpenProfile" && call.params.dryRun === true);
+  const realStart = workspaceCalls.find(
+    (call) => call.params.action === "workspaceOpenProfile" && call.params.ackHiddenWorkspace === true,
+  );
+  const viewer = workspaceCalls.find((call) => call.params.action === "workspaceOpenViewer");
+  assert.equal(dryRun?.params.profileId, "qa-profile");
+  assert.equal(realStart?.params.profileId, "qa-profile");
+  assert.deepEqual(JSON.parse(JSON.stringify(viewer)), {
     method: "linux-agent-workspace",
     params: {
       action: "workspaceOpenViewer",

@@ -55,13 +55,14 @@ approves the hidden workspace, normal workspace-local actions follow the Codex
 session permission choice, including full-access sessions that should not ask
 again for every click, launch, screenshot, or keystroke.
 
-The settings page can also open the native GPUI viewer with
-`agent-workspace-linux viewer --id WORKSPACE_ID`. This is a detached child
-process rather than another Codex conversation surface, keeps always-on-top
-disabled unless explicitly requested, and uses the same MCP `--permissions` path
-when one is configured. Viewer launch errors are reported through the bridge
-instead of falling back to a shell or crashing the app on an asynchronous spawn
-failure.
+After the user approves a workspace start, the settings page opens the native
+GPUI viewer with `agent-workspace-linux viewer --id WORKSPACE_ID
+--exit-when-workspace-gone`. The active/stopped workspace controls can reopen
+the same viewer explicitly. This is a detached child process rather than another
+Codex conversation surface, keeps always-on-top disabled unless explicitly
+requested, and uses the same MCP `--permissions` path when one is configured.
+Viewer launch errors are reported through the bridge instead of falling back to
+a shell or crashing the app on an asynchronous spawn failure.
 
 The feature intentionally does not inject a conversation workspace screen. The
 planned visible monitor is the native GPUI viewer launched by the settings
