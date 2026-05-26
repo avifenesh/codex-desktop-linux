@@ -26,6 +26,7 @@ const {
   applyAgentWorkspaceSettingsSectionsPatch,
   applyAgentWorkspaceSettingsSharedPatch,
   buildAgentWorkspaceSettingsSource,
+  patchAgentWorkspaceSettingsAssets,
   patches: featurePatches,
 } = require("./patch.js");
 
@@ -224,6 +225,15 @@ function writeSyntheticExtractedApp(root) {
   fs.writeFileSync(path.join(assetsDir, "app-test.png"), "");
   return { buildDir, assetsDir };
 }
+
+function writeModernCodexRequestAsset(assetsDir) {
+  fs.rmSync(path.join(assetsDir, "vscode-api-test.js"), { force: true });
+  fs.writeFileSync(
+    path.join(assetsDir, "setting-storage-test.js"),
+    "async function send(e,t,n,r,i){return fetch(`vscode://codex/${e}`)}async function request(...e){let[t,n]=e,{params:r,select:i,signal:a,source:o}=n??{};return send(t,r,i,a,o)}export{request as l};",
+  );
+}
+
 function flushPromises() {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -946,6 +956,28 @@ test("agent-workspace feature participates in ASAR patching and reports", () => 
       }
     });
   });
+});
+
+test("agent-workspace settings resolve latest upstream request API asset", () => {
+  const tempApp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-agent-workspace-modern-api-"));
+  try {
+    const { assetsDir } = writeSyntheticExtractedApp(tempApp);
+    writeModernCodexRequestAsset(assetsDir);
+
+    const { value: result, warnings } = captureWarns(() => patchAgentWorkspaceSettingsAssets(tempApp));
+
+    assert.equal(result.matched, true);
+    assert.ok(
+      warnings.every((warning) => !warning.includes("Agent Workspaces")),
+      warnings.join("\n"),
+    );
+    const settingsSource = fs.readFileSync(path.join(assetsDir, SETTINGS_ASSET), "utf8");
+    assert.match(settingsSource, /import\{l as __post\}from"\.\/setting-storage-test\.js"/);
+    assert.match(settingsSource, /AgentWorkspacesSettings/);
+    assert.match(fs.readFileSync(path.join(assetsDir, "index-test.js"), "utf8"), new RegExp(SETTINGS_ASSET));
+  } finally {
+    fs.rmSync(tempApp, { recursive: true, force: true });
+  }
 });
 
 test("feature patch list is intentionally small", () => {

@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const {
+  findCodexRequestWebviewAsset,
   findImportedAsset,
   findRequiredWebviewAsset,
   requireName,
@@ -174,11 +175,14 @@ function buildAgentWorkspaceSettingsSource({
   reactExportName = "t",
   settingsPageAsset,
   settingsPageExportName = "t",
+  codexRequestAsset,
+  codexRequestExportName = "n",
   vscodeApiAsset,
 }) {
+  const requestAsset = codexRequestAsset ?? vscodeApiAsset;
   return `import{s as __toESM}from"./${chunkAsset}";
 import{${reactExportName} as __reactFactory}from"./${reactAsset}";
-import{n as __post}from"./${vscodeApiAsset}";
+import{${codexRequestExportName} as __post}from"./${requestAsset}";
 import{${settingsPageExportName} as SettingsPage}from"./${settingsPageAsset}";
 
 var React=__toESM(__reactFactory(),1);
@@ -1399,7 +1403,7 @@ function resolveAgentWorkspaceSettingsAsset(extractedDir) {
     : findRequiredWebviewAsset(assetsDir, /^react-.*\.js$/, "react.transitional.element", "React asset");
   const reactExportName = jsxExportsReactFactory ? "n" : "t";
   const chunkAsset = findImportedAsset(assetsDir, reactAsset, "React shared chunk asset");
-  const vscodeApiAsset = findRequiredWebviewAsset(assetsDir, /^vscode-api-.*\.js$/, "vscode://codex", "VS Code API asset");
+  const codexRequestAsset = findCodexRequestWebviewAsset(assetsDir);
   const settingsPageAsset = findRequiredWebviewAsset(
     assetsDir,
     /^settings-content-layout-.*\.js$/,
@@ -1415,7 +1419,8 @@ function resolveAgentWorkspaceSettingsAsset(extractedDir) {
       reactExportName,
       settingsPageAsset,
       settingsPageExportName: "t",
-      vscodeApiAsset,
+      codexRequestAsset: codexRequestAsset.assetName,
+      codexRequestExportName: codexRequestAsset.exportName,
     }),
   };
 }

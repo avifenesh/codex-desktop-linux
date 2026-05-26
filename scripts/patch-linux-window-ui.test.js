@@ -402,6 +402,13 @@ function currentPluginGateBundleFixture() {
   ].join("");
 }
 
+function latestPluginGateBundleFixture() {
+  return [
+    "var Oe=[`167fdf579477181fba1773c1efb067b00c5a64fe85dafb50a2001bde198dc739`],ke=`chrome`,Ae=`chrome-dev`;",
+    "var Ei=[{autoInstallOptOutKey:e.Jn(e.Kn),installWhenMissing:!0,name:e.Kn,isAvailable:({buildFlavor:e})=>Ti(e)},{autoInstallOptOutKey:e.Jn(e.Hn),forceReload:!0,installWhenMissing:!0,name:e.Hn,isAvailable:({features:e})=>e.inAppBrowserUseAllowed,migrate:Ir},{forceReload:!0,name:Ae,syncInstallStateWithChromeExtension:!0,isAvailable:({buildFlavor:e,env:t,features:n})=>Ar(e,t)&&n.externalBrowserUseAllowed},{forceReload:!0,name:e.Un,syncInstallStateWithChromeExtension:!0,isAvailable:({buildFlavor:e,env:t,features:n})=>jr(e,t)&&n.externalBrowserUseAllowed},{forceReload:!0,name:ke,syncInstallStateWithChromeExtension:!0,isAvailable:({buildFlavor:e,features:t})=>t.externalBrowserUseAllowed&&Mr(e)},{name:e.Wn,isAvailable:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:Zr},{forceReload:!0,installWhenMissing:!0,name:e.Wn,isAvailable:({buildFlavor:e,features:n,platform:r})=>t.O.isInternal(e)&&r===`win32`&&n.computerUse},{name:e.Gn,isAvailable:()=>!0}];",
+  ].join("");
+}
+
 function computerUseFeatureBundleFixture() {
   return "function me(e,{env:t=process.env,platform:n=process.platform}={}){return n!==`win32`||t.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==`1`?e:{...e,computerUse:!0,computerUseNodeRepl:!0}}";
 }
@@ -1856,6 +1863,23 @@ test("auto-installs the current Chrome plugin gate shape", () => {
   assert.match(patched, /name:dt,isAvailable:\(\{buildFlavor:e,features:t\}\)=>Qn\(e\)&&t\.externalBrowserUseAllowed/);
   assert.equal((patched.match(/installWhenMissing:!0,name:ut/g) || []).length, 1);
   assert.equal((patched.match(/installWhenMissing:!0,name:dt/g) || []).length, 0);
+});
+
+test("auto-installs the latest upstream Chrome plugin gate shape", () => {
+  const patched = applyPatchTwice(
+    applyLinuxChromePluginAutoInstallPatch,
+    latestPluginGateBundleFixture(),
+  );
+
+  assert.match(
+    patched,
+    /\{forceReload:!0,installWhenMissing:!0,name:ke,syncInstallStateWithChromeExtension:!0,isAvailable:\(\{buildFlavor:e,features:t\}\)=>t\.externalBrowserUseAllowed&&Mr\(e\)\}/,
+  );
+  assert.match(patched, /name:Ae,syncInstallStateWithChromeExtension:!0,isAvailable:\(\{buildFlavor:e,env:t,features:n\}\)=>Ar\(e,t\)&&n\.externalBrowserUseAllowed/);
+  assert.match(patched, /name:e\.Un,syncInstallStateWithChromeExtension:!0,isAvailable:\(\{buildFlavor:e,env:t,features:n\}\)=>jr\(e,t\)&&n\.externalBrowserUseAllowed/);
+  assert.equal((patched.match(/installWhenMissing:!0,name:ke/g) || []).length, 1);
+  assert.equal((patched.match(/installWhenMissing:!0,name:Ae/g) || []).length, 0);
+  assert.equal((patched.match(/installWhenMissing:!0,name:e\.Un/g) || []).length, 0);
 });
 
 test("keeps an already auto-installed Chrome plugin gate unchanged", () => {
