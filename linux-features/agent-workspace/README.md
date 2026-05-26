@@ -67,17 +67,10 @@ The feature intentionally does not inject a conversation workspace screen. The
 planned visible monitor is the native GPUI viewer launched by the settings
 page/bridge, so the Codex conversation stays focused on the thread instead of
 competing with the floating viewer.
-The feature patcher also strips the old `agent-workspace-conversation-*`
-runtime from reused webview bundles, so an incremental app rebuild does not
-leave the removed screenshot panel behind.
+The feature only patches the Electron bridge and the Settings webview bundles;
+conversation and composer webview assets stay untouched.
 
-Agent Workspace approval prompts are also rendered through a Linux webview patch.
-The renderer recognizes workspace/profile parameters and the
-`agent-workspace-linux` approval bundle shape returned by start/launch previews,
-then shows user-facing rows such as **Workspace request**, **Needs user
-approval**, and **Approve by setting** instead of falling back to a raw JSON
-`Params` object. Generic MCP approval prompts keep the upstream renderer.
-The dedicated Settings page uses the same idea for local starts: pressing
+The dedicated Settings page owns local start approvals: pressing
 **Start** first runs a dry-run preview and renders an **Approve hidden
 workspace** card with the request, profile, purpose, setup/startup choices, and
 required acknowledgements. The bridge sends `--ack-hidden-workspace` and any
@@ -87,8 +80,9 @@ Dogfood check: the side-by-side dev app built with `make build-dev-app` has been
 launched inside an agent workspace. The old in-conversation monitor has been
 removed; active workspaces are controlled from Settings and viewed through the
 detached native GPUI viewer. The bridge no longer exposes the screenshot-backed
-`workspaceObserve` action that fed the removed panel, and the webview patcher
-cleans stale copies of that runtime from previously patched bundles.
+`workspaceObserve` action that fed the removed panel. Fresh app builds should
+not carry the old embedded panel; existing incrementally patched installs should
+be rebuilt from clean assets when retiring that stale runtime.
 
 Settings dogfood: the same side-by-side dev app opened Settings inside a hidden
 workspace, showed the **Agent Workspaces** sidebar entry and page, rendered the

@@ -20,7 +20,6 @@ const {
   SETTINGS_ASSET,
   SETTINGS_COMMAND_KEY,
   SETTINGS_SLUG,
-  applyAgentWorkspaceApprovalRenderingPatch,
   applyAgentWorkspaceMainBridgePatch,
   applyAgentWorkspaceSettingsIndexPatch,
   applyAgentWorkspaceSettingsPagePatch,
@@ -28,7 +27,6 @@ const {
   applyAgentWorkspaceSettingsSharedPatch,
   buildAgentWorkspaceSettingsSource,
   patches: featurePatches,
-  stripStaleAgentWorkspaceConversationRuntime,
 } = require("./patch.js");
 
 function withTempFeatureConfig(enabled, fn) {
@@ -332,8 +330,6 @@ test("agent-workspace feature exposes optional bridge and settings descriptors w
       [
         ["feature:agent-workspace:main-bridge", "main-bundle", "optional"],
         ["feature:agent-workspace:settings-page", "extracted-app", "optional"],
-        ["feature:agent-workspace:stale-runtime-cleanup", "webview-asset", "optional"],
-        ["feature:agent-workspace:approval-rendering", "webview-asset", "optional"],
       ],
     );
   });
@@ -397,15 +393,6 @@ test("main bridge generator does not carry removed conversation monitor observe 
   assert.doesNotMatch(patchSource, /data:image\/png;base64/);
   assert.doesNotMatch(patchSource, /codexLinuxAgentWorkspaceConversationCleanup=cleanup/);
   assert.doesNotMatch(patchSource, /codex-linux-agent-workspace-panel/);
-});
-
-test("stale runtime cleanup strips the removed conversation monitor without adding a panel", () => {
-  const stripped = stripStaleAgentWorkspaceConversationRuntime(staleConversationMonitorBundle());
-  assert.equal(stripped, "let thread=1;");
-  assert.equal(stripStaleAgentWorkspaceConversationRuntime(stripped), stripped);
-  assert.doesNotMatch(stripped, /agent-workspace-conversation/);
-  assert.doesNotMatch(stripped, /codex-linux-agent-workspace-panel/);
-  assert.doesNotMatch(stripped, /workspaceObserve/);
 });
 
 test("main bridge patch upgrades stale installed agent workspace handlers", () => {
@@ -596,6 +583,11 @@ test("main bridge opens viewer in clean default mode without adding a ceiling or
     assert.equal(config.json.restricted, false);
     assert.equal(config.json.permissions_path, null);
 
+    const profiles = await handlers["linux-agent-workspace"]({ action: "profileList" });
+    assert.equal(profiles.ok, true);
+    assert.equal(execCalls.length, 1);
+    assert.deepEqual(Array.from(execCalls[0].args), ["profile", "list"]);
+
     const viewer = await handlers["linux-agent-workspace"]({
       action: "workspaceOpenViewer",
       workspaceId: "qa-live",
@@ -603,7 +595,7 @@ test("main bridge opens viewer in clean default mode without adding a ceiling or
     assert.equal(viewer.ok, true);
     assert.equal(viewer.json.id, "qa-live");
     assert.equal(viewer.json.always_on_top, false);
-    assert.equal(execCalls.length, 0);
+    assert.equal(execCalls.length, 1);
     assert.equal(spawnCalls.length, 1);
     assert.deepEqual(Array.from(spawnCalls[0].args), ["viewer", "--id", "qa-live"]);
     assert.equal(spawnCalls[0].options.detached, true);
@@ -685,6 +677,7 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /MCP permissions/);
   assert.match(source, /MCP locked/);
   assert.match(source, /Host controlled/);
+  assert.doesNotMatch(source, /MCP open/);
   assert.match(source, /Inspecting MCP permissions/);
   assert.match(source, /No MCP permission ceiling detected; Codex session permissions apply/);
   assert.match(source, /No MCP ceiling is active\. Codex session permissions apply after hidden-workspace approval\./);
@@ -882,147 +875,6 @@ test("generated settings UI opens the GPUI viewer with the clean default action 
   });
 });
 
-test("approval renderer formats agent workspace params without affecting generic MCP params", () => {
-  const patched = applyAgentWorkspaceApprovalRenderingPatch(syntheticComposerBundle());
-  assert.match(patched, /codexLinuxAgentWorkspaceApprovalEntries/);
-  assert.match(patched, /Hidden workspace acknowledged/);
-  assert.match(patched, /let n=codexLinuxAgentWorkspaceApprovalEntries\(e\);return n\?\?t\?\?\(/);
-  assert.equal(applyAgentWorkspaceApprovalRenderingPatch(patched), patched);
-  const stalePatched = patched
-    .replace("if(params.params&&typeof params.params==\"object\"&&!Array.isArray(params.params))params=params.params;\n", "")
-    .replace(
-      "let n=codexLinuxAgentWorkspaceApprovalEntries(e);return n??t??(",
-      "return t??codexLinuxAgentWorkspaceApprovalEntries(e)??(",
-    );
-  assert.match(applyAgentWorkspaceApprovalRenderingPatch(stalePatched), /if\(params\.params&&typeof params\.params=="object"/);
-  assert.match(
-    applyAgentWorkspaceApprovalRenderingPatch(stalePatched),
-    /let n=codexLinuxAgentWorkspaceApprovalEntries\(e\);return n\?\?t\?\?\(/,
-  );
-
-  const check = spawnSync(process.execPath, ["--check"], {
-    encoding: "utf8",
-    input: patched,
-  });
-  assert.equal(check.status, 0, check.stderr || check.stdout);
-
-  const sandbox = {};
-  vm.runInNewContext(`${patched};this.render=sU;`, sandbox);
-
-  const rows = sandbox.render(
-    {
-      id: "mcp-visible",
-      profile: "dogfood-network-disabled",
-      command: ["python3", "-c", "print(1)"],
-      network: { mode: "local_only", allow_hosts: ["localhost:3000"] },
-      dry_run: true,
-      timeout_ms: 10000,
-      kill_on_timeout: true,
-      acknowledge_hidden_workspace: true,
-    },
-    null,
-  );
-  assert.deepEqual(
-    Array.from(rows, (row) => row.displayName),
-    [
-      "Profile",
-      "Workspace",
-      "Command",
-      "Network",
-      "Preview only",
-      "Timeout",
-      "Kill on timeout",
-      "Hidden workspace acknowledged",
-    ],
-  );
-  assert.equal(rows.find((row) => row.displayName === "Command").value, 'python3 -c "print(1)"');
-  assert.equal(rows.find((row) => row.displayName === "Network").value, "local_only (localhost:3000)");
-  assert.equal(rows.find((row) => row.displayName === "Preview only").value, "Yes");
-
-  const explicitDisplayRows = sandbox.render(
-    {
-      params: {
-        action: "workspaceOpenProfile",
-        profileId: "desktop-qa",
-        runSetup: true,
-        startupWaitWindow: true,
-        ackHiddenWorkspace: true,
-      },
-    },
-    [{ name: "params", displayName: "Params", value: { raw: "json" } }],
-  );
-  assert.deepEqual(
-    Array.from(explicitDisplayRows, (row) => row.displayName),
-    ["Action", "Profile", "Run setup", "Wait for startup window", "Hidden workspace acknowledged"],
-  );
-  assert.equal(explicitDisplayRows.find((row) => row.displayName === "Action").value, "workspaceOpenProfile");
-
-  const approvalBundleRows = sandbox.render(
-    {
-      start_preview: {
-        id: "approval-preview-ui",
-        purpose: "Approval UI dogfood",
-        message: "workspace start would require hidden-workspace acknowledgement",
-        approval: {
-          action: "workspace_start",
-          subject: "workspace approval-preview-ui",
-          approved: false,
-          blocked: false,
-          would_execute: false,
-          requires_user_approval: true,
-          required_acknowledgements: [
-            {
-              id: "hidden_workspace",
-              label: "Hidden workspace",
-              description: "User acknowledges that the agent will run in a separate workspace environment.",
-              acknowledged: false,
-              cli_flag: "--ack-hidden-workspace",
-              mcp_parameter: { name: "acknowledge_hidden_workspace", value: true },
-            },
-          ],
-          missing_acknowledgements: [
-            {
-              id: "hidden_workspace",
-              label: "Hidden workspace",
-              description: "User acknowledges that the agent will run in a separate workspace environment.",
-              acknowledged: false,
-              cli_flag: "--ack-hidden-workspace",
-              mcp_parameter: { name: "acknowledge_hidden_workspace", value: true },
-            },
-          ],
-          approve_cli_flags: ["--ack-hidden-workspace"],
-          approve_mcp_parameters: [{ name: "acknowledge_hidden_workspace", value: true }],
-        },
-      },
-    },
-    [{ name: "params", displayName: "Params", value: { raw: "json" } }],
-  );
-  assert.equal(approvalBundleRows.find((row) => row.displayName === "Action").value, "workspace_start");
-  assert.equal(
-    approvalBundleRows.find((row) => row.displayName === "Workspace request").value,
-    "workspace approval-preview-ui",
-  );
-  assert.equal(approvalBundleRows.find((row) => row.displayName === "Approval").value, "Needs approval");
-  assert.equal(
-    approvalBundleRows.find((row) => row.displayName === "Needs user approval").value,
-    "Hidden workspace",
-  );
-  assert.equal(
-    approvalBundleRows.find((row) => row.displayName === "Approve by setting").value,
-    "acknowledge_hidden_workspace=true",
-  );
-  assert.equal(
-    approvalBundleRows.find((row) => row.displayName === "Preview").value,
-    "workspace start would require hidden-workspace acknowledgement",
-  );
-  assert.equal(approvalBundleRows.some((row) => row.displayName === "Params"), false);
-
-  const genericRows = sandbox.render({ query: "abc" }, null);
-  assert.deepEqual(
-    Array.from(genericRows, (row) => ({ name: row.name, value: row.value, displayName: row.displayName })),
-    [{ name: "query", value: "abc", displayName: "query" }],
-  );
-});
 test("settings asset patches add navigation, route, visibility, and title", () => {
   const sections = applyAgentWorkspaceSettingsSectionsPatch(syntheticSettingsSections());
   assert.match(sections, new RegExp(`slug:\`${SETTINGS_SLUG}\``));
@@ -1079,13 +931,16 @@ test("agent-workspace feature participates in ASAR patching and reports", () => 
         assert.match(fs.readFileSync(path.join(assetsDir, "settings-shared-test.js"), "utf8"), /Agent Workspaces/);
         assert.match(fs.readFileSync(path.join(assetsDir, "settings-page-test.js"), "utf8"), /agent-workspaces/);
         assert.match(fs.readFileSync(path.join(assetsDir, "index-test.js"), "utf8"), new RegExp(SETTINGS_ASSET));
-        assert.equal(fs.readFileSync(path.join(assetsDir, "local-conversation-thread-test.js"), "utf8"), "let thread=1;");
-        assert.match(fs.readFileSync(path.join(assetsDir, "composer-test.js"), "utf8"), /codexLinuxAgentWorkspaceApprovalEntries/);
+        assert.equal(
+          fs.readFileSync(path.join(assetsDir, "local-conversation-thread-test.js"), "utf8"),
+          staleConversationMonitorBundle(),
+        );
+        assert.equal(fs.readFileSync(path.join(assetsDir, "composer-test.js"), "utf8"), syntheticComposerBundle());
         assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:main-bridge" && patch.status === "applied"));
         assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:settings-page" && patch.status === "applied"));
         assert.equal(report.patches.some((patch) => patch.name === "feature:agent-workspace:conversation-view"), false);
-        assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:stale-runtime-cleanup" && patch.status === "applied"));
-        assert.ok(report.patches.some((patch) => patch.name === "feature:agent-workspace:approval-rendering" && patch.status === "applied"));
+        assert.equal(report.patches.some((patch) => patch.name === "feature:agent-workspace:stale-runtime-cleanup"), false);
+        assert.equal(report.patches.some((patch) => patch.name === "feature:agent-workspace:approval-rendering"), false);
       } finally {
         fs.rmSync(tempApp, { recursive: true, force: true });
       }
@@ -1099,8 +954,6 @@ test("feature patch list is intentionally small", () => {
     [
       ["main-bridge", "main-bundle"],
       ["settings-page", "extracted-app"],
-      ["stale-runtime-cleanup", "webview-asset"],
-      ["approval-rendering", "webview-asset"],
     ],
   );
 });

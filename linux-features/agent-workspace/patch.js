@@ -168,35 +168,6 @@ function applyAgentWorkspaceMainBridgePatch(currentSource) {
   );
 }
 
-const STALE_CONVERSATION_RUNTIME_PREFIX = ';(()=>{const VERSION="agent-workspace-conversation-';
-const STALE_CONVERSATION_RUNTIME_END =
-  'if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",start,{once:true});else start();})();';
-
-function stripStaleAgentWorkspaceConversationRuntime(currentSource) {
-  let patchedSource = currentSource;
-  while (true) {
-    const runtimeStart = patchedSource.indexOf(STALE_CONVERSATION_RUNTIME_PREFIX);
-    if (runtimeStart === -1) {
-      return patchedSource;
-    }
-
-    const runtimeEnd = patchedSource.indexOf(STALE_CONVERSATION_RUNTIME_END, runtimeStart);
-    if (runtimeEnd === -1) {
-      return patchedSource;
-    }
-
-    let removeStart = runtimeStart;
-    if (removeStart > 0 && patchedSource[removeStart - 1] === "\n") {
-      removeStart -= 1;
-    }
-    let removeEnd = runtimeEnd + STALE_CONVERSATION_RUNTIME_END.length;
-    if (patchedSource[removeEnd] === "\n") {
-      removeEnd += 1;
-    }
-    patchedSource = `${patchedSource.slice(0, removeStart)}${patchedSource.slice(removeEnd)}`;
-  }
-}
-
 function buildAgentWorkspaceSettingsSource({
   chunkAsset,
   reactAsset,
@@ -508,13 +479,12 @@ function activeWorkspaceFromList(workspaces){
 function mcpConfigView(config){
   if(!config)return null;
   var locked=config.restricted===true;
-  var configured=config.configured===true;
-  var label=config.configured==null?"Checking":locked?"MCP locked":configured?"MCP open":"Host controlled";
+  var label=config.configured==null?"Checking":locked?"MCP locked":"Host controlled";
   var detail=config.permissions_path||config.message||config.config_path||"No permission ceiling";
   return h("div",{className:"rounded-md border border-token-border-default bg-token-bg-primary p-3 text-sm"},
     h("div",{className:"mb-1 flex items-center justify-between gap-2"},
       h("span",{className:"font-medium text-token-text-primary"},"MCP permissions"),
-      statusPill(label,locked?"warn":configured?"idle":"stopped")
+      statusPill(label,locked?"warn":"idle")
     ),
     h("div",{className:"truncate text-token-text-tertiary",title:String(detail||"")},detail),
     locked?h("div",{className:"mt-2 text-xs text-token-text-secondary"},"This page reuses the configured permission file for CLI workspace actions. Restart Codex after changing MCP config."):null,
@@ -1637,169 +1607,6 @@ function applyAgentWorkspaceSettingsPagePatch(currentSource) {
   return patchedSource;
 }
 
-function agentWorkspaceApprovalEntriesHelperSource() {
-  return `
-function codexLinuxAgentWorkspaceApprovalEntries(params){
-  if(!params||typeof params!="object"||Array.isArray(params))return null;
-  if(params.params&&typeof params.params=="object"&&!Array.isArray(params.params))params=params.params;
-  const bundle=codexLinuxAgentWorkspaceApprovalBundle(params);
-  const preview=codexLinuxAgentWorkspaceApprovalPreview(params);
-  const keys=Object.keys(params);
-  const marker=new Set(["acknowledge_hidden_workspace","acknowledge_unenforced_policy","ackHiddenWorkspace","ackUnenforcedPolicy","run_setup","runSetup","startup_wait_window","startupWaitWindow","startup_screenshot_window","startupScreenshotWindow","wait_window","waitWindow","screenshot_window","screenshotWindow","kill_on_timeout","killOnTimeout","timeout_ms","timeoutMs","tail_bytes","tailBytes","observe_screenshot","observeScreenshot","include_hidden","includeHidden","events_tail","eventsTail","cleanup_id","cleanupId","user_data_dir","userDataDir","browser_path","browserPath","host_path","hostPath","mounts","network","setup_commands","setupCommands","startup_apps","startupApps","require_enforced_policy","requireEnforcedPolicy","dry_run","dryRun","replace","purpose","approval","approval_bundle","approvalBundle","start_preview","startPreview","launch_preview","launchPreview","run_preview","runPreview"]);
-  const action=typeof params.action=="string"?params.action:typeof bundle?.action=="string"?bundle.action:"";
-  const looksLikeAgentWorkspace=bundle!=null||preview!=null||/^(workspace|profile)/i.test(action)||keys.some(key=>marker.has(key))||(Array.isArray(params.command)&&keys.some(key=>["id","profile","cwd","name","timeout_ms","timeoutMs","tail_bytes","tailBytes","kill_on_timeout","killOnTimeout","wait_window","waitWindow","screenshot_window","screenshotWindow"].includes(key)))||(params.profile&&typeof params.profile=="object"&&!Array.isArray(params.profile));
-  if(!looksLikeAgentWorkspace)return null;
-  const rows=[];
-  const consumed=new Set();
-  const add=(name,value,displayName)=>{
-    consumed.add(name);
-    if(value===void 0||value===null||value===""||(Array.isArray(value)&&value.length===0))return;
-    rows.push({name,displayName,value:codexLinuxAgentWorkspaceApprovalValue(value)});
-  };
-  if(bundle||preview){
-    ["approval","approval_bundle","approvalBundle","start_preview","startPreview","launch_preview","launchPreview","run_preview","runPreview"].forEach(key=>consumed.add(key));
-  }
-  add("action",action,"Action");
-  if(bundle){
-    add("approval_subject",bundle.subject,"Workspace request");
-    add("approval_state",codexLinuxAgentWorkspaceApprovalState(bundle),"Approval");
-    add("missing_acknowledgements",codexLinuxAgentWorkspaceApprovalRequirementList(bundle.missing_acknowledgements),"Needs user approval");
-    if(!Array.isArray(bundle.missing_acknowledgements)||bundle.missing_acknowledgements.length===0)add("required_acknowledgements",codexLinuxAgentWorkspaceApprovalRequirementList(bundle.required_acknowledgements),"Acknowledgements");
-    add("approve_mcp_parameters",codexLinuxAgentWorkspaceApprovalParameterList(bundle.approve_mcp_parameters),"Approve by setting");
-    add("blockers",Array.isArray(bundle.blockers)?bundle.blockers.join("; "):null,"Blocked by");
-  }
-  if(preview){
-    add("preview_message",preview.message,"Preview");
-    add("preview_policy",preview.applied_policy,"Policy");
-  }
-  const profile=params.profile&&typeof params.profile=="object"&&!Array.isArray(params.profile)?params.profile:null;
-  if(profile){
-    add("profile",profile.id||"(inline profile)","Profile");
-    add("description",profile.description,"Description");
-    add("cwd",profile.cwd,"Working folder");
-    add("network",profile.network,"Network");
-    add("mounts",Array.isArray(profile.mounts)?profile.mounts.length+" mount"+(profile.mounts.length===1?"":"s"):null,"File access");
-    add("setup_commands",profile.setup_commands||profile.setupCommands,"Setup commands");
-    add("startup_apps",profile.startup_apps||profile.startupApps,"Startup apps");
-    add("require_enforced_policy",profile.require_enforced_policy??profile.requireEnforcedPolicy,"Require enforcement");
-  }else{
-    add("profile",params.profile??params.profile_id??params.profileId,"Profile");
-  }
-  add("id",params.id??params.workspace_id??params.workspaceId,"Workspace");
-  add("name",params.name,"App name");
-  add("purpose",params.purpose,"Purpose");
-  add("command",params.command,"Command");
-  add("cwd",params.cwd,"Working folder");
-  add("network",params.network,"Network");
-  add("mounts",Array.isArray(params.mounts)?params.mounts.length+" mount"+(params.mounts.length===1?"":"s"):params.mounts,"File access");
-  add("setup_commands",params.setup_commands??params.setupCommands,"Setup commands");
-  add("startup_apps",params.startup_apps??params.startupApps,"Startup apps");
-  add("host_path",params.host_path??params.hostPath,"Host path");
-  add("browser_path",params.browser_path??params.browserPath,"Browser");
-  add("user_data_dir",params.user_data_dir??params.userDataDir,"Browser data");
-  add("dry_run",params.dry_run??params.dryRun,"Preview only");
-  add("replace",params.replace,"Overwrite saved profile");
-  add("run_setup",params.run_setup??params.runSetup,"Run setup");
-  add("startup_wait_window",params.startup_wait_window??params.startupWaitWindow,"Wait for startup window");
-  add("startup_screenshot_window",params.startup_screenshot_window??params.startupScreenshotWindow,"Screenshot startup window");
-  add("wait_window",params.wait_window??params.waitWindow,"Wait for window");
-  add("screenshot_window",params.screenshot_window??params.screenshotWindow,"Screenshot window");
-  add("observe_screenshot",params.observe_screenshot??params.observeScreenshot,"Capture screenshot");
-  add("include_hidden",params.include_hidden??params.includeHidden,"Include hidden windows");
-  add("events_tail",params.events_tail??params.eventsTail,"Recent events");
-  add("timeout_ms",params.timeout_ms!=null?params.timeout_ms+" ms":params.timeoutMs!=null?params.timeoutMs+" ms":null,"Timeout");
-  add("tail_bytes",params.tail_bytes??params.tailBytes,"Log tail");
-  add("kill_on_timeout",params.kill_on_timeout??params.killOnTimeout,"Kill on timeout");
-  add("acknowledge_hidden_workspace",params.acknowledge_hidden_workspace??params.ackHiddenWorkspace,"Hidden workspace acknowledged");
-  add("acknowledge_unenforced_policy",params.acknowledge_unenforced_policy??params.ackUnenforcedPolicy,"Unenforced policy acknowledged");
-  const aliases=new Set(["profile_id","profileId","workspace_id","workspaceId","timeoutMs","tailBytes","killOnTimeout","ackHiddenWorkspace","ackUnenforcedPolicy","dryRun","runSetup","startupWaitWindow","startupScreenshotWindow","waitWindow","screenshotWindow","observeScreenshot","includeHidden","eventsTail","hostPath","browserPath","userDataDir","setupCommands","startupApps","requireEnforcedPolicy"]);
-  const extra=keys.filter(key=>!consumed.has(key)&&!aliases.has(key)&&params[key]!=null);
-  if(extra.length>0)rows.push({name:"other_options",displayName:"Other options",value:extra.join(", ")});
-  return rows.length>0?rows:null;
-}
-function codexLinuxAgentWorkspaceApprovalPreview(params){
-  const candidates=[params?.start_preview,params?.startPreview,params?.launch_preview,params?.launchPreview,params?.run_preview,params?.runPreview];
-  return candidates.find(value=>value&&typeof value=="object"&&!Array.isArray(value))||null;
-}
-function codexLinuxAgentWorkspaceApprovalBundle(params){
-  const preview=codexLinuxAgentWorkspaceApprovalPreview(params);
-  const candidates=[params?.approval_bundle,params?.approvalBundle,params?.approval,preview?.approval];
-  return candidates.find(codexLinuxAgentWorkspaceIsApprovalBundle)||null;
-}
-function codexLinuxAgentWorkspaceIsApprovalBundle(value){
-  return !!(value&&typeof value=="object"&&!Array.isArray(value)&&(typeof value.action=="string"||typeof value.subject=="string"||Array.isArray(value.required_acknowledgements)||Array.isArray(value.missing_acknowledgements)||Array.isArray(value.approve_mcp_parameters)));
-}
-function codexLinuxAgentWorkspaceApprovalState(bundle){
-  if(bundle.blocked)return "Blocked";
-  if(bundle.requires_user_approval)return "Needs approval";
-  if(bundle.approved&&bundle.would_execute)return "Ready to run";
-  if(bundle.approved)return "Approved";
-  return "Preview";
-}
-function codexLinuxAgentWorkspaceApprovalRequirementList(requirements){
-  if(!Array.isArray(requirements)||requirements.length===0)return null;
-  return requirements.map(requirement=>requirement?.label||requirement?.id).filter(Boolean).join(", ");
-}
-function codexLinuxAgentWorkspaceApprovalParameterList(parameters){
-  if(!Array.isArray(parameters)||parameters.length===0)return null;
-  return parameters.map(parameter=>parameter&&typeof parameter.name=="string"?parameter.name+"="+String(parameter.value):null).filter(Boolean).join("; ");
-}
-function codexLinuxAgentWorkspaceApprovalValue(value){
-  if(typeof value=="boolean")return value?"Yes":"No";
-  if(typeof value=="number")return String(value);
-  if(typeof value=="string")return value;
-  if(Array.isArray(value)){
-    if(value.every(item=>["string","number","boolean"].includes(typeof item)))return codexLinuxAgentWorkspaceApprovalCommand(value);
-    if(value.every(item=>item&&typeof item=="object"&&Array.isArray(item.command)))return value.map(item=>item.name||codexLinuxAgentWorkspaceApprovalCommand(item.command)).join("; ");
-    return value.length+" item"+(value.length===1?"":"s");
-  }
-  if(value&&typeof value=="object"){
-    if(typeof value.mode=="string")return value.allow_hosts&&Array.isArray(value.allow_hosts)&&value.allow_hosts.length>0?value.mode+" ("+value.allow_hosts.join(", ")+")":value.mode;
-    const keys=Object.keys(value).filter(key=>value[key]!=null);
-    return keys.length>0?keys.join(", "):"configured";
-  }
-  return String(value);
-}
-function codexLinuxAgentWorkspaceApprovalCommand(command){
-  return command.map(part=>codexLinuxAgentWorkspaceApprovalQuote(String(part))).join(" ");
-}
-function codexLinuxAgentWorkspaceApprovalQuote(value){
-  return /^[A-Za-z0-9_./:=@%+-]+$/.test(value)?value:JSON.stringify(value);
-}`;
-}
-
-function applyAgentWorkspaceApprovalRenderingPatch(currentSource) {
-  const needle =
-    "function sU(e,t){return t??(e==null?[]:Object.entries(e).map(([e,t])=>({name:e,value:t,displayName:(0,YH.default)(e.trim())})))}";
-  const patchedNeedle = needle.replace(
-    "return t??(",
-    "let n=codexLinuxAgentWorkspaceApprovalEntries(e);return n??t??(",
-  );
-
-  if (currentSource.includes("codexLinuxAgentWorkspaceApprovalEntries")) {
-    const helperStart = currentSource.indexOf("function codexLinuxAgentWorkspaceApprovalEntries(params){");
-    const nextFunction = helperStart < 0 ? -1 : currentSource.indexOf("function cU", helperStart);
-    if (helperStart >= 0) {
-      const replaceEnd = nextFunction > helperStart ? nextFunction : currentSource.length;
-      const prefix = currentSource.slice(0, helperStart);
-      const helper = prefix.endsWith("\n")
-        ? agentWorkspaceApprovalEntriesHelperSource().replace(/^\n/, "")
-        : agentWorkspaceApprovalEntriesHelperSource();
-      return `${prefix}${helper}${patchedNeedle}${currentSource.slice(replaceEnd)}`;
-    }
-    return currentSource;
-  }
-
-  if (!currentSource.includes(needle)) {
-    return currentSource;
-  }
-
-  return currentSource.replace(
-    needle,
-    `${agentWorkspaceApprovalEntriesHelperSource()}${patchedNeedle}`,
-  );
-}
-
 function patchAgentWorkspaceRouteAssets(extractedDir) {
   const assetsDir = webviewAssetsDir(extractedDir);
   const candidates = fs
@@ -1903,26 +1710,6 @@ module.exports = {
         return "already-applied";
       },
     },
-    {
-      id: "stale-runtime-cleanup",
-      phase: "webview-asset",
-      order: 20_820,
-      ciPolicy: "optional",
-      pattern: /^(index|local-conversation-thread)-.*\.js$/,
-      missingDescription: "conversation thread bundle",
-      skipDescription: "agent workspace stale runtime cleanup patch",
-      apply: stripStaleAgentWorkspaceConversationRuntime,
-    },
-    {
-      id: "approval-rendering",
-      phase: "webview-asset",
-      order: 20_830,
-      ciPolicy: "optional",
-      pattern: /^composer-.*\.js$/,
-      missingDescription: "composer bundle",
-      skipDescription: "agent workspace approval rendering patch",
-      apply: applyAgentWorkspaceApprovalRenderingPatch,
-    },
   ],
   SETTINGS_ASSET,
   SETTINGS_COMMAND_KEY,
@@ -1932,8 +1719,6 @@ module.exports = {
   applyAgentWorkspaceSettingsPagePatch,
   applyAgentWorkspaceSettingsSectionsPatch,
   applyAgentWorkspaceSettingsSharedPatch,
-  applyAgentWorkspaceApprovalRenderingPatch,
   buildAgentWorkspaceSettingsSource,
   patchAgentWorkspaceSettingsAssets,
-  stripStaleAgentWorkspaceConversationRuntime,
 };
