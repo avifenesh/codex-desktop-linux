@@ -42,6 +42,7 @@ const REMOTE_CONTROL_ENABLEMENT_BRIDGE_MARKER = "codexLinuxRemoteControlEnableme
 const REMOTE_CONTROL_AUTO_CONNECT_CLEANUP_MARKER = "codexLinuxRemoteControlAutoConnectCleanup";
 const REMOTE_CONTROL_SELF_AUTO_CONNECT_MARKER = "codexLinuxRemoteControlSelfAutoConnect";
 const REMOTE_MOBILE_ACTIVE_STATUS_MARKER = "codexLinuxRemoteMobileActiveStatus";
+const REMOTE_CONTROL_STATUS_READ_GUARD_MARKER = "codexLinuxRemoteControlShouldReadStatus";
 const REMOTE_CONTROL_REVOKE_SETUP_RESET_MARKER = "codexLinuxRemoteControlResetMobileSetupAfterRevoke";
 const REMOTE_MOBILE_APP_SERVER_REMOTE_CONTROL_MARKER = "codexLinuxRemoteMobileAppServerArgs";
 const REMOTE_MOBILE_APP_SERVER_ARGS_NEEDLE = "args:[`app-server`,`--analytics-default-enabled`]";
@@ -898,6 +899,46 @@ function applyLinuxRemoteMobileConversationHydrationPatch(source) {
 
   return patched;
 }
+
+function applyLinuxRemoteControlStatusReadGuardPatch(source) {
+  if (source.includes(REMOTE_CONTROL_STATUS_READ_GUARD_MARKER) || !source.includes("remoteControl/status/read")) {
+    return source;
+  }
+
+  const statusReadPattern =
+    /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=\3\.getHostId\(\),([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\2,\4\),([A-Za-z_$][\w$]*)=\2\.get\(([A-Za-z_$][\w$]*),\4\);\3\.addNotificationCallback\(`remoteControl\/status\/changed`,\(\{params:([A-Za-z_$][\w$]*)\}\)=>\{([A-Za-z_$][\w$]*)\(\2,\4,\5\)&&\2\.set\(\8,\4,\9\)\}\),\3\.sendRequest\(`remoteControl\/status\/read`,void 0\)\.then\(([A-Za-z_$][\w$]*)=>\{\2\.get\(\8,\4\)===\7&&\10\(\2,\4,\5\)&&\2\.set\(\8,\4,\11\)\}\)\.catch\(([A-Za-z_$][\w$]*)=>\{\10\(\2,\4,\5\)&&([A-Za-z_$][\w$]*)\.error\(`Failed to read remote-control status`,\{safe:\{\},sensitive:\{error:\12\}\}\)\}\)\}/u;
+  const match = source.match(statusReadPattern);
+  if (match == null) {
+    console.warn("WARN: Could not find remote-control status read needle - skipping Linux remote-control status guard patch");
+    return source;
+  }
+
+  const [
+    needle,
+    functionName,
+    storeVar,
+    clientVar,
+    hostVar,
+    generationVar,
+    generationFn,
+    initialValueVar,
+    statusAtomVar,
+    notificationParamsVar,
+    isCurrentFn,
+    readResultVar,
+    errorVar,
+    loggerVar,
+  ] = match;
+  const replacement =
+    `function ${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}(e){return !(typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)&&typeof e==\`string\`&&e.startsWith(\`remote-ssh\`))}` +
+    `function ${functionName}(${storeVar},${clientVar}){let ${hostVar}=${clientVar}.getHostId(),${generationVar}=${generationFn}(${storeVar},${hostVar}),${initialValueVar}=${storeVar}.get(${statusAtomVar},${hostVar});` +
+    `${clientVar}.addNotificationCallback(\`remoteControl/status/changed\`,({params:${notificationParamsVar}})=>{${isCurrentFn}(${storeVar},${hostVar},${generationVar})&&${storeVar}.set(${statusAtomVar},${hostVar},${notificationParamsVar})});` +
+    `if(!${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}(${hostVar})){${isCurrentFn}(${storeVar},${hostVar},${generationVar})&&${storeVar}.set(${statusAtomVar},${hostVar},{status:\`disabled\`,available:!1,accessRequired:!1});return}` +
+    `${clientVar}.sendRequest(\`remoteControl/status/read\`,void 0).then(${readResultVar}=>{${storeVar}.get(${statusAtomVar},${hostVar})===${initialValueVar}&&${isCurrentFn}(${storeVar},${hostVar},${generationVar})&&${storeVar}.set(${statusAtomVar},${hostVar},${readResultVar})}).catch(${errorVar}=>{${isCurrentFn}(${storeVar},${hostVar},${generationVar})&&${loggerVar}.error(\`Failed to read remote-control status\`,{safe:{},sensitive:{error:${errorVar}}})})}`;
+
+  return source.replace(needle, replacement);
+}
+
 function applyLinuxRemoteControlEnablementBridgePatch(source) {
   const markerIndex = source.indexOf("[remote-connections/slingshot-gate-bridge]");
   if (markerIndex < 0 || source.indexOf("set-remote-control-connections-enabled", markerIndex) < 0) {
@@ -1147,6 +1188,16 @@ module.exports = [
     apply: applyLinuxRemoteMobileConversationHydrationPatch,
   },
   {
+    id: "linux-remote-control-status-read-guard",
+    phase: "webview-asset",
+    pattern: /^app-server-manager-signals-.*\.js$/,
+    order: 20_151,
+    ciPolicy: "optional",
+    missingDescription: "app-server manager signals bundle",
+    skipDescription: "Linux remote-control status read guard patch",
+    apply: applyLinuxRemoteControlStatusReadGuardPatch,
+  },
+  {
     id: "linux-remote-control-enablement-bridge",
     phase: "webview-asset",
     pattern: /^app-main-.*\.js$/,
@@ -1183,6 +1234,7 @@ module.exports.applyLinuxRemoteMobileAppServerRemoteControlPatch =
   applyLinuxRemoteMobileAppServerRemoteControlPatch;
 module.exports.applyLinuxRemoteMobileChromeBridgePatch = applyLinuxRemoteMobileChromeBridgePatch;
 module.exports.applyLinuxRemoteMobileConversationHydrationPatch = applyLinuxRemoteMobileConversationHydrationPatch;
+module.exports.applyLinuxRemoteControlStatusReadGuardPatch = applyLinuxRemoteControlStatusReadGuardPatch;
 module.exports.applyLinuxRemoteControlEnablementBridgePatch = applyLinuxRemoteControlEnablementBridgePatch;
 module.exports.applyLinuxRemoteMobileActiveStatusPatch = applyLinuxRemoteMobileActiveStatusPatch;
 module.exports.applyLinuxRemoteControlPreserveConfigPatch = applyLinuxRemoteControlPreserveConfigPatch;

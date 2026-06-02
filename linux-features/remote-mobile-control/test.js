@@ -31,6 +31,7 @@ const {
   applyLinuxRemoteMobileAppServerRemoteControlPatch,
   applyLinuxRemoteMobileChromeBridgePatch,
   applyLinuxRemoteMobileConversationHydrationPatch,
+  applyLinuxRemoteControlStatusReadGuardPatch,
   applyLinuxRemoteMobileProjectlessRemoteTaskPatch,
   applyLinuxRemoteConnectionsRefreshPatch,
   applyLinuxRemoteControlSettingsUxPatch,
@@ -227,6 +228,16 @@ function syntheticAppServerManagerSignalsBundle() {
   return [
     "function Of({conversationId:e,conversations:t,getWorkspaceBrowserRoot:n,getWorkspaceKind:r,hostId:i,setConversation:a,thread:o,threadsById:s,updateConversationState:c}){let h=o.status??null;if(t.has(e)){c(e,e=>{e.resumeState===`needs_resume`&&(e.threadRuntimeStatus=h)});return}}",
     "class T{onNotification(e,t){let n={method:e,params:t};switch(n.method){case`turn/started`:{let{threadId:e,turn:t}=n.params,r=I(e);if(!this.conversations.get(r)){z.error(`Received turn/started for unknown conversation`,{safe:{conversationId:r},sensitive:{}});break}this.markConversationStreaming(r),this.updateConversationState(r,e=>{});break}case`turn/completed`:{if(this.frameTextDeltaQueue.drainBefore(()=>{this.onNotification(`turn/completed`,n.params)}))break;let{threadId:e,turn:t}=n.params,r=I(e);if(!this.conversations.get(r)){z.error(`Received turn/completed for unknown conversation`,{safe:{conversationId:r},sensitive:{}});break}break}case`item/started`:{let{item:e,threadId:t,turnId:r,startedAtMs:i}=n.params,a=I(t);if(!this.conversations.get(a)){z.error(`Received item/started for unknown conversation`,{safe:{conversationId:a},sensitive:{}});break}this.markConversationStreaming(a),this.updateConversationState(a,t=>{});break}case`item/completed`:{if(this.frameTextDeltaQueue.drainBefore(()=>{this.onNotification(`item/completed`,n.params)}))break;let{item:e,threadId:t,turnId:r,completedAtMs:i}=n.params,a=I(t);if(!this.conversations.get(a)){z.error(`Received item/completed for unknown conversation`,{safe:{conversationId:a},sensitive:{}});break}this.updateConversationState(a,t=>{});break}}}}",
+  ].join("");
+}
+
+function syntheticAppServerManagerStatusBundle() {
+  return [
+    "var z={error(){}};",
+    "var bO={};",
+    "function wO(e,t){return e.bump(t)}",
+    "function TO(e,t,n){return e.current(t)===n}",
+    "function SO(e,t){let n=t.getHostId(),r=wO(e,n),i=e.get(bO,n);t.addNotificationCallback(`remoteControl/status/changed`,({params:t})=>{TO(e,n,r)&&e.set(bO,n,t)}),t.sendRequest(`remoteControl/status/read`,void 0).then(t=>{e.get(bO,n)===i&&TO(e,n,r)&&e.set(bO,n,t)}).catch(t=>{TO(e,n,r)&&z.error(`Failed to read remote-control status`,{safe:{},sensitive:{error:t}})})}",
   ].join("");
 }
 
@@ -582,6 +593,7 @@ test("remote mobile control feature exposes opt-in main-bundle and webview patch
       "feature:remote-mobile-control:linux-remote-control-client-revoke-setup-reset",
       "feature:remote-mobile-control:linux-remote-connections-refresh",
       "feature:remote-mobile-control:linux-remote-mobile-conversation-hydration",
+      "feature:remote-mobile-control:linux-remote-control-status-read-guard",
       "feature:remote-mobile-control:linux-remote-control-enablement-bridge",
       "feature:remote-mobile-control:linux-remote-mobile-active-status",
       "feature:remote-mobile-control:linux-remote-mobile-projectless-remote-task",
@@ -592,6 +604,7 @@ test("remote mobile control feature exposes opt-in main-bundle and webview patch
       "main-bundle",
       "main-bundle",
       "extracted-app",
+      "webview-asset",
       "webview-asset",
       "webview-asset",
       "webview-asset",
@@ -1135,6 +1148,71 @@ test("Linux remote mobile conversation hydration patch retries transient and mis
   assert.match(patched, /Failed to hydrate conversation for turn\/started/);
 });
 
+test("Linux remote-control status guard skips slow remote SSH status reads", async () => {
+  const source = syntheticAppServerManagerStatusBundle();
+  const patched = applyLinuxRemoteControlStatusReadGuardPatch(source);
+
+  assert.notEqual(patched, source);
+  assert.match(patched, /codexLinuxRemoteControlShouldReadStatus/);
+  assert.equal(applyLinuxRemoteControlStatusReadGuardPatch(patched), patched);
+
+  const context = {
+    module: { exports: {} },
+    navigator: { userAgent: "X11; Linux x86_64" },
+    Promise,
+    z: { error() {} },
+  };
+  vm.runInNewContext(`${patched};module.exports={SO,bO};`, context);
+  const { SO } = context.module.exports;
+  const generations = new Map();
+  const values = new Map();
+  const store = {
+    bump(hostId) {
+      const next = (generations.get(hostId) ?? 0) + 1;
+      generations.set(hostId, next);
+      return next;
+    },
+    current(hostId) {
+      return generations.get(hostId);
+    },
+    get(_atom, hostId) {
+      return values.get(hostId) ?? null;
+    },
+    set(_atom, hostId, value) {
+      values.set(hostId, value);
+    },
+  };
+
+  let remoteRequests = 0;
+  SO(store, {
+    getHostId: () => "remote-ssh-discovered:dev",
+    addNotificationCallback() {},
+    sendRequest() {
+      remoteRequests += 1;
+      return Promise.resolve({ status: "enabled" });
+    },
+  });
+  assert.equal(remoteRequests, 0);
+  const disabledStatus = values.get("remote-ssh-discovered:dev");
+  assert.equal(disabledStatus.status, "disabled");
+  assert.equal(disabledStatus.available, false);
+  assert.equal(disabledStatus.accessRequired, false);
+
+  let localRequests = 0;
+  SO(store, {
+    getHostId: () => "local",
+    addNotificationCallback() {},
+    sendRequest(method) {
+      localRequests += 1;
+      assert.equal(method, "remoteControl/status/read");
+      return Promise.resolve({ status: "enabled" });
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(localRequests, 1);
+  assert.equal(values.get("local").status, "enabled");
+});
+
 test("Linux remote mobile projectless remote task patch groups tasks without owner repo metadata", () => {
   const source = syntheticSidebarProjectGroupsBundle();
   const patched = applyLinuxRemoteMobileProjectlessRemoteTaskPatch(source);
@@ -1369,7 +1447,7 @@ test("remote mobile control feature participates in ASAR patching and reports", 
         );
         fs.writeFileSync(
           path.join(assetsDir, "app-server-manager-signals-test.js"),
-          syntheticAppServerManagerSignalsBundle(),
+          syntheticAppServerManagerSignalsBundle() + syntheticAppServerManagerStatusBundle(),
         );
         fs.writeFileSync(
           path.join(assetsDir, "app-main-test.js"),
@@ -1439,6 +1517,7 @@ test("remote mobile control feature participates in ASAR patching and reports", 
         assert.match(patchedMobileConnectedSettingsFile, /apps on this Linux desktop/);
         assert.match(patchedSignalsFile, /codexLinuxRemoteMobileHydrateUnknownTurn/);
         assert.match(patchedSignalsFile, /codexLinuxRemoteMobileThreadRuntimeStatus/);
+        assert.match(patchedSignalsFile, /codexLinuxRemoteControlShouldReadStatus/);
         assert.match(patchedSidebarProjectGroupsFile, /codexLinuxRemoteMobileProjectlessRemoteTaskId/);
         assert.match(patchedAppMainFile, /codexLinuxRemoteControlEnablementBridge/);
         assert.match(patchedAppMainFile, /codexLinuxRemoteMobileActiveStatus/);
@@ -1511,6 +1590,12 @@ test("remote mobile control feature participates in ASAR patching and reports", 
         assert.ok(
           report.patches.some((patch) =>
             patch.name === "feature:remote-mobile-control:linux-remote-mobile-conversation-hydration" &&
+            patch.status === "applied",
+          ),
+        );
+        assert.ok(
+          report.patches.some((patch) =>
+            patch.name === "feature:remote-mobile-control:linux-remote-control-status-read-guard" &&
             patch.status === "applied",
           ),
         );
