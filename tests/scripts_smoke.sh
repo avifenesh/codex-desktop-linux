@@ -1087,6 +1087,269 @@ SCRIPT
     [ -z "$third_line" ] || fail "Expected make build-app-fresh default DMG argument to be empty, got: $(cat "$install_log")"
 }
 
+test_installer_refreshes_stale_cached_dmg_metadata() {
+    info "Checking installer DMG cache freshness metadata branches"
+    local workspace="$TMP_DIR/dmg-cache-refresh"
+    local bin_dir="$workspace/bin"
+    local url="https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
+    local url_sha256
+
+    url_sha256="$(printf '%s' "$url" | sha256sum | awk '{print $1}')"
+
+    mkdir -p "$bin_dir"
+
+    cat >"$bin_dir/curl" <<'SCRIPT'
+#!/usr/bin/env bash
+set -eu
+
+is_head=0
+for arg in "$@"; do
+    if [ "$arg" = "-fsSLI" ]; then
+        is_head=1
+    fi
+done
+
+if [ "$is_head" -eq 1 ]; then
+    printf '%s\n' "HEAD" >> "$TEST_CURL_LOG"
+    if [ "${TEST_HEAD_FAIL:-0}" = "1" ]; then
+        exit 22
+    fi
+    printf 'HTTP/2 200\r\n'
+    [ -z "${TEST_ETAG:-}" ] || printf 'ETag: %s\r\n' "$TEST_ETAG"
+    [ -z "${TEST_LAST_MODIFIED:-}" ] || printf 'Last-Modified: %s\r\n' "$TEST_LAST_MODIFIED"
+    [ -z "${TEST_CONTENT_LENGTH:-}" ] || printf 'Content-Length: %s\r\n' "$TEST_CONTENT_LENGTH"
+    printf '\r\n'
+    exit 0
+fi
+
+printf '%s\n' "GET" >> "$TEST_CURL_LOG"
+if [ "${TEST_GET_FAIL:-0}" = "1" ]; then
+    exit 23
+fi
+
+out=""
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-o" ]; then
+        shift
+        out="$1"
+    fi
+    shift || true
+done
+
+[ -n "$out" ] || exit 2
+printf '%s' "${TEST_DOWNLOAD_CONTENT:-new}" >"$out"
+SCRIPT
+    chmod +x "$bin_dir/curl"
+
+    run_dmg_cache_case() {
+        local source_dir="$1"
+        local output_log="$2"
+        shift 2
+
+        mkdir -p "$source_dir"
+        : >"$source_dir/curl.log"
+        env "$@" \
+            PATH="$bin_dir:$PATH" \
+            TEST_SOURCE_DIR="$source_dir" \
+            TEST_CURL_LOG="$source_dir/curl.log" \
+            REPO_DIR="$REPO_DIR" \
+            bash <<'SCRIPT' >"$output_log" 2>&1
+set -Eeuo pipefail
+
+SCRIPT_DIR="$TEST_SOURCE_DIR"
+WORK_DIR="$(mktemp -d)"
+# shellcheck disable=SC1091
+source "$REPO_DIR/scripts/lib/install-helpers.sh"
+# shellcheck disable=SC1091
+source "$REPO_DIR/scripts/lib/dmg.sh"
+
+dmg_path="$(get_dmg)"
+[ "$dmg_path" = "$TEST_SOURCE_DIR/Codex.dmg" ]
+SCRIPT
+    }
+
+    local no_metadata="$workspace/no-metadata"
+    mkdir -p "$no_metadata"
+    printf '%s' "old" >"$no_metadata/Codex.dmg"
+    run_dmg_cache_case "$no_metadata" "$no_metadata/output.log" \
+        TEST_ETAG=fresh-etag \
+        TEST_LAST_MODIFIED="Thu, 04 Jun 2026 00:00:00 GMT" \
+        TEST_CONTENT_LENGTH=3 \
+        TEST_DOWNLOAD_CONTENT=new
+    [ "$(cat "$no_metadata/Codex.dmg")" = "new" ] || fail "Expected missing-metadata cache to refresh"
+    assert_contains "$no_metadata/Codex.dmg.metadata" "etag=fresh-etag"
+    assert_contains "$no_metadata/Codex.dmg.metadata" "url_sha256=$url_sha256"
+    assert_contains "$no_metadata/output.log" "Cached DMG has no upstream metadata"
+    assert_contains "$no_metadata/output.log" "Refreshing stale cached DMG"
+
+    local matching="$workspace/matching"
+    mkdir -p "$matching"
+    printf '%s' "old" >"$matching/Codex.dmg"
+    cat >"$matching/Codex.dmg.metadata" <<EOF
+url_sha256=$url_sha256
+etag=same-etag
+last_modified=Thu, 04 Jun 2026 00:00:00 GMT
+content_length=3
+EOF
+    run_dmg_cache_case "$matching" "$matching/output.log" \
+        TEST_ETAG=same-etag \
+        TEST_LAST_MODIFIED="Thu, 04 Jun 2026 00:00:00 GMT" \
+        TEST_CONTENT_LENGTH=3 \
+        TEST_DOWNLOAD_CONTENT=downloaded
+    [ "$(cat "$matching/Codex.dmg")" = "old" ] || fail "Expected matching metadata to reuse cache"
+    assert_not_contains "$matching/curl.log" "GET"
+    assert_contains "$matching/output.log" "Using cached DMG"
+
+    local differing="$workspace/differing"
+    mkdir -p "$differing"
+    printf '%s' "old" >"$differing/Codex.dmg"
+    cat >"$differing/Codex.dmg.metadata" <<EOF
+url_sha256=$url_sha256
+etag=old-etag
+last_modified=Thu, 04 Jun 2026 00:00:00 GMT
+content_length=3
+EOF
+    run_dmg_cache_case "$differing" "$differing/output.log" \
+        TEST_ETAG=fresh-etag \
+        TEST_LAST_MODIFIED="Thu, 04 Jun 2026 00:00:00 GMT" \
+        TEST_CONTENT_LENGTH=3 \
+        TEST_DOWNLOAD_CONTENT=new
+    [ "$(cat "$differing/Codex.dmg")" = "new" ] || fail "Expected differing metadata to refresh cache"
+    assert_contains "$differing/curl.log" "GET"
+
+    local failed_get="$workspace/failed-get"
+    mkdir -p "$failed_get"
+    printf '%s' "old" >"$failed_get/Codex.dmg"
+    cat >"$failed_get/Codex.dmg.metadata" <<EOF
+url_sha256=$url_sha256
+etag=old-etag
+last_modified=Thu, 04 Jun 2026 00:00:00 GMT
+content_length=3
+EOF
+    if run_dmg_cache_case "$failed_get" "$failed_get/output.log" \
+        TEST_ETAG=fresh-etag \
+        TEST_LAST_MODIFIED="Thu, 04 Jun 2026 00:00:00 GMT" \
+        TEST_CONTENT_LENGTH=3 \
+        TEST_GET_FAIL=1
+    then
+        fail "Expected failed replacement download to fail the refresh"
+    fi
+    [ "$(cat "$failed_get/Codex.dmg")" = "old" ] || fail "Expected failed refresh to preserve old DMG"
+    assert_contains "$failed_get/Codex.dmg.metadata" "etag=old-etag"
+    assert_file_not_exists "$failed_get/Codex.dmg.part"
+
+    local head_failure="$workspace/head-failure"
+    mkdir -p "$head_failure"
+    printf '%s' "old" >"$head_failure/Codex.dmg"
+    cat >"$head_failure/Codex.dmg.metadata" <<EOF
+url_sha256=$url_sha256
+etag=old-etag
+last_modified=Thu, 04 Jun 2026 00:00:00 GMT
+content_length=3
+EOF
+    run_dmg_cache_case "$head_failure" "$head_failure/output.log" TEST_HEAD_FAIL=1
+    [ "$(cat "$head_failure/Codex.dmg")" = "old" ] || fail "Expected HEAD failure to preserve cache"
+    assert_not_contains "$head_failure/curl.log" "GET"
+    assert_contains "$head_failure/output.log" "Could not check upstream DMG metadata"
+
+    local secret_url="$workspace/secret-url"
+    mkdir -p "$secret_url"
+    run_dmg_cache_case "$secret_url" "$secret_url/output.log" \
+        CODEX_UPSTREAM_DMG_URL="https://user:secret@example.com/Codex.dmg?token=topsecret#fragsecret" \
+        TEST_ETAG=opaque-etag \
+        TEST_CONTENT_LENGTH=3 \
+        TEST_DOWNLOAD_CONTENT=new
+    [ "$(cat "$secret_url/Codex.dmg")" = "new" ] || fail "Expected HTTPS override URL to download"
+    assert_contains "$secret_url/output.log" "URL: https://redacted@example.com/Codex.dmg?REDACTED"
+    assert_not_contains "$secret_url/output.log" "topsecret"
+    assert_not_contains "$secret_url/output.log" "fragsecret"
+    assert_not_contains "$secret_url/Codex.dmg.metadata" "topsecret"
+    assert_not_contains "$secret_url/Codex.dmg.metadata" "fragsecret"
+
+    local invalid_url="$workspace/invalid-url"
+    mkdir -p "$invalid_url"
+    if run_dmg_cache_case "$invalid_url" "$invalid_url/output.log" \
+        CODEX_UPSTREAM_DMG_URL="file:///tmp/Codex.dmg"
+    then
+        fail "Expected non-HTTPS upstream DMG URL to fail"
+    fi
+    assert_contains "$invalid_url/output.log" "Upstream DMG URL must be an HTTPS URL"
+}
+
+test_fresh_install_removes_cached_dmg_metadata() {
+    info "Checking --fresh removes cached DMG metadata"
+    local workspace="$TMP_DIR/fresh-dmg-metadata"
+    local source_dir="$workspace/source"
+
+    mkdir -p "$source_dir"
+    printf '%s' "metadata" >"$source_dir/Codex.dmg.metadata"
+
+    TEST_SOURCE_DIR="$source_dir" REPO_DIR="$REPO_DIR" bash <<'SCRIPT'
+set -Eeuo pipefail
+
+SCRIPT_DIR="$TEST_SOURCE_DIR"
+WORK_DIR="$(mktemp -d)"
+INSTALL_DIR="$TEST_SOURCE_DIR/codex-app"
+# shellcheck disable=SC1091
+source "$REPO_DIR/scripts/lib/install-helpers.sh"
+
+FRESH_INSTALL=1
+REUSE_CACHED_DMG=0
+prepare_install
+SCRIPT
+
+    assert_file_not_exists "$source_dir/Codex.dmg"
+    assert_file_not_exists "$source_dir/Codex.dmg.metadata"
+}
+
+test_rebuild_candidate_uses_validated_default_dmg() {
+    info "Checking rebuild-candidate default DMG validation flow"
+    local workspace="$TMP_DIR/rebuild-candidate-dmg"
+    local repo="$workspace/repo"
+    local explicit_dmg="$workspace/explicit.dmg"
+    local explicit_realpath
+    local first_line
+    local second_line
+
+    mkdir -p "$repo/scripts"
+    cp "$REPO_DIR/scripts/rebuild-candidate.sh" "$repo/scripts/rebuild-candidate.sh"
+    printf '%s' "cached" >"$repo/Codex.dmg"
+    printf '%s' "explicit" >"$explicit_dmg"
+    explicit_realpath="$(realpath "$explicit_dmg")"
+
+    cat >"$repo/install.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+set -eu
+{
+    printf 'CALL:'
+    for arg in "$@"; do
+        printf '<%s>' "$arg"
+    done
+    printf '\n'
+} >> "$TEST_REBUILD_LOG"
+SCRIPT
+    chmod +x "$repo/install.sh"
+
+    TEST_REBUILD_LOG="$workspace/default.log" \
+    CODEX_NEXT_APP_DIR="$workspace/next" \
+    REBUILD_REPORT_DIR="$workspace/report" \
+        bash "$repo/scripts/rebuild-candidate.sh" >"$workspace/default.out" 2>&1
+    first_line="$(sed -n '1p' "$workspace/default.log")"
+    second_line="$(sed -n '2p' "$workspace/default.log")"
+    [[ "$first_line" != *"Codex.dmg"* ]] || fail "Default inspect should let installer validate the cache: $first_line"
+    [[ "$second_line" == *"<$repo/Codex.dmg>"* ]] || fail "Default build should pin the validated cache: $second_line"
+    assert_contains "$workspace/default.out" "Using validated DMG for build"
+
+    TEST_REBUILD_LOG="$workspace/explicit.log" \
+    CODEX_NEXT_APP_DIR="$workspace/next-explicit" \
+    REBUILD_REPORT_DIR="$workspace/report-explicit" \
+        bash "$repo/scripts/rebuild-candidate.sh" "$explicit_dmg" >"$workspace/explicit.out" 2>&1
+    first_line="$(sed -n '1p' "$workspace/explicit.log")"
+    second_line="$(sed -n '2p' "$workspace/explicit.log")"
+    [[ "$first_line" == *"<$explicit_realpath>"* ]] || fail "Explicit inspect should receive explicit DMG: $first_line"
+    [[ "$second_line" == *"<$explicit_realpath>"* ]] || fail "Explicit build should receive explicit DMG: $second_line"
+}
+
 test_native_shortcut_targets_compose_existing_flows() {
     info "Checking native install/update shortcut targets"
     local install_log="$TMP_DIR/make-install-native.log"
@@ -5329,6 +5592,9 @@ main() {
     test_make_install_reports_missing_native_packages
     test_make_build_app_uses_installer_download_flow_by_default
     test_make_build_app_fresh_uses_installer_fresh_flow
+    test_installer_refreshes_stale_cached_dmg_metadata
+    test_fresh_install_removes_cached_dmg_metadata
+    test_rebuild_candidate_uses_validated_default_dmg
     test_native_shortcut_targets_compose_existing_flows
     test_fedora_dependency_bootstrap_installs_rpmbuild
     test_setup_native_wizard_noninteractive_feature_writer

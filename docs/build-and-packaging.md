@@ -70,6 +70,11 @@ Equivalent direct commands:
 ./install.sh --fresh
 ```
 
+The default path stores upstream DMG headers, plus a hash of the upstream URL,
+next to `Codex.dmg` and refreshes the cached file when that upstream fingerprint
+changes. `--fresh` still forces a cache removal before rebuilding, and an
+explicit `DMG=/path/to/Codex.dmg` uses that file exactly.
+
 Run the generated app:
 
 ```bash
