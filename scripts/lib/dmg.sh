@@ -13,7 +13,9 @@ redact_dmg_url() {
     local dmg_url="$1"
     local scheme="${dmg_url%%://*}"
     local remainder="${dmg_url#*://}"
-    local authority="${remainder%%/*}"
+
+    # Authority ends at the first '/', '?', or '#', whichever comes first.
+    local authority="${remainder%%[/?#]*}"
     local path=""
 
     if [ "$remainder" != "$authority" ]; then
