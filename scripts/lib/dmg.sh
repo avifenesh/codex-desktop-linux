@@ -54,6 +54,26 @@ dmg_url_cache_key() {
     printf '%s' "$1" | sha256sum | awk '{print $1}'
 }
 
+cached_dmg_metadata_url_sha256() {
+    local metadata_path="$1"
+
+    awk -F= '$1 == "url_sha256" { print $2; exit }' "$metadata_path" 2>/dev/null || true
+}
+
+cached_dmg_metadata_matches_url() {
+    local metadata_path="$1"
+    local dmg_url="$2"
+    local cached_url_sha256
+    local expected_url_sha256
+
+    [ -s "$metadata_path" ] || return 1
+
+    cached_url_sha256="$(cached_dmg_metadata_url_sha256 "$metadata_path")"
+    expected_url_sha256="$(dmg_url_cache_key "$dmg_url")"
+
+    [ -n "$cached_url_sha256" ] && [ "$cached_url_sha256" = "$expected_url_sha256" ]
+}
+
 fetch_dmg_remote_fingerprint() {
     local dmg_url="$1"
     local headers_file="$WORK_DIR/dmg-headers.txt"
@@ -112,8 +132,13 @@ cached_dmg_is_fresh() {
     local remote_fingerprint
 
     if ! remote_fingerprint="$(fetch_dmg_remote_fingerprint "$dmg_url")"; then
-        warn "Could not check upstream DMG metadata; using cached DMG"
-        return 0
+        if cached_dmg_metadata_matches_url "$metadata_path" "$dmg_url"; then
+            warn "Could not check upstream DMG metadata; using cached DMG for matching URL"
+            return 0
+        fi
+
+        warn "Could not check upstream DMG metadata; cached DMG URL metadata does not match current URL"
+        return 1
     fi
     DMG_REMOTE_FINGERPRINT="$remote_fingerprint"
 

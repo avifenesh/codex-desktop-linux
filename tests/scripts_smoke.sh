@@ -1252,6 +1252,27 @@ EOF
     assert_not_contains "$head_failure/curl.log" "GET"
     assert_contains "$head_failure/output.log" "Could not check upstream DMG metadata"
 
+    local head_failure_mismatched_url="$workspace/head-failure-mismatched-url"
+    mkdir -p "$head_failure_mismatched_url"
+    printf '%s' "old" >"$head_failure_mismatched_url/Codex.dmg"
+    cat >"$head_failure_mismatched_url/Codex.dmg.metadata" <<EOF
+url_sha256=$url_sha256
+etag=old-etag
+last_modified=Thu, 04 Jun 2026 00:00:00 GMT
+content_length=3
+EOF
+    if run_dmg_cache_case "$head_failure_mismatched_url" "$head_failure_mismatched_url/output.log" \
+        CODEX_UPSTREAM_DMG_URL="https://example.com/Codex.dmg" \
+        TEST_HEAD_FAIL=1 \
+        TEST_GET_FAIL=1
+    then
+        fail "Expected HEAD failure with mismatched cached URL metadata to attempt refresh and fail"
+    fi
+    [ "$(cat "$head_failure_mismatched_url/Codex.dmg")" = "old" ] || fail "Expected failed mismatched-URL refresh to preserve old DMG"
+    assert_contains "$head_failure_mismatched_url/Codex.dmg.metadata" "etag=old-etag"
+    assert_contains "$head_failure_mismatched_url/curl.log" "GET"
+    assert_contains "$head_failure_mismatched_url/output.log" "cached DMG URL metadata does not match current URL"
+
     local secret_url="$workspace/secret-url"
     mkdir -p "$secret_url"
     run_dmg_cache_case "$secret_url" "$secret_url/output.log" \
