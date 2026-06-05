@@ -373,6 +373,57 @@ apply_source_overlay() {
     done < <(source_repo_overlay_remove_paths "$base_ref")
 }
 
+copy_enabled_local_features() {
+    local config_path source_local_root target_local_root feature_id source_dir target_dir
+
+    config_path="${CODEX_LINUX_FEATURES_CONFIG:-}"
+    if [ -z "$config_path" ] && [ -f "$SOURCE_REPO_DIR/linux-features/features.json" ]; then
+        config_path="$SOURCE_REPO_DIR/linux-features/features.json"
+    fi
+
+    [ -f "$config_path" ] || return 0
+    source_local_root="$SOURCE_REPO_DIR/linux-features/local"
+    [ -d "$source_local_root" ] || return 0
+
+    target_local_root="$MANAGED_REPO_DIR/linux-features/local"
+    while IFS= read -r feature_id; do
+        [ -n "$feature_id" ] || continue
+        source_dir="$source_local_root/$feature_id"
+        [ -f "$source_dir/feature.json" ] || continue
+
+        # If the fetched wrapper gained a real top-level feature with this id,
+        # prefer the upstream feature and do not create a duplicate local id.
+        [ ! -f "$MANAGED_REPO_DIR/linux-features/$feature_id/feature.json" ] || continue
+
+        target_dir="$target_local_root/$feature_id"
+        mkdir -p "$(dirname "$target_dir")"
+        rm -rf "$target_dir"
+        cp -a "$source_dir" "$target_dir"
+    done < <(python3 - "$config_path" <<'PY'
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+except Exception:
+    raise SystemExit(0)
+
+seen = set()
+for item in config.get("enabled", []):
+    if not isinstance(item, str):
+        continue
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", item):
+        continue
+    if item in seen:
+        continue
+    seen.add(item)
+    print(item)
+PY
+)
+}
+
 prepare_build_repo() {
     local branch managed_ref
 
@@ -397,6 +448,7 @@ prepare_build_repo() {
     git -C "$MANAGED_REPO_DIR" reset --hard "$managed_ref" >/dev/null
     git -C "$MANAGED_REPO_DIR" clean -fdx >/dev/null
     apply_source_overlay
+    copy_enabled_local_features
     BUILD_REPO_DIR="$MANAGED_REPO_DIR"
 }
 

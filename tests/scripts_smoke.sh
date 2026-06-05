@@ -5061,6 +5061,86 @@ test_user_local_install_preserves_persisted_x11_preference_on_refresh() {
     assert_contains "$preference_file" "CODEX_USER_LOCAL_OZONE_PLATFORM=auto"
 }
 
+test_user_local_prepare_build_repo_copies_enabled_local_features() {
+    info "Checking user-local managed checkout stages enabled local features"
+    local workspace="$TMP_DIR/user-local-local-features"
+    local origin_repo="$workspace/origin.git"
+    local source_repo="$workspace/source"
+    local managed_repo="$workspace/xdg-data/codex-desktop-linux/managed-repo"
+    local install_env="$workspace/install.env"
+    local feature_config="$workspace/linux-features.json"
+    local staged_local_feature="$managed_repo/linux-features/local/local-tool"
+
+    mkdir -p "$workspace"
+    git init --bare --initial-branch=main "$origin_repo" >/dev/null
+    git clone "$origin_repo" "$source_repo" >/dev/null 2>&1
+    git -C "$source_repo" config user.name "Smoke Test"
+    git -C "$source_repo" config user.email "smoke@example.com"
+
+    mkdir -p "$source_repo/linux-features/repo-feature"
+    printf '%s\n' '# Linux Features' > "$source_repo/linux-features/README.md"
+    printf '%s\n' '{"enabled":[]}' > "$source_repo/linux-features/features.example.json"
+    printf '%s\n' '{"id":"repo-feature","title":"Repo Feature"}' \
+        > "$source_repo/linux-features/repo-feature/feature.json"
+    printf '%s\n' '# Repo Feature' > "$source_repo/linux-features/repo-feature/README.md"
+    git -C "$source_repo" add linux-features
+    git -C "$source_repo" commit -m "base" >/dev/null
+    git -C "$source_repo" push -u origin main >/dev/null
+
+    mkdir -p "$source_repo/linux-features/local/local-tool/nested"
+    mkdir -p "$source_repo/linux-features/local/repo-feature"
+    printf '%s\n' '{"id":"local-tool","title":"Local Tool"}' \
+        > "$source_repo/linux-features/local/local-tool/feature.json"
+    printf '%s\n' '# Local Tool' > "$source_repo/linux-features/local/local-tool/README.md"
+    printf '%s\n' 'payload' > "$source_repo/linux-features/local/local-tool/nested/payload.txt"
+    ln -s nested/payload.txt "$source_repo/linux-features/local/local-tool/payload-link"
+    printf '%s\n' '{"id":"repo-feature","title":"Local Repo Feature"}' \
+        > "$source_repo/linux-features/local/repo-feature/feature.json"
+    cat > "$feature_config" <<'JSON'
+{
+  "enabled": [
+    "local-tool",
+    "repo-feature",
+    "missing-local",
+    "bad id"
+  ]
+}
+JSON
+
+    (
+        export HOME="$workspace/home"
+        export XDG_DATA_HOME="$workspace/xdg-data"
+        export XDG_STATE_HOME="$workspace/xdg-state"
+        export CODEX_LINUX_FEATURES_CONFIG="$feature_config"
+        mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+
+        # shellcheck disable=SC1091
+        source "$REPO_DIR/contrib/user-local-install/files/.local/lib/codex-desktop-linux/common.sh"
+
+        INSTALL_CONFIG_FILE="$install_env"
+        cat > "$INSTALL_CONFIG_FILE" <<EOF
+SOURCE_REPO_DIR=$(printf '%q' "$source_repo")
+MANAGED_REPO_DIR=$(printf '%q' "$managed_repo")
+REPO_ORIGIN_URL=$(printf '%q' "$origin_repo")
+REPO_DEFAULT_BRANCH=$(printf '%q' "main")
+OPT_ROOT=$(printf '%q' "$workspace/opt")
+EOF
+
+        prepare_build_repo
+    )
+
+    assert_file_exists "$staged_local_feature/feature.json"
+    [ "$(cat "$staged_local_feature/nested/payload.txt")" = "payload" ] \
+        || fail "Expected local feature nested payload to be copied"
+    [ -L "$staged_local_feature/payload-link" ] \
+        || fail "Expected local feature symlink to be preserved"
+    [ "$(readlink "$staged_local_feature/payload-link")" = "nested/payload.txt" ] \
+        || fail "Expected local feature symlink target to be preserved"
+    assert_file_not_exists "$managed_repo/linux-features/local/repo-feature/feature.json"
+    assert_file_not_exists "$managed_repo/linux-features/local/missing-local/feature.json"
+    assert_file_exists "$managed_repo/linux-features/repo-feature/feature.json"
+}
+
 test_user_local_prepare_build_repo_updates_existing_single_branch_fetch_refspec() {
     info "Checking user-local managed checkout can switch branches after a single-branch clone"
     local workspace="$TMP_DIR/user-local-single-branch-refspec"
@@ -5396,6 +5476,7 @@ main() {
     test_desktop_entry_doctor_repairs_only_legacy_generated_entries
     test_user_local_install_from_update_defers_record_only_metadata
     test_user_local_install_preserves_persisted_x11_preference_on_refresh
+    test_user_local_prepare_build_repo_copies_enabled_local_features
     test_user_local_prepare_build_repo_updates_existing_single_branch_fetch_refspec
     test_user_local_prepare_build_repo_handles_deleted_overlay_paths
     test_user_local_prepare_build_repo_removes_rename_source_paths
