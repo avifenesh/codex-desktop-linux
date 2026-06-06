@@ -463,24 +463,54 @@ impl ComputerUseLinux {
         )
     )]
     async fn click(&self, Parameters(mut params): Parameters<ClickParams>) -> Json<ActionOutput> {
-        let received = Some(serde_json::json!(params));
+        let received = Some(serde_json::json!(params.clone()));
         // Raise the target window first (if specified) so the click lands on the
         // intended app rather than whatever is stacked on top at that pixel.
-        if let Some(target) = params.window_target() {
-            let _ = focus_window_target(&target).await;
+        let window_target = params.window_target();
+        if params.relative == Some(true) && window_target.is_none() {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "click".to_string(),
+                message: "Relative coordinate clicks require a window target.".to_string(),
+                received,
+            });
+        }
+        if let Some(target) = window_target {
+            let focus = match self.focus_target_for_input(&target).await {
+                Ok(focus) => focus,
+                Err(message) => {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "click".to_string(),
+                        message,
+                        received,
+                    });
+                }
+            };
             tokio::time::sleep(std::time::Duration::from_millis(120)).await;
             // Window-relative coordinates: translate by the window's top-left so
             // the agent can click the pixel it saw in a window-cropped screenshot.
             if params.relative == Some(true) {
-                if let (Some(rx), Some(ry)) = (params.x, params.y) {
-                    if let Ok(windows) = list_windows().await {
-                        if let Ok(window) = resolve_window_target(&windows, &target) {
-                            if let Some(bounds) = &window.bounds {
-                                params.x = Some(bounds.x.unwrap_or(0) + rx);
-                                params.y = Some(bounds.y.unwrap_or(0) + ry);
-                            }
-                        }
-                    }
+                let Some(focus) = focus.as_ref() else {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "click".to_string(),
+                        message: "Relative coordinate clicks require verified target-window focus."
+                            .to_string(),
+                        received,
+                    });
+                };
+                if let Err(message) = apply_window_relative_click_coordinates(&mut params, focus) {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "click".to_string(),
+                        message,
+                        received,
+                    });
                 }
             }
         }
@@ -2368,6 +2398,36 @@ fn window_crop_rect(bounds: &crate::windowing::WindowBounds) -> Option<(i32, i32
     Some((x, y, bounds.width, bounds.height))
 }
 
+fn apply_window_relative_click_coordinates(
+    params: &mut ClickParams,
+    focus: &WindowFocusResult,
+) -> std::result::Result<(), String> {
+    let (relative_x, relative_y) = params
+        .x
+        .zip(params.y)
+        .ok_or_else(|| "Relative coordinate clicks require both x and y.".to_string())?;
+    let bounds = focus.requested_window.bounds.as_ref().ok_or_else(|| {
+        "Relative coordinate clicks require resolved target-window bounds.".to_string()
+    })?;
+    if bounds.width == 0 || bounds.height == 0 {
+        return Err(
+            "Relative coordinate clicks require non-empty target-window bounds.".to_string(),
+        );
+    }
+    let (origin_x, origin_y) = bounds.x.zip(bounds.y).ok_or_else(|| {
+        "Relative coordinate clicks require target-window bounds with an origin.".to_string()
+    })?;
+    let x = origin_x
+        .checked_add(relative_x)
+        .ok_or_else(|| "Relative click x coordinate overflowed.".to_string())?;
+    let y = origin_y
+        .checked_add(relative_y)
+        .ok_or_else(|| "Relative click y coordinate overflowed.".to_string())?;
+    params.x = Some(x);
+    params.y = Some(y);
+    Ok(())
+}
+
 /// Crop a PNG image to `(x, y, w, h)` (clamped to the image), returning the
 /// re-encoded PNG and the actual cropped dimensions.
 fn crop_png(
@@ -3003,6 +3063,88 @@ mod tests {
             backend: GNOME_SHELL_EXTENSION_BACKEND.to_string(),
             terminal: None,
         }
+    }
+
+    fn focus_result_with_bounds(bounds: Option<WindowBounds>) -> WindowFocusResult {
+        let mut requested_window = window_info(
+            42,
+            Some("Target"),
+            Some("target-app"),
+            Some("target-app"),
+            Some(4242),
+        );
+        requested_window.bounds = bounds;
+        let mut focused_window = requested_window.clone();
+        focused_window.focused = true;
+        WindowFocusResult {
+            requested_window,
+            focused_window: Some(focused_window),
+            exact_window_focused: true,
+            app_focused: true,
+            backend: GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+            note: "test focus".to_string(),
+        }
+    }
+
+    #[test]
+    fn relative_click_coordinates_use_verified_window_bounds() {
+        let focus = focus_result_with_bounds(Some(WindowBounds {
+            x: Some(100),
+            y: Some(200),
+            width: 800,
+            height: 600,
+        }));
+        let mut params = ClickParams {
+            x: Some(7),
+            y: Some(9),
+            relative: Some(true),
+            ..Default::default()
+        };
+
+        apply_window_relative_click_coordinates(&mut params, &focus).unwrap();
+
+        assert_eq!((params.x, params.y), (Some(107), Some(209)));
+    }
+
+    #[test]
+    fn relative_click_coordinates_require_window_bounds_origin() {
+        let focus = focus_result_with_bounds(Some(WindowBounds {
+            x: None,
+            y: Some(200),
+            width: 800,
+            height: 600,
+        }));
+        let mut params = ClickParams {
+            x: Some(7),
+            y: Some(9),
+            relative: Some(true),
+            ..Default::default()
+        };
+
+        let error = apply_window_relative_click_coordinates(&mut params, &focus).unwrap_err();
+
+        assert!(error.contains("bounds with an origin"));
+        assert_eq!((params.x, params.y), (Some(7), Some(9)));
+    }
+
+    #[test]
+    fn relative_click_coordinates_require_xy() {
+        let focus = focus_result_with_bounds(Some(WindowBounds {
+            x: Some(100),
+            y: Some(200),
+            width: 800,
+            height: 600,
+        }));
+        let mut params = ClickParams {
+            x: Some(7),
+            relative: Some(true),
+            ..Default::default()
+        };
+
+        let error = apply_window_relative_click_coordinates(&mut params, &focus).unwrap_err();
+
+        assert!(error.contains("both x and y"));
+        assert_eq!((params.x, params.y), (Some(7), None));
     }
 
     #[test]
