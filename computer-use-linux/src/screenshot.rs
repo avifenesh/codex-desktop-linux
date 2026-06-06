@@ -11,8 +11,10 @@ use std::{
     fs,
     io::Cursor,
     path::{Path, PathBuf},
+    process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::process::Command;
 use zbus::{
     message::{Message, Type as MessageType},
     zvariant::{OwnedObjectPath, OwnedValue, Value},
@@ -141,17 +143,83 @@ impl ScreenshotPayloadOptions {
     }
 }
 
+/// Environment variable forcing a single capture backend, skipping the
+/// fallback chain. Accepts `gnome-shell`, `portal`, or `gnome-screenshot`.
+const SCREENSHOT_BACKEND_ENV: &str = "CODEX_COMPUTER_USE_SCREENSHOT_BACKEND";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenshotBackend {
+    GnomeShell,
+    Portal,
+    GnomeScreenshot,
+}
+
+impl ScreenshotBackend {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "gnome-shell" | "gnome_shell" | "shell" => Some(Self::GnomeShell),
+            "portal" | "xdg-portal" | "xdg_portal" => Some(Self::Portal),
+            "gnome-screenshot" | "gnome_screenshot" => Some(Self::GnomeScreenshot),
+            _ => None,
+        }
+    }
+
+    async fn capture(self) -> Result<RawScreenshotCapture> {
+        match self {
+            Self::GnomeShell => capture_with_gnome_shell().await,
+            Self::Portal => capture_with_portal().await,
+            Self::GnomeScreenshot => capture_with_gnome_screenshot().await,
+        }
+    }
+}
+
 pub async fn capture_screenshot_raw() -> Result<RawScreenshotCapture> {
     hydrate_session_bus_env();
 
-    match capture_with_gnome_shell().await {
-        Ok(capture) => Ok(capture),
-        Err(gnome_error) => match capture_with_portal().await {
-            Ok(capture) => Ok(capture),
-            Err(portal_error) => Err(anyhow!(
-                "GNOME Shell screenshot failed: {gnome_error}; XDG portal screenshot failed: {portal_error}"
-            )),
-        },
+    // Explicit override: use exactly the requested backend, no fallback. Lets
+    // background/systemd contexts pin `gnome-screenshot` when the DBus paths are
+    // blocked, and aids debugging.
+    if let Some(forced) = forced_backend()? {
+        return forced.capture().await;
+    }
+
+    // The Shell and portal DBus paths fail for background processes (systemd
+    // user services, non-interactive parent shells): GNOME Shell's
+    // DBusSenderChecker rejects unknown bus names, and the portal cancels with
+    // response code 2 when there is no foreground window. `gnome-screenshot`
+    // claims an allowlisted bus name and works regardless, so it is the final
+    // fallback. See issue #20.
+    let gnome_error = match capture_with_gnome_shell().await {
+        Ok(capture) => return Ok(capture),
+        Err(error) => error,
+    };
+    let portal_error = match capture_with_portal().await {
+        Ok(capture) => return Ok(capture),
+        Err(error) => error,
+    };
+    let cli_error = match capture_with_gnome_screenshot().await {
+        Ok(capture) => return Ok(capture),
+        Err(error) => error,
+    };
+
+    Err(anyhow!(
+        "GNOME Shell screenshot failed: {gnome_error}; \
+         XDG portal screenshot failed: {portal_error}; \
+         gnome-screenshot fallback failed: {cli_error}"
+    ))
+}
+
+fn forced_backend() -> Result<Option<ScreenshotBackend>> {
+    match std::env::var(SCREENSHOT_BACKEND_ENV) {
+        Ok(value) if !value.trim().is_empty() => {
+            ScreenshotBackend::parse(&value).map(Some).ok_or_else(|| {
+                anyhow!(
+                    "{SCREENSHOT_BACKEND_ENV}={value:?} is not a recognized backend \
+                     (expected gnome-shell, portal, or gnome-screenshot)"
+                )
+            })
+        }
+        _ => Ok(None),
     }
 }
 
@@ -300,6 +368,61 @@ async fn capture_with_portal() -> Result<RawScreenshotCapture> {
     let path = file_uri_to_path(&uri)?;
 
     read_png_as_capture(path, "xdg-desktop-portal", ScreenshotCleanup::Preserve).await
+}
+
+/// Upper bound on how long we wait for `gnome-screenshot` before killing it.
+/// Matches the portal timeout: a hung capture must not block the tool forever.
+const GNOME_SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(20);
+
+async fn capture_with_gnome_screenshot() -> Result<RawScreenshotCapture> {
+    let path = temp_png_path("gnome-screenshot");
+    let filename = path
+        .to_str()
+        .context("temporary screenshot path is not valid UTF-8")?;
+
+    // `-f <file>` writes a full-screen PNG without prompting; no portal, no
+    // foreground window required. `tokio::process::Command` searches PATH and
+    // provides an async, non-polling wait.
+    let mut child = match Command::new("gnome-screenshot")
+        .args(["-f", filename])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            cleanup_gnome_requested_path(&path);
+            return Err(error).context("failed to spawn gnome-screenshot");
+        }
+    };
+
+    // A hung capture must not block the tool forever, so bound the wait and
+    // kill the child if it outlives the deadline.
+    let status = match tokio::time::timeout(GNOME_SCREENSHOT_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
+            cleanup_gnome_requested_path(&path);
+            return Err(error).context("failed to wait for gnome-screenshot");
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            cleanup_gnome_requested_path(&path);
+            bail!("gnome-screenshot timed out");
+        }
+    };
+
+    if !status.success() {
+        cleanup_gnome_requested_path(&path);
+        bail!("gnome-screenshot exited with {status}");
+    }
+
+    read_png_as_capture(
+        path.clone(),
+        "gnome-screenshot",
+        ScreenshotCleanup::DeletePath(path),
+    )
+    .await
 }
 
 async fn portal_response_stream(connection: &zbus::Connection) -> Result<MessageStream> {
@@ -605,6 +728,43 @@ mod tests {
             file_uri_to_path("file:///tmp/Codex%20Screenshot.png").unwrap(),
             PathBuf::from("/tmp/Codex Screenshot.png")
         );
+    }
+
+    #[test]
+    fn parses_known_backend_names() {
+        assert_eq!(
+            ScreenshotBackend::parse("gnome-shell"),
+            Some(ScreenshotBackend::GnomeShell)
+        );
+        assert_eq!(
+            ScreenshotBackend::parse("  Portal "),
+            Some(ScreenshotBackend::Portal)
+        );
+        assert_eq!(
+            ScreenshotBackend::parse("GNOME_SCREENSHOT"),
+            Some(ScreenshotBackend::GnomeScreenshot)
+        );
+        assert_eq!(ScreenshotBackend::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn forced_backend_reads_env_override() {
+        // Only this test touches SCREENSHOT_BACKEND_ENV, so no cross-test race.
+        std::env::set_var(SCREENSHOT_BACKEND_ENV, "gnome-screenshot");
+        assert_eq!(
+            forced_backend().unwrap(),
+            Some(ScreenshotBackend::GnomeScreenshot)
+        );
+
+        std::env::set_var(SCREENSHOT_BACKEND_ENV, "   ");
+        assert_eq!(forced_backend().unwrap(), None);
+
+        std::env::set_var(SCREENSHOT_BACKEND_ENV, "bogus");
+        let error = forced_backend().unwrap_err();
+        assert!(error.to_string().contains("not a recognized backend"));
+
+        std::env::remove_var(SCREENSHOT_BACKEND_ENV);
+        assert_eq!(forced_backend().unwrap(), None);
     }
 
     #[test]
