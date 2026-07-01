@@ -743,6 +743,7 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-launch-actions",
     "linux-hotkey-window-prewarm",
     "linux-git-origins-source-fallback",
+    "linux-external-open-env",
     "linux-xdg-documents-dir",
     "linux-projectless-xdg-documents-dir",
     "linux-workspace-root-open-targets",
@@ -806,6 +807,7 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-opaque-background",
     "linux-avatar-overlay-mouse-passthrough",
     "linux-tray",
+    "linux-external-open-env",
   ]) {
     assert.equal(
       descriptors.find((descriptor) => descriptor.id === id)?.ciPolicy,

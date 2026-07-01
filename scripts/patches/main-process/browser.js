@@ -318,9 +318,55 @@ function applyLinuxChromeExtensionStatusPatch(currentSource) {
   return currentSource.slice(0, blockStart) + replacement + currentSource.slice(blockEnd);
 }
 
+function buildLinuxExternalOpenHelpers() {
+  return (
+    `function codexLinuxExternalOpenEnv(){let __codexEnv={...process.env};` +
+    `for(let __codexKey of[\`LD_LIBRARY_PATH\`,\`LD_PRELOAD\`,\`NODE_OPTIONS\`,\`NODE_PATH\`,\`NODE_REPL_EXTERNAL_MODULE\`,\`ELECTRON_RUN_AS_NODE\`,\`ELECTRON_NO_ASAR\`,\`ELECTRON_ENABLE_LOGGING\`,\`VSCODE_NODE_OPTIONS\`,\`VSCODE_NODE_REPL_EXTERNAL_MODULE\`,\`npm_config_node_options\`,\`NPM_CONFIG_NODE_OPTIONS\`,\`CHROME_DESKTOP\`,\`ELECTRON_RENDERER_URL\`,\`CODEX_ELECTRON_RESOURCES_PATH\`,\`CODEX_ELECTRON_USER_DATA_DIR\`,\`CODEX_LINUX_APP_ID\`,\`CODEX_LINUX_APP_DISPLAY_NAME\`,\`CODEX_LINUX_WEBVIEW_PORT\`])delete __codexEnv[__codexKey];` +
+    `return __codexEnv}` +
+    `function codexLinuxLaunchExternalUrl(__codexUrl){return new Promise((__codexResolve,__codexReject)=>{let __codexSettled=!1,__codexTimer;try{let __codexChild=require(\`node:child_process\`).spawn(\`xdg-open\`,[__codexUrl],{detached:!0,stdio:\`ignore\`,windowsHide:!0,env:codexLinuxExternalOpenEnv()});__codexTimer=setTimeout(()=>{__codexSettled=!0,__codexChild.unref?.(),__codexResolve()},400),__codexTimer.unref?.(),__codexChild.on(\`error\`,__codexError=>{__codexSettled||(clearTimeout(__codexTimer),__codexReject(__codexError))}),__codexChild.on(\`close\`,__codexCode=>{__codexSettled||(clearTimeout(__codexTimer),__codexCode===0?__codexResolve():__codexReject(Error(\`Linux external open failed\`)))})}catch(__codexError){clearTimeout(__codexTimer),__codexReject(__codexError)}})}` +
+    `function codexLinuxPatchExternalOpen(__codexElectron){if(process.platform!==\`linux\`||__codexElectron?.shell==null||typeof __codexElectron.shell.openExternal!==\`function\`)return __codexElectron;if(__codexElectron.shell.openExternal.__codexLinuxExternalOpenPatched)return __codexElectron;let __codexOriginalOpenExternal=__codexElectron.shell.openExternal.bind(__codexElectron.shell);async function __codexOpenExternal(__codexUrl,__codexOptions){if(typeof __codexUrl===\`string\`)return codexLinuxLaunchExternalUrl(__codexUrl);return __codexOriginalOpenExternal(__codexUrl,__codexOptions)}__codexOpenExternal.__codexLinuxExternalOpenPatched=!0,__codexElectron.shell.openExternal=__codexOpenExternal;return __codexElectron}`
+  );
+}
+
+function applyLinuxExternalOpenEnvPatch(currentSource) {
+  const hasHelper = currentSource.includes("function codexLinuxPatchExternalOpen(");
+  let patchedAnyElectronRequire = false;
+  const patchedSource = currentSource.replace(
+    /([A-Za-z_$][\w$]*=)require\(([`'"])electron\2\)/g,
+    (_match, prefix, quote) => {
+      patchedAnyElectronRequire = true;
+      return `${prefix}codexLinuxPatchExternalOpen(require(${quote}electron${quote}))`;
+    },
+  );
+
+  if (!patchedAnyElectronRequire) {
+    if (!hasHelper) {
+      console.warn(
+        "WARN: Could not find Electron require initializer — skipping Linux external open environment patch",
+      );
+    }
+    return currentSource;
+  }
+
+  if (hasHelper) {
+    return patchedSource;
+  }
+
+  const strictDirective = '"use strict";';
+  const helperInsertionIndex = currentSource.startsWith(strictDirective)
+    ? strictDirective.length
+    : 0;
+  return (
+    patchedSource.slice(0, helperInsertionIndex) +
+    buildLinuxExternalOpenHelpers() +
+    patchedSource.slice(helperInsertionIndex)
+  );
+}
+
 module.exports = {
   applyBrowserUseNodeReplApprovalPatch,
   applyBrowserUseNodeReplApprovalAssets,
+  applyLinuxExternalOpenEnvPatch,
   applyLinuxBrowserUseRouteLivenessPatch,
   applyLinuxChromeExtensionStatusPatch,
 };
