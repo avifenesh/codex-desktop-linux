@@ -809,7 +809,6 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-opaque-background",
     "linux-avatar-overlay-mouse-passthrough",
     "linux-tray",
-    "linux-external-open-env",
   ]) {
     assert.equal(
       descriptors.find((descriptor) => descriptor.id === id)?.ciPolicy,
@@ -817,6 +816,11 @@ test("default core patch descriptors are grouped and unique", () => {
       `${id} should block upstream builds when it drifts`,
     );
   }
+  assert.equal(
+    descriptors.find((descriptor) => descriptor.id === "linux-external-open-env")?.ciPolicy,
+    "optional",
+    "external URL handoff drift should warn without blocking install/rebuild",
+  );
   assert.equal(
     descriptors.find((descriptor) => descriptor.id === "linux-workspace-root-open-targets")?.ciPolicy,
     "optional",

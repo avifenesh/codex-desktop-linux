@@ -6,6 +6,6 @@ module.exports = {
   id: "linux-external-open-env",
   phase: "main-bundle",
   order: 900,
-  ciPolicy: "required-upstream",
+  ciPolicy: "optional",
   apply: applyLinuxExternalOpenEnvPatch,
 };
