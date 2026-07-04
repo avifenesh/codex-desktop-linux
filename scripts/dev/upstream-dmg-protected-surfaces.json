@@ -742,6 +742,60 @@
       }
     },
     {
+      "id": "work_louder_control_surface",
+      "title": "Work Louder control-surface bundle hooks",
+      "category": "native",
+      "pathPatterns": [
+        "codex-micro-service.*\\.js$",
+        "@worklouder/(device-kit-oai|wl-device-kit)/package\\.json$",
+        "(^|/)node-hid/package\\.json$",
+        "(^|/)node-hid/prebuilds/[^/]+/node-napi-v[0-9]+\\.node$"
+      ],
+      "patchNamePatterns": [
+        "work.*louder",
+        "micro",
+        "hid",
+        "control.*surface"
+      ],
+      "requiredEvidence": [
+        {
+          "id": "micro-service-entrypoint",
+          "pathPatterns": [
+            "codex-micro-service.*\\.js$"
+          ],
+          "contentNeedles": [
+            "@worklouder/device-kit-oai",
+            "DeviceType",
+            "Project2077"
+          ]
+        },
+        {
+          "id": "work-louder-device-kits",
+          "pathPatterns": [
+            "@worklouder/(device-kit-oai|wl-device-kit)"
+          ],
+          "contentNeedles": [
+            "@worklouder/device-kit-oai",
+            "@worklouder/wl-device-kit",
+            "node-hid"
+          ]
+        },
+        {
+          "id": "hid-runtime-package",
+          "pathPatterns": [
+            "(^|/)node-hid/package\\.json$",
+            "(^|/)node-hid/prebuilds/"
+          ],
+          "contentNeedles": [
+            "node-hid"
+          ],
+          "nativeBinaryPatterns": [
+            "(^|/)node-hid/prebuilds/[^/]+/node-napi-v[0-9]+\\.node$"
+          ]
+        }
+      ]
+    },
+    {
       "id": "native_bridge_sidecars",
       "title": "Native bridge sidecars and mirrored plugin substrate",
       "category": "native",
