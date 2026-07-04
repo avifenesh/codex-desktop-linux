@@ -1469,7 +1469,8 @@ test("Linux remote mobile conversation hydration patch handles current app-serve
   assert.doesNotMatch(patched, /n\.params\?\.threadId/);
   assert.match(patched, /Skipping hydration for ambiguous turn\/started/);
   assert.match(patched, /codexLinuxRemoteMobilePendingNotifications\?\?=new Map/);
-  assert.match(patched, /codexLinuxRemoteMobileInFlightHydrations\?\?=new Map/);
+  assert.match(patched, /codexLinuxRemoteMobileInFlightHydrations\?\?=new Set/);
+  assert.match(patched, /dedupedNotification:p>=0/);
   assert.match(patched, /this\.readThread\(d,\{includeTurns:!1\}\)/);
   assert.match(patched, /Hydrating conversation for turn\/started/);
   assert.match(patched, /Queueing turn\/started for hydrating conversation/);
@@ -1639,6 +1640,115 @@ test("Linux remote mobile hydration dedupes concurrent unknown turn reads", asyn
   assert.equal(manager.codexLinuxRemoteMobilePendingNotifications.has("thread-a"), false);
   assert.equal(manager.codexLinuxRemoteMobileInFlightHydrations.has("thread-a"), false);
   assert.deepEqual(streamed, ["thread-a", "thread-a"]);
+});
+
+test("Linux remote mobile hydration coalesces duplicate pending turn starts", async () => {
+  const source = syntheticAppServerManagerSignalsBundle();
+  const patched = applyLinuxRemoteMobileConversationHydrationPatch(source);
+  const context = {
+    module: { exports: {} },
+    I: (value) => value,
+    setTimeout,
+    z: { error() {}, warning() {} },
+  };
+  vm.runInNewContext(`${patched};module.exports=T;`, context);
+  const manager = new context.module.exports();
+  const readThreadIds = [];
+  const streamed = [];
+  let resolveRead;
+
+  manager.conversations = new Map();
+  manager.readThread = (threadId) => {
+    readThreadIds.push(threadId);
+    return new Promise((resolve) => {
+      resolveRead = () => resolve({ thread: { id: threadId } });
+    });
+  };
+  manager.upsertConversationFromThread = (thread) => {
+    manager.conversations.set(thread.id, thread);
+  };
+  manager.markConversationStreaming = (threadId) => {
+    streamed.push(threadId);
+  };
+  manager.updateConversationState = () => {};
+
+  manager.onNotification("turn/started", {
+    threadId: "turn-a",
+    turn: { id: "turn-a", threadId: "thread-a", marker: "first" },
+  });
+  manager.onNotification("turn/started", {
+    threadId: "turn-a",
+    turn: { id: "turn-a", threadId: "thread-a", marker: "latest" },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(readThreadIds, ["thread-a"]);
+  assert.equal(manager.codexLinuxRemoteMobilePendingNotifications.get("thread-a").length, 1);
+  assert.equal(
+    manager.codexLinuxRemoteMobilePendingNotifications.get("thread-a")[0].params.turn.marker,
+    "latest",
+  );
+
+  resolveRead();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(manager.codexLinuxRemoteMobilePendingNotifications.has("thread-a"), false);
+  assert.equal(manager.codexLinuxRemoteMobileInFlightHydrations.has("thread-a"), false);
+  assert.deepEqual(streamed, ["thread-a"]);
+});
+
+test("Linux remote mobile hydration does not coalesce non-turn pending events", async () => {
+  const source = syntheticAppServerManagerSignalsBundle();
+  const patched = applyLinuxRemoteMobileConversationHydrationPatch(source);
+  const context = {
+    module: { exports: {} },
+    I: (value) => value,
+    setTimeout,
+    z: { error() {}, warning() {} },
+  };
+  vm.runInNewContext(`${patched};module.exports=T;`, context);
+  const manager = new context.module.exports();
+  let resolveRead;
+
+  manager.conversations = new Map();
+  manager.readThread = (threadId) => {
+    return new Promise((resolve) => {
+      resolveRead = () => resolve({ thread: { id: threadId } });
+    });
+  };
+  manager.upsertConversationFromThread = (thread) => {
+    manager.conversations.set(thread.id, thread);
+  };
+  manager.markConversationStreaming = () => {};
+  manager.updateConversationState = () => {};
+
+  manager.onNotification("turn/started", {
+    threadId: "thread-a",
+    turn: { threadId: "thread-a", marker: "missing-turn-id" },
+  });
+  manager.onNotification("item/started", {
+    item: { id: "item-a" },
+    threadId: "thread-a",
+    turnId: "turn-a",
+    startedAtMs: 1,
+  });
+  manager.onNotification("turn/started", {
+    threadId: "turn-a",
+    turn: { id: "turn-a", threadId: "thread-a", marker: "identified-turn" },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const pending = manager.codexLinuxRemoteMobilePendingNotifications.get("thread-a");
+  assert.equal(pending.length, 3);
+  assert.deepEqual(
+    Array.from(pending, (notification) => notification.method),
+    ["turn/started", "item/started", "turn/started"],
+  );
+
+  resolveRead();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(manager.codexLinuxRemoteMobilePendingNotifications.has("thread-a"), false);
 });
 
 test("Linux remote mobile conversation hydration patch retries transient and missing thread reads", () => {
