@@ -53,6 +53,38 @@ const registry = {
       },
     },
     {
+      id: "work_louder_control_surface",
+      title: "Work Louder control-surface bundle hooks",
+      category: "native",
+      pathPatterns: [
+        "codex-micro-service.*\\.js$",
+        "@worklouder/(device-kit-oai|wl-device-kit)/package\\.json$",
+        "(^|/)node-hid/package\\.json$",
+        "(^|/)node-hid/prebuilds/[^/]+/node-napi-v[0-9]+\\.node$",
+      ],
+      patchNamePatterns: ["work.*louder", "micro", "hid", "control.*surface"],
+      requiredEvidence: [
+        {
+          id: "micro-service-entrypoint",
+          pathPatterns: ["codex-micro-service.*\\.js$"],
+          contentNeedles: ["@worklouder/device-kit-oai", "DeviceType", "Project2077"],
+        },
+        {
+          id: "work-louder-device-kits",
+          pathPatterns: ["@worklouder/(device-kit-oai|wl-device-kit)"],
+          contentNeedles: ["@worklouder/device-kit-oai", "@worklouder/wl-device-kit", "node-hid"],
+        },
+        {
+          id: "hid-runtime-package",
+          pathPatterns: ["(^|/)node-hid/package\\.json$", "(^|/)node-hid/prebuilds/"],
+          contentNeedles: ["node-hid"],
+          nativeBinaryPatterns: [
+            "(^|/)node-hid/prebuilds/[^/]+/node-napi-v[0-9]+\\.node$",
+          ],
+        },
+      ],
+    },
+    {
       id: "dictation_transcript_finalization",
       title: "Dictation transcript finalization",
       category: "webview",
@@ -151,6 +183,60 @@ function writeFile(filePath, content, mode) {
   fs.writeFileSync(filePath, content, mode == null ? undefined : { mode });
 }
 
+function writeWorkLouderControlSurface({ asarExtracted, includeHid = true, resources }) {
+  const deviceKit = path.join(
+    resources,
+    "app.asar.unpacked/node_modules/@worklouder/device-kit-oai",
+  );
+  const wlKit = path.join(deviceKit, "node_modules/@worklouder/wl-device-kit");
+  const hid = path.join(wlKit, "node_modules/node-hid");
+
+  writeFile(
+    path.join(asarExtracted, ".vite/build/codex-micro-service-fixture.js"),
+    [
+      "import { DeviceType, WLDeviceDiscovery } from '@worklouder/device-kit-oai';",
+      "const device = DeviceType.Project2077;",
+      "WLDeviceDiscovery.start(device);",
+      "require('node-hid');",
+    ].join("\n"),
+  );
+  writeJson(path.join(deviceKit, "package.json"), {
+    name: "@worklouder/device-kit-oai",
+    dependencies: {
+      "@worklouder/wl-device-kit": "1.0.0",
+    },
+  });
+  writeFile(
+    path.join(deviceKit, "dist/index.js"),
+    "export { DeviceType, WLDeviceDiscovery } from '@worklouder/wl-device-kit';",
+  );
+  writeJson(path.join(wlKit, "package.json"), {
+    name: "@worklouder/wl-device-kit",
+    dependencies: {
+      "node-hid": "3.1.0",
+    },
+  });
+  writeFile(
+    path.join(wlKit, "dist/index.js"),
+    [
+      "const HID = require('node-hid');",
+      "export const DeviceType = { Project2077: 'Project2077' };",
+      "export class WLDeviceDiscovery { static start() { return HID; } }",
+    ].join(" "),
+  );
+  if (includeHid) {
+    writeJson(path.join(hid, "package.json"), {
+      name: "node-hid",
+      version: "3.1.0",
+    });
+    writeFile(
+      path.join(hid, "prebuilds/HID-darwin-arm64/node-napi-v4.node"),
+      "Mach-O node-hid Project2077",
+      0o755,
+    );
+  }
+}
+
 function createFixtureApp(root, variant = "baseline") {
   const appDir = path.join(root, `${variant}.app`);
   const resources = path.join(appDir, "Contents/Resources");
@@ -181,6 +267,14 @@ function createFixtureApp(root, variant = "baseline") {
       path.join(asarExtracted, "future-skysight-bridge.js"),
       "ipcMain.handle('futureSkysightBridge', () => sky_snapshot_v2())",
     );
+  }
+
+  if (variant === "candidate" || variant === "missing-work-louder-hid") {
+    writeWorkLouderControlSurface({
+      asarExtracted,
+      includeHid: variant !== "missing-work-louder-hid",
+      resources,
+    });
   }
 
   if (variant !== "candidate") {
@@ -341,6 +435,62 @@ test("marks Chronicle settings toggle surface partial when the Memory master tog
       surface.missingAnchors
         .find((anchor) => anchor.id === "memory-master-toggle-chronicle-disable")
         .missingNeedles.includes("chronicleDisable"),
+    );
+  }));
+
+test("tracks Work Louder control-surface hooks when the service, kits, and HID runtime are bundled", () =>
+  withTempDir((workspace) => {
+    const appDir = createFixtureApp(workspace, "candidate");
+    const protectedSurfaces = extractProtectedSurfaces({
+      inventory: createInventory({ registry, sourcePath: appDir }),
+      registry,
+      repoRoot: process.cwd(),
+    });
+    const surface = protectedSurfaces.surfacesById.work_louder_control_surface;
+
+    assert.equal(surface.status, "PRESENT");
+    assert.equal(surface.linuxSubstrate.status, "UNKNOWN");
+    assert.ok(
+      surface.satisfiedAnchors.some((anchor) => anchor.id === "micro-service-entrypoint"),
+    );
+    assert.ok(
+      surface.satisfiedAnchors.some((anchor) => anchor.id === "work-louder-device-kits"),
+    );
+    assert.ok(
+      surface.satisfiedAnchors.some((anchor) => anchor.id === "hid-runtime-package"),
+    );
+    assert.ok(
+      surface.evidence.some((entry) => entry.path.includes("codex-micro-service-fixture.js")),
+    );
+    assert.ok(
+      surface.requiredAnchors
+        .find((anchor) => anchor.id === "hid-runtime-package")
+        .matchedPaths.some((entryPath) => entryPath.includes("node-hid/prebuilds")),
+    );
+  }));
+
+test("marks Work Louder control-surface hooks partial when the HID runtime disappears", () =>
+  withTempDir((workspace) => {
+    const appDir = createFixtureApp(workspace, "missing-work-louder-hid");
+    const protectedSurfaces = extractProtectedSurfaces({
+      inventory: createInventory({ registry, sourcePath: appDir }),
+      registry,
+      repoRoot: process.cwd(),
+    });
+    const surface = protectedSurfaces.surfacesById.work_louder_control_surface;
+
+    assert.equal(surface.status, "PARTIAL");
+    assert.ok(
+      surface.satisfiedAnchors.some((anchor) => anchor.id === "micro-service-entrypoint"),
+    );
+    assert.ok(
+      surface.satisfiedAnchors.some((anchor) => anchor.id === "work-louder-device-kits"),
+    );
+    assert.ok(surface.missingAnchors.some((anchor) => anchor.id === "hid-runtime-package"));
+    assert.ok(
+      surface.missingAnchors
+        .find((anchor) => anchor.id === "hid-runtime-package")
+        .missingNeedles.some((needle) => needle.startsWith("nativeBinary:")),
     );
   }));
 
@@ -708,6 +858,7 @@ test("CLI loads the checked-in registry and writes the report bundle", () =>
     assert.equal(protectedSurfaces.surfacesById.record_and_replay_plugin.status, "PRESENT");
     assert.equal(protectedSurfaces.surfacesById.codex_chronicle.status, "PRESENT");
     assert.equal(protectedSurfaces.surfacesById.chronicle_settings_toggles.status, "PRESENT");
+    assert.equal(protectedSurfaces.surfacesById.work_louder_control_surface.status, "PRESENT");
   }));
 
 test("CLI exits nonzero with --fail-on-blockers when acceptance blockers are present", () =>
