@@ -13,6 +13,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   shared-memory buffers stay in RAM-backed `/dev/shm` instead of disk-backed
   temp storage, which improves rendering performance. Override with
   `CODEX_ELECTRON_DISABLE_DEV_SHM_USAGE=auto|0|1`.
+- The launcher now adds `--force-renderer-accessibility` only when an
+  assistive technology is detected (Orca or brltty running, the GNOME
+  screen-reader setting, or the `GNOME_ACCESSIBILITY` /
+  `QT_LINUX_ACCESSIBILITY_ALWAYS_ON` / `ACCESSIBILITY_ENABLED` env markers).
+  Keeping the Chromium accessibility engine on in every renderer measurably
+  slows the webview UI, and the WSLg and wayland-gpu profiles already
+  skipped it for that reason. `CODEX_FORCE_RENDERER_ACCESSIBILITY=1|0`
+  still overrides the detection in both directions.
 - Refactored ASAR patching internals so `scripts/patch-linux-window-ui.js` is a
   CLI-only entrypoint and patch descriptors/implementations live under
   `scripts/patches/`.

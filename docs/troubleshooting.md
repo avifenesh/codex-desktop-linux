@@ -15,6 +15,7 @@
 | Transparent or dark left sidebar | Check whether the Linux opaque-window patch was applied, then rebuild with a current checkout |
 | Sandbox errors | The launcher already sets `--no-sandbox` |
 | Renderer crashes in containers with a tiny `/dev/shm` | The launcher keeps `--disable-dev-shm-usage` automatically when `/dev/shm` is missing or below 1 GiB; force it with `CODEX_ELECTRON_DISABLE_DEV_SHM_USAGE=1` |
+| Screen reader does not read the app UI | Renderer accessibility is forced automatically when Orca, brltty, the GNOME screen-reader setting, or accessibility env markers are detected; force it with `CODEX_FORCE_RENDERER_ACCESSIBILITY=1` |
 | Stale install / cached DMG | `make build-app-fresh` removes the generated app and cached DMG, then downloads current upstream |
 | Computer Use plugin invisible in UI | Enable the Computer Use UI opt-in; upstream server/account rollout can still hide some controls |
 | Computer Use `doctor` reports no input backend | Grant `/dev/uinput`, enable XDG RemoteDesktop portal, or start `ydotoold` / `ydotool.service` |

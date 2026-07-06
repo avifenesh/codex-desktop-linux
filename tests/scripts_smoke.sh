@@ -3931,12 +3931,22 @@ open(output_path, "w", encoding="utf-8").write(probe)
 PY
     chmod +x "$launcher_probe"
 
-    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe --x11 -- --use-gl=angle)"
+    local at_stub_dir="$TMP_DIR/assistive-tech-stubs"
+    mkdir -p "$at_stub_dir/none" "$at_stub_dir/orca" "$at_stub_dir/screenreader"
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$at_stub_dir/none/pgrep"
+    printf '%s\n' '#!/usr/bin/env bash' "printf 'false\\n'" > "$at_stub_dir/none/gsettings"
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$at_stub_dir/orca/pgrep"
+    printf '%s\n' '#!/usr/bin/env bash' "printf 'false\\n'" > "$at_stub_dir/orca/gsettings"
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$at_stub_dir/screenreader/pgrep"
+    printf '%s\n' '#!/usr/bin/env bash' "printf 'true\\n'" > "$at_stub_dir/screenreader/gsettings"
+    chmod +x "$at_stub_dir"/*/pgrep "$at_stub_dir"/*/gsettings
+
+    output="$(env -i PATH="$at_stub_dir/none:$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe --x11 -- --use-gl=angle)"
     [[ "$output" == *"electron=<--use-gl=angle>"* ]] || fail "launcher must pass Electron args after -- without the separator: $output"
     [[ "$output" != *"electron=<--><--use-gl=angle>"* ]] || fail "launcher must not pass the -- separator to Electron: $output"
     [[ "$output" == *"<--ozone-platform=x11>"* ]] || fail "launcher --x11 must still set the Electron ozone platform: $output"
     [[ "$output" == *"comp=0"* && "$output" != *"<--disable-gpu-compositing>"* ]] || fail "default Linux profile must keep GPU compositing enabled: $output"
-    [[ "$output" == *"renderer_accessibility=1"* && "$output" == *"<--force-renderer-accessibility>"* ]] || fail "default Linux profile must still force renderer accessibility: $output"
+    [[ "$output" == *"renderer_accessibility=0"* && "$output" != *"<--force-renderer-accessibility>"* ]] || fail "default Linux profile must not force renderer accessibility without assistive technology: $output"
 
     output="$(env -i PATH="$PATH" HOME="$HOME" XDG_SESSION_TYPE=wayland CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe)"
     [[ "$output" == *"comp=1"* && "$output" == *"<--disable-gpu-compositing>"* ]] || fail "Wayland default profile must disable GPU compositing for side-panel stability: $output"
@@ -4020,17 +4030,20 @@ EOF
     output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wayland-gpu CODEX_FORCE_RENDERER_ACCESSIBILITY=1 "$launcher_probe" probe)"
     [[ "$output" == *"renderer_accessibility=1"* && "$output" == *"<--force-renderer-accessibility>"* ]] || fail "CODEX_FORCE_RENDERER_ACCESSIBILITY=1 must force renderer accessibility under wayland-gpu: $output"
 
-    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wayland-gpu "$launcher_probe" probe --x11)"
+    output="$(env -i PATH="$at_stub_dir/none:$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wayland-gpu "$launcher_probe" probe --x11)"
     [[ "$output" == *"mode=wayland-gpu"* && "$output" == *"ozone_platform=x11"* ]] || fail "explicit --x11 must override the wayland-gpu platform: $output"
-    [[ "$output" == *"renderer_accessibility=1"* && "$output" == *"<--force-renderer-accessibility>"* ]] || fail "wayland-gpu with explicit --x11 must keep X11 renderer accessibility default: $output"
+    [[ "$output" == *"renderer_accessibility=0"* && "$output" != *"<--force-renderer-accessibility>"* ]] || fail "wayland-gpu with explicit --x11 must fall back to assistive-technology detection: $output"
 
-    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wayland-gpu "$launcher_probe" probe --safe-mode)"
+    output="$(env -i PATH="$at_stub_dir/orca:$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wayland-gpu "$launcher_probe" probe --x11)"
+    [[ "$output" == *"renderer_accessibility=1"* && "$output" == *"<--force-renderer-accessibility>"* ]] || fail "wayland-gpu with explicit --x11 must force renderer accessibility when a screen reader runs: $output"
+
+    output="$(env -i PATH="$at_stub_dir/none:$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wayland-gpu "$launcher_probe" probe --safe-mode)"
     [[ "$output" == *"mode=wayland-gpu"* && "$output" == *"ozone_platform=x11"* && "$output" == *"gpu=0"* ]] || fail "safe-mode must override wayland-gpu to X11 software rendering: $output"
-    [[ "$output" == *"renderer_accessibility=1"* && "$output" == *"<--force-renderer-accessibility>"* ]] || fail "wayland-gpu with safe-mode must keep X11 renderer accessibility default: $output"
+    [[ "$output" == *"renderer_accessibility=0"* && "$output" != *"<--force-renderer-accessibility>"* ]] || fail "wayland-gpu with safe-mode must fall back to assistive-technology detection: $output"
 
-    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wayland-gpu "$launcher_probe" probe -- --ozone-platform=x11)"
+    output="$(env -i PATH="$at_stub_dir/none:$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wayland-gpu "$launcher_probe" probe -- --ozone-platform=x11)"
     [[ "$output" == *"electron=<--ozone-platform=x11>"* && "$output" != *"<--ozone-platform-hint=auto>"* ]] || fail "pass-through X11 platform must override wayland-gpu hinting: $output"
-    [[ "$output" == *"renderer_accessibility=1"* && "$output" == *"<--force-renderer-accessibility>"* ]] || fail "wayland-gpu with pass-through X11 platform must keep X11 renderer accessibility default: $output"
+    [[ "$output" == *"renderer_accessibility=0"* && "$output" != *"<--force-renderer-accessibility>"* ]] || fail "wayland-gpu with pass-through X11 platform must fall back to assistive-technology detection: $output"
 
     output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wslg "$launcher_probe" probe)"
     [[ "$output" == *"mode=wslg"* && "$output" == *"comp=0"* && "$output" == *"gl_added=1"* ]] || fail "forced WSLg profile must keep GPU compositing enabled and add ANGLE: $output"
@@ -4043,6 +4056,21 @@ EOF
 
     output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default CODEX_FORCE_RENDERER_ACCESSIBILITY=0 "$launcher_probe" probe)"
     [[ "$output" == *"renderer_accessibility=0"* && "$output" != *"<--force-renderer-accessibility>"* ]] || fail "CODEX_FORCE_RENDERER_ACCESSIBILITY=0 must disable renderer accessibility under default Linux: $output"
+
+    output="$(env -i PATH="$at_stub_dir/orca:$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe)"
+    [[ "$output" == *"renderer_accessibility=1"* && "$output" == *"<--force-renderer-accessibility>"* ]] || fail "a running screen reader must force renderer accessibility under default Linux: $output"
+
+    output="$(env -i PATH="$at_stub_dir/screenreader:$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe)"
+    [[ "$output" == *"renderer_accessibility=1"* && "$output" == *"<--force-renderer-accessibility>"* ]] || fail "the GNOME screen-reader setting must force renderer accessibility under default Linux: $output"
+
+    output="$(env -i PATH="$at_stub_dir/none:$PATH" HOME="$HOME" GNOME_ACCESSIBILITY=1 CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe)"
+    [[ "$output" == *"renderer_accessibility=1"* && "$output" == *"<--force-renderer-accessibility>"* ]] || fail "GNOME_ACCESSIBILITY=1 must force renderer accessibility under default Linux: $output"
+
+    output="$(env -i PATH="$at_stub_dir/none:$PATH" HOME="$HOME" QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe)"
+    [[ "$output" == *"renderer_accessibility=1"* && "$output" == *"<--force-renderer-accessibility>"* ]] || fail "QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 must force renderer accessibility under default Linux: $output"
+
+    output="$(env -i PATH="$at_stub_dir/none:$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default CODEX_FORCE_RENDERER_ACCESSIBILITY=1 "$launcher_probe" probe)"
+    [[ "$output" == *"renderer_accessibility=1"* && "$output" == *"<--force-renderer-accessibility>"* ]] || fail "CODEX_FORCE_RENDERER_ACCESSIBILITY=1 must force renderer accessibility without detected assistive technology: $output"
 
     output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wslg "$launcher_probe" probe --wayland --use-gl=desktop)"
     [[ "$output" == *"<--ozone-platform=wayland>"* && "$output" == *"electron=<--use-gl=desktop>"* ]] || fail "explicit rendering args must override WSLg defaults: $output"
@@ -4133,6 +4161,7 @@ EOF
     assert_contains "$REPO_DIR/launcher/start.sh.template" "dev_shm_usage_disabled="
     assert_contains "$REPO_DIR/launcher/start.sh.template" "--force-renderer-accessibility"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "CODEX_FORCE_RENDERER_ACCESSIBILITY=auto|0|1"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "assistive_technology_detected"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "PACKAGED_RUNTIME_HELPER"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "--allow-install-missing"
     assert_contains "$REPO_DIR/scripts/lib/process-detection.sh" "CODEX_INSTALL_ALLOW_RUNNING"
