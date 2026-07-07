@@ -1,6 +1,13 @@
-Before opening a pull request, read [CONTRIBUTING.md](https://github.com/ilysenko/codex-desktop-linux/blob/main/CONTRIBUTING.md).
+<p align="center">
+  <img src="assets/codex-linux.png" width="96" alt="Codex Desktop for Linux icon">
+</p>
 
-# Codex Desktop for Linux
+<h1 align="center">Codex Desktop for Linux</h1>
+
+<p align="center">
+  <a href="https://github.com/ilysenko/codex-desktop-linux/actions/workflows/ci.yml"><img src="https://github.com/ilysenko/codex-desktop-linux/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/ilysenko/codex-desktop-linux/actions/workflows/upstream-build-app.yml"><img src="https://github.com/ilysenko/codex-desktop-linux/actions/workflows/upstream-build-app.yml/badge.svg" alt="Upstream Build App"></a>
+</p>
 
 Unofficial Linux build wrapper for [OpenAI Codex Desktop](https://openai.com/codex/).
 The official Codex app is available for macOS and Windows; this repository
@@ -11,7 +18,36 @@ The project builds native `.deb`, `.rpm`, and `.pkg.tar.zst` packages, supports
 local AppImage self-builds and Nix, and can install a local update manager that
 rebuilds future Linux packages from newer upstream DMGs.
 
-For implementation details, see [AGENTS.md](AGENTS.md).
+<p align="center">
+  <a href="#install-by-platform">Install</a> ·
+  <a href="#uninstall">Uninstall</a> ·
+  <a href="#feature-matrix">Features</a> ·
+  <a href="#updates">Updates</a> ·
+  <a href="#build-package-and-run">Build</a> ·
+  <a href="#troubleshooting">Troubleshooting</a> ·
+  <a href="#project-docs">Docs</a>
+</p>
+
+Before opening a pull request, read [CONTRIBUTING.md](CONTRIBUTING.md). For
+implementation details, see [AGENTS.md](AGENTS.md).
+
+## At a Glance
+
+| What this repository does | What users get |
+|---|---|
+| Converts the upstream macOS `Codex.dmg` into a Linux Electron app | Native `.deb`, `.rpm`, pacman packages, local AppImage self-builds, and Nix support |
+| Applies Linux compatibility patches and rebuilds native modules | A runnable Linux desktop app with bundled plugin resources and launcher integration |
+| Optionally installs `codex-update-manager` | Local rebuilds from newer upstream DMGs after Codex Desktop exits |
+| Keeps Linux-only extras in `linux-features/` | Opt-in integrations stay disabled by default and out of the core path |
+
+| Build flow | Stage |
+|---|---|
+| 1 | Download or reuse `Codex.dmg` |
+| 2 | Extract the app and ASAR bundle |
+| 3 | Apply core Linux patches and enabled opt-in features |
+| 4 | Rebuild native modules and stage the Linux runtime |
+| 5 | Produce `.deb`, `.rpm`, pacman, AppImage, or Nix output |
+| 6 | Optionally install the local update manager |
 
 ## Install By Platform
 
@@ -145,6 +181,8 @@ workarounds.
 
 ## Feature Matrix
 
+### Core And Platform Support
+
 | Feature | Default | Enable / use | Docs |
 |---|---|---|---|
 | Standard Codex Desktop UI | Always | Install or run the generated app | This README |
@@ -162,24 +200,32 @@ workarounds.
 | Linux Computer Use backend | Bundled | MCP backend registers by default | [Linux Computer Use](docs/linux-computer-use.md) |
 | Linux Computer Use UI | Opt-in | `CODEX_LINUX_ENABLE_COMPUTER_USE_UI=1` or settings flag | [Linux Computer Use](docs/linux-computer-use.md#enable-the-in-app-ui) |
 | Linux Features framework | Opt-in | Edit `linux-features/features.json` | [Linux Features](linux-features/README.md) |
+
+### Opt-In Linux Features
+
+| Feature | Default / status | Enable / use | Docs |
+|---|---|---|---|
 | Record and Replay (alpha) | Opt-in alpha | `record-and-replay` | [Docs](linux-features/record-and-replay/README.md) |
 | Agent Workspaces | Opt-in | `agent-workspace` | [Docs](linux-features/agent-workspace/README.md) |
+| API key service tier | Opt-in | `api-key-service-tier` | [Docs](linux-features/api-key-service-tier/README.md) |
 | Linux AppShots | Opt-in | `appshots` | [Docs](linux-features/appshots/README.md) |
+| Authenticated proxy | Opt-in | `authenticated-proxy` | [Docs](linux-features/authenticated-proxy/README.md) |
 | Wrapper updater button | Opt-in | `codex-wrapper-updater` | [Docs](linux-features/codex-wrapper-updater/README.md) |
 | Conversation mode | Opt-in | `conversation-mode` | [Docs](linux-features/conversation-mode/README.md) |
 | Copilot reasoning effort defaults | Opt-in | `copilot-reasoning-effort` | [Docs](linux-features/copilot-reasoning-effort/README.md) |
 | Example Linux Feature | Developer example | `example-feature` | [Docs](linux-features/example-feature/README.md) |
+| Frameless titlebar | Opt-in | `frameless-titlebar` | [Docs](linux-features/frameless-titlebar/README.md) |
+| MCP helper reaper | Opt-in | `mcp-helper-reaper` | [Docs](linux-features/mcp-helper-reaper/README.md) |
+| Browser Use node_repl reaper | Opt-in | `node-repl-reaper` | [Docs](linux-features/node-repl-reaper/README.md) |
 | Open Target Discovery | Opt-in | `open-target-discovery` | [Docs](linux-features/open-target-discovery/README.md) |
-| API key service tier | Opt-in | `api-key-service-tier` | [Docs](linux-features/api-key-service-tier/README.md) |
+| Persistent status panel | Opt-in | `persistent-status-panel` | [Docs](linux-features/persistent-status-panel/README.md) |
 | Read Aloud button | Opt-in | `read-aloud` | [Docs](linux-features/read-aloud/README.md) |
 | Read Aloud MCP | Opt-in | `read-aloud-mcp` | [Docs](linux-features/read-aloud-mcp/README.md) |
 | Remote Control UI gates | Opt-in | `remote-control-ui` | [Docs](linux-features/remote-control-ui/README.md) |
 | Experimental Remote Mobile Control | Opt-in | `remote-mobile-control` | [Docs](linux-features/remote-mobile-control/README.md) |
 | Thorium Chrome Plugin Support | Opt-in | `thorium-chrome-plugin` | [Docs](linux-features/thorium-chrome-plugin/README.md) |
-
-Additional opt-in features, including proxy, titlebar, process cleanup,
-status-panel, and X11 Computer Use adapters, are documented under
-`linux-features/`.
+| UI tweaks | Opt-in | `ui-tweaks` | [Docs](linux-features/ui-tweaks/README.md) |
+| X11/EWMH Computer Use adapter | Opt-in | `x11-ewmh-computer-use` | [Docs](linux-features/x11-ewmh-computer-use/README.md) |
 
 Server-gated upstream features, such as model rollouts, are controlled by
 OpenAI per account. Rebuilding this wrapper does not unlock them.
@@ -311,9 +357,23 @@ Full list: [Troubleshooting](docs/troubleshooting.md).
 
 ## Disclaimer
 
-This is an unofficial community project. Codex Desktop is a product of OpenAI.
-This tool does not redistribute any OpenAI software; it automates the conversion
-process that users perform on their own copies.
+This is an unofficial community project and is not affiliated with OpenAI.
+Codex Desktop, OpenAI services, trademarks, upstream application code, binaries,
+and assets remain the property of OpenAI or their respective owners.
+
+The MIT license in this repository applies only to this wrapper's source code,
+packaging scripts, documentation, and Linux compatibility glue. It does not
+grant any rights to OpenAI software or services.
+
+This repository does not redistribute OpenAI software or modified OpenAI
+application binaries. Users must obtain their own authorized copy of Codex
+Desktop through OpenAI's official channels. The build process performs a local
+Linux compatibility conversion on the user's own copy so it can run on Linux.
+In practice, it automates the conversion process that users perform on their
+own copies.
+
+Use of Codex Desktop remains subject to OpenAI's applicable terms and
+server-side feature availability.
 
 ## License
 
