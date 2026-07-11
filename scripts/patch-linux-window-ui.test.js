@@ -190,6 +190,8 @@ const fileManagerBundle =
   "var lu=jl({id:`fileManager`,label:`Finder`,icon:`apps/finder.png`,kind:`fileManager`,darwin:{detect:()=>`open`,args:e=>il(e)},win32:{label:`File Explorer`,icon:`apps/file-explorer.png`,detect:uu,args:e=>il(e),open:async({path:e})=>du(e)}});function uu(){}";
 const terminalEnvBundle =
   "var Q0=`xterm-256color`;var t={t(e){return e}};var Backend=class{isLocalTerminalSession(e){return e?.type===`local`}async getWorktreeShellEnvironmentForCwd(e){return null}async buildTerminalEnv(e,n,r){let i={...process.env};if(n!=null&&(i.CODEX_APP_TITLE=n),this.isLocalTerminalSession(r)){let t=await this.getWorktreeShellEnvironmentForCwd(e);if(t!=null){for(let e of t.exclude)delete i[e];Object.assign(i,t.set)}}return process.platform!==`win32`&&(i.TERM=Q0,delete i.TERMINFO,delete i.TERMINFO_DIRS),t.t(i)}};";
+const terminalEnvBundleLegacy =
+  "var Q0=`xterm-256color`;var t={$r(e){return e}};var Backend=class{isLocalTerminalSession(e){return e?.type===`local`}async getWorktreeShellEnvironmentForCwd(e){return null}async buildTerminalEnv(e,n,r){let i={...process.env};if(n!=null&&(i.CODEX_APP_TITLE=n),this.isLocalTerminalSession(r)){let t=await this.getWorktreeShellEnvironmentForCwd(e);if(t!=null){for(let e of t.exclude)delete i[e];Object.assign(i,t.set)}}return process.platform!==`win32`&&(i.TERM=Q0,delete i.TERMINFO,delete i.TERMINFO_DIRS),t.$r(i)}};";
 const currentOpaqueWindowSurfaceBackgroundHelper =
   "var W4=`#00000000`,G4=`#000000`,K4=`#f9f9f9`;function g3(e){return e===`avatarOverlay`||e===`browserCommentPopup`||e===`globalDictation`||e===`hotkeyWindowHome`||e===`hotkeyWindowThread`||e===`hud`}function v3({appearance:e,opaqueWindowsEnabled:t,platform:n}){return t&&!g3(e)&&(n===`darwin`||n===`win32`)}function S3({platform:e,appearance:t,opaqueWindowSurfaceEnabled:n,prefersDarkColors:r}){return n?{backgroundColor:r?G4:K4,backgroundMaterial:e===`win32`?`none`:null}:e===`win32`&&!g3(t)?{backgroundColor:W4,backgroundMaterial:`mica`}:{backgroundColor:W4,backgroundMaterial:null}}";
 const currentOpaqueWindowSurfaceBackgroundBundle =
@@ -1862,6 +1864,24 @@ test("restores the user PATH for Linux local terminal sessions", () => {
   assert.deepEqual(runHelper("/worktree/bin:/custom/bin"), {
     PATH: "/worktree/bin:/custom/bin",
   });
+});
+
+test("restores the user PATH for Linux local terminal sessions (legacy .$r() sanitizer)", () => {
+  const source = `${mainBundlePrefix}${terminalEnvBundleLegacy}`;
+
+  const patched = applyPatchTwice(applyLinuxTerminalUserPathPatch, source);
+
+  assert.match(patched, /function codexLinuxRestoreUserTerminalPath/);
+  assert.match(patched, /CODEX_LINUX_USER_PATH/);
+  assert.match(
+    patched,
+    /process\.platform===`linux`&&this\.isLocalTerminalSession\(r\)&&codexLinuxRestoreUserTerminalPath\(i\)/,
+  );
+
+  const helperSource = patched.match(
+    /function codexLinuxRestoreUserTerminalPath\(e\)\{[\s\S]*?return e\}/,
+  )?.[0];
+  assert.ok(helperSource);
 });
 
 test("patchExtractedApp patches worker file manager support", () => {
