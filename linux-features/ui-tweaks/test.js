@@ -43,8 +43,17 @@ const {
 
 function projectBundleFixture() {
   return [
+    "function Hd(){return {id:`sidebarElectron.projectsNavLink`,defaultMessage:`Projects`}}",
     "function row(){let j=Pn(`group/folder-row group relative flex h-[var(--height-token-row)] text-sm text-token-foreground`);",
     "let V=(0,Iy.jsx)(`span`,{className:`text-fade-truncate pr-1`,children:p});return [j,V]}",
+  ].join("");
+}
+
+function projectBundleFixture26707() {
+  return [
+    "function Hd(){return {id:`sidebarElectron.projectsNavLink`,defaultMessage:`Projects`}}",
+    "function row(){let N=X(`group/folder-row group relative flex h-[var(--height-token-row)] text-sm text-token-foreground`);",
+    "let H=(0,Qu.jsx)(`span`,{className:`text-fade-truncate pr-1`,children:g});return [N,H]}",
   ].join("");
 }
 
@@ -362,6 +371,11 @@ test("sidebar project descriptor targets only the current project sidebar asset"
     "app-initial~app-main~projects-index-page~remote-conversation-page-CFT2LLOB.js",
     PROJECTS_SIDEBAR_ASSET_PATTERN,
   );
+  // 26.707 reshuffled the chunk name segment order.
+  assert.match(
+    "app-initial~app-main~remote-conversation-page~projects-index-page-By2_tGIM.js",
+    PROJECTS_SIDEBAR_ASSET_PATTERN,
+  );
   assert.doesNotMatch(
     "app-initial~app-main~page-BF1QkwFT.js",
     PROJECTS_SIDEBAR_ASSET_PATTERN,
@@ -371,10 +385,16 @@ test("sidebar project descriptor targets only the current project sidebar asset"
     PROJECTS_SIDEBAR_ASSET_PATTERN,
   );
   assert.doesNotMatch("projects-index-page-TFjtVwC4.js", PROJECTS_SIDEBAR_ASSET_PATTERN);
-  assert.doesNotMatch(
-    "app-initial~app-main~remote-conversation-page~projects-index-page-By2_tGIM.js",
-    PROJECTS_SIDEBAR_ASSET_PATTERN,
-  );
+});
+
+test("patch recognizes the 26.707 text-fade-truncate project name markup", () => {
+  const patched = applyPatchTwice(projectBundleFixture26707(), {});
+
+  assert.match(patched, new RegExp(STYLE_ID));
+  assert.match(patched, new RegExp(RUNTIME_MARKER));
+  assert.ok(patched.includes(JSON.stringify(sidebarProjectNameCss())));
+  assert.match(PROJECT_NAME_SELECTOR, /\.text-fade-truncate\.pr-1/);
+  assert.match(PROJECT_NAME_SELECTOR, /\.min-w-0\.truncate\.pr-1/);
 });
 
 test("patch injects sidebar project-name stylesheet runtime once", () => {
