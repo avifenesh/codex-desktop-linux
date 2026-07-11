@@ -294,6 +294,7 @@
           libxi
           libxtst
           libxscrnsaver
+          libnotify
           libglvnd
           systemd
           wayland
