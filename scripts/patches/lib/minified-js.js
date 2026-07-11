@@ -12,16 +12,11 @@ function requireName(source, moduleName) {
     return directMatch[1];
   }
 
-  if (moduleName === "electron") {
-    const wrappedMatch = source.match(
-      new RegExp(
-        `([A-Za-z_$][\\w$]*)=codexLinuxPatchExternalOpen\\(require\\(([\\\`"'])${escaped}\\2\\)\\)`,
-      ),
-    );
-    return wrappedMatch?.[1] ?? null;
-  }
-
-  return null;
+  // Earlier patches may wrap the require call (e.g. `c=codexLinuxPatchExternalOpen(require(\`electron\`))`).
+  const wrappedMatch = source.match(
+    new RegExp(`([A-Za-z_$][\\w$]*)=[A-Za-z_$][\\w$]*\\(require\\(([\\\`"'])${escaped}\\2\\)\\)`),
+  );
+  return wrappedMatch?.[1] ?? null;
 }
 
 function inferModuleAlias(source, moduleName) {
