@@ -41,6 +41,9 @@ jobs:
     name: Build App Against Upstream DMG
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: write
 
     steps:
       - uses: actions/checkout@v4
@@ -139,6 +142,46 @@ jobs:
       - name: Build app from upstream DMG
         run: CODEX_PATCH_REPORT_JSON="$GITHUB_WORKSPACE/patch-report.json" make build-app DMG=/tmp/codex-upstream-ci/Codex.dmg
 
+      - name: Extract upstream app version
+        id: app-version
+        run: |
+          set -euo pipefail
+
+          # The build extracts the app to codex-app/resources/app.asar.unpacked
+          # But we need the original macOS .app bundle for Info.plist
+          # Extract it from the DMG
+          extract_dir="$(mktemp -d)"
+          trap 'rm -rf "$extract_dir"' EXIT
+
+          7z x -o"$extract_dir" "$UPSTREAM_DMG_PATH" >/dev/null 2>&1 || true
+
+          # Find the .app bundle
+          app_bundle=$(find "$extract_dir" -maxdepth 2 -name "*.app" -type d | head -n 1)
+
+          if [ -z "$app_bundle" ]; then
+            echo "app_version=unknown" >> "$GITHUB_OUTPUT"
+            echo "Warning: Could not find .app bundle in DMG"
+            exit 0
+          fi
+
+          info_plist="$app_bundle/Contents/Info.plist"
+
+          if [ ! -f "$info_plist" ]; then
+            echo "app_version=unknown" >> "$GITHUB_OUTPUT"
+            echo "Warning: Info.plist not found at $info_plist"
+            exit 0
+          fi
+
+          # Use the existing appBundleVersion helper from build-info.js
+          app_version=$(node -e "
+            const { appBundleVersion } = require('./scripts/lib/build-info.js');
+            const version = appBundleVersion('$app_bundle');
+            console.log(version || 'unknown');
+          ")
+
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "Extracted app version: $app_version"
+
       - name: Validate required upstream patches
         run: node scripts/ci/validate-patch-report.js patch-report.json --profile upstream-build
 
@@ -191,8 +234,88 @@ jobs:
             echo "- DMG Size (bytes): \`${{ steps.local-dmg.outputs.size_bytes }}\`"
             echo "- Tested At (UTC): \`${{ steps.local-dmg.outputs.tested_at_utc }}\`"
             echo "- Cache Hit: \`${{ steps.dmg-cache.outputs.cache-hit || 'false' }}\`"
+            echo "- App Version: \`${{ steps.app-version.outputs.app_version }}\`"
             echo "- Build command: \`make build-app DMG=/tmp/codex-upstream-ci/Codex.dmg\`"
             echo "- Patch report: \`patch-report.json\`"
             echo "- Remote mobile inspect: \`make inspect-upstream DMG=$UPSTREAM_DMG_PATH\` with \`remote-mobile-control\` enabled"
             echo "- Remote mobile patch report: \`remote-mobile-upstream-inspect/patch-report.json\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open tracking issue for new version
+        if: github.event_name == 'schedule' && steps.app-version.outputs.app_version != 'unknown'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const appVersion = '${{ steps.app-version.outputs.app_version }}';
+            const label = 'upstream-version';
+            const title = `New upstream version ${appVersion} detected`;
+
+            // Check if an issue for this version already exists
+            const existingIssues = await github.rest.issues.listForRepo({
+              ...context.repo,
+              state: 'open',
+              labels: label,
+              per_page: 100,
+            });
+
+            const versionExists = existingIssues.data.some(issue =>
+              issue.title.includes(appVersion)
+            );
+
+            if (versionExists) {
+              console.log(`Issue for version ${appVersion} already exists, skipping creation.`);
+              return;
+            }
+
+            // Ensure the label exists
+            try {
+              await github.rest.issues.getLabel({ ...context.repo, name: label });
+            } catch (e) {
+              await github.rest.issues.createLabel({
+                ...context.repo,
+                name: label,
+                color: '0366d6',
+                description: 'New upstream version detected by scheduled build',
+              });
+            }
+
+            // Read the playbook
+            const playbook = fs.readFileSync('.github/NEW_VERSION_PLAYBOOK.md', 'utf8');
+
+            // Build the issue body
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              `A new upstream Codex Desktop version has been detected by the scheduled build workflow.`,
+              '',
+              '## Version Information',
+              '',
+              `- **Version**: \`${appVersion}\``,
+              `- **DMG URL**: \`${{ env.UPSTREAM_DMG_URL }}\``,
+              `- **DMG SHA-256**: \`${{ steps.local-dmg.outputs.sha256 }}\``,
+              `- **DMG Last-Modified**: \`${{ steps.upstream-metadata.outputs.last_modified }}\``,
+              `- **DMG ETag**: \`${{ steps.upstream-metadata.outputs.etag }}\``,
+              `- **DMG Size**: \`${{ steps.local-dmg.outputs.size_bytes }}\` bytes`,
+              `- **Detected At**: \`${{ steps.local-dmg.outputs.tested_at_utc }}\``,
+              '',
+              '## Build Information',
+              '',
+              `- **Workflow Run**: ${runUrl}`,
+              `- **Artifacts**: [upstream-dmg-metadata](${runUrl}#artifacts) (includes \`patch-report.json\`)`,
+              '',
+              '## Agent Playbook',
+              '',
+              'Follow the playbook below to address this new version:',
+              '',
+              '---',
+              '',
+              playbook,
+            ].join('\n');
+
+            // Create the issue
+            await github.rest.issues.create({
+              ...context.repo,
+              title,
+              labels: [label],
+              body,
+            });
