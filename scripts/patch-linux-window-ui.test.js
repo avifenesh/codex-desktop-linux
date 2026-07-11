@@ -1046,8 +1046,6 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-app-sunset-gate",
     "linux-app-server-feature-enablement",
     "linux-app-server-backfill-wait",
-    "linux-completed-resume-recovery",
-    "linux-unowned-turn-claim",
     "linux-completed-item-recovery",
     "linux-remote-terminal-status-recovery",
     "linux-skills-list-dedupe",
@@ -5644,128 +5642,20 @@ test("keeps current app-server backfill helpers visible outside the Sentry handl
   assert.equal(context.turnTimeout, 3e4);
 });
 
-test("keeps generic conversation recovery in core without remote hydration", () => {
+test("keeps remote conversation hydration out of core", () => {
   const descriptors = corePatchDescriptors();
 
-  assert.equal(
-    descriptors.some((patch) => patch.id === "linux-app-server-conversation-hydration"),
-    false,
-  );
-  assert.ok(descriptors.some((patch) => patch.id === "linux-completed-resume-recovery"));
-  assert.ok(descriptors.some((patch) => patch.id === "linux-unowned-turn-claim"));
+  for (const removedPatchId of [
+    "linux-app-server-conversation-hydration",
+    "linux-completed-resume-recovery",
+    "linux-unowned-turn-claim",
+  ]) {
+    assert.equal(
+      descriptors.some((patch) => patch.id === removedPatchId),
+      false,
+    );
+  }
   assert.ok(descriptors.some((patch) => patch.id === "linux-completed-item-recovery"));
-});
-
-test("does not retain streaming ownership when a completed thread resumes without an active runtime", () => {
-  const descriptor = corePatchDescriptors().find(
-    (patch) => patch.id === "linux-completed-resume-recovery",
-  );
-  assert.ok(descriptor);
-  const source = [
-    "async function resume(e,t,L,ue,b){",
-    "e.updateConversationState(t,t=>{t.threadRuntimeStatus=L.thread.status});",
-    "let de=ue.at(-1)??null;e.markConversationStreaming(t),e.setConversationStreamRole(t,{role:`owner`}),b&&e.releaseResumeNotificationBuffer(t);",
-    "let fe=e.broadcastConversationSnapshot(t);",
-    "K.info(`maybe_resume_success`,{safe:{conversationId:t,turnCount:ue.length,latestTurnId:de?.turnId??null,latestTurnStatus:de?.status??null,markedStreaming:!0,assignedStreamRole:e.getStreamRole(t)?.role??null}})",
-    "}",
-  ].join("");
-
-  const patched = applyPatchTwice(descriptor.apply, source);
-
-  assert.match(patched, /let codexLinuxResumeShouldStream=/);
-  assert.match(patched, /markedStreaming:codexLinuxResumeShouldStream/);
-
-  const context = {};
-  vm.runInNewContext(
-    [
-      "var logs=[];var K={info:(message,details)=>logs.push({message,details})};",
-      patched,
-      "function run(turnStatus,runtimeType){",
-      "logs=[];let state={marked:false,role:null,removed:false,broadcasts:0};",
-      "let manager={",
-      "conversation:{threadRuntimeStatus:{type:runtimeType}},",
-      "updateConversationState:(id,fn)=>fn(manager.conversation),",
-      "getConversation:()=>manager.conversation,",
-      "markConversationStreaming:()=>{state.marked=true},",
-      "setConversationStreamRole:(id,role)=>{state.role=role.role},",
-      "getStreamRole:()=>state.role==null?null:{role:state.role},",
-      "streamState:{removeConversation:()=>{state.removed=true;state.role=null}},",
-      "releaseResumeNotificationBuffer:()=>{},",
-      "broadcastConversationSnapshot:()=>{state.broadcasts+=1;return null}",
-      "};",
-      "resume(manager,`thread-1`,{thread:{status:{type:runtimeType}}},[{turnId:`turn-1`,status:turnStatus}],false);",
-      "return {state,markedStreaming:logs[0].details.safe.markedStreaming};",
-      "}",
-      "result={completedIdle:run(`completed`,`idle`),completedActive:run(`completed`,`active`),inProgressIdle:run(`inProgress`,`idle`),failedIdle:run(`failed`,`idle`)};",
-    ].join(""),
-    context,
-  );
-
-  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), {
-    completedIdle: {
-      state: { marked: false, role: null, removed: true, broadcasts: 1 },
-      markedStreaming: false,
-    },
-    completedActive: {
-      state: { marked: true, role: "owner", removed: false, broadcasts: 1 },
-      markedStreaming: true,
-    },
-    inProgressIdle: {
-      state: { marked: true, role: "owner", removed: false, broadcasts: 1 },
-      markedStreaming: true,
-    },
-    failedIdle: {
-      state: { marked: true, role: "owner", removed: false, broadcasts: 1 },
-      markedStreaming: true,
-    },
-  });
-});
-
-test("claims an unowned completed thread when starting a new turn", async () => {
-  const descriptor = corePatchDescriptors().find(
-    (patch) => patch.id === "linux-unowned-turn-claim",
-  );
-  assert.ok(descriptor);
-  const source = [
-    "async function start(e,t,c){",
-    "let p=await MF({conversationId:t,getStreamRole:t=>e.getStreamRole(t),sendRequest:r=>e.sendThreadFollowerRequest(r,`thread-follower-start-turn`,{conversationId:t})});",
-    "if(p)return UP.abort(c,`follower_window_forwarded`),p.result;",
-    "if(e.getStreamRole(t)?.role!==`owner`)throw Error(Kw);",
-    "if(!e.isConversationStreaming(t))throw K.error(`Conversation is not being streamed.`,{safe:{conversationId:t},sensitive:{}}),Error(`Conversation ${t} is not being streamed.`);",
-    "return e.sendRequest(`turn/start`,{threadId:t})",
-    "}",
-  ].join("");
-
-  const patched = applyPatchTwice(descriptor.apply, source);
-
-  assert.match(patched, /codexLinuxClaimUnownedTurn/);
-  const context = {};
-  vm.runInNewContext(
-    [
-      "var Kw=`wrong window`,K={error:()=>{}},UP={abort:()=>{}};",
-      "async function MF({conversationId:e,getStreamRole:t,sendRequest:n}){return n(t(e))}",
-      patched,
-      "function manager(role){let state={role,marked:false,started:false,forwarded:false};return {state,getStreamRole:()=>state.role==null?null:state.role,setConversationStreamRole:(id,value)=>{state.role=value},markConversationStreaming:()=>{state.marked=true},isConversationStreaming:()=>state.marked||state.role?.role===`follower`,sendThreadFollowerRequest:async role=>{if(role?.role===`follower`){state.forwarded=true;return{result:`forwarded`}}return null},sendRequest:async()=>{state.started=true;return`started`}}}",
-      "result=(async()=>{let unowned=manager(null),follower=manager({role:`follower`,ownerClientId:`window-2`});let unownedResult=await start(unowned,`thread-1`,`message-1`),followerResult=await start(follower,`thread-2`,`message-2`);return{unowned:{state:unowned.state,result:unownedResult},follower:{state:follower.state,result:followerResult}}})()",
-    ].join(""),
-    context,
-  );
-
-  assert.deepEqual(JSON.parse(JSON.stringify(await context.result)), {
-    unowned: {
-      state: { role: { role: "owner" }, marked: true, started: true, forwarded: false },
-      result: "started",
-    },
-    follower: {
-      state: {
-        role: { role: "follower", ownerClientId: "window-2" },
-        marked: false,
-        started: false,
-        forwarded: true,
-      },
-      result: "forwarded",
-    },
-  });
 });
 
 test("recovers completed stream items that arrive after local state lost their started item", () => {

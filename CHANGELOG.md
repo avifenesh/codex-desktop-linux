@@ -25,8 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Remote notification hydration and replay are no longer part of the default
   Linux patch set and remain owned by the disabled-by-default
-  `remote-mobile-control` feature. The current-DMG completed-resume and
-  unowned-turn fixes remain active as separate core patches.
+  `remote-mobile-control` feature.
 
 ### Fixed
 
@@ -39,10 +38,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   Linux X11. This avoids a GNOME Shell modal input grab that could lock desktop
   input and flood system logs, while preserving parented dialogs on Wayland,
   macOS, and Windows.
-- Resuming a completed thread no longer leaves it registered as streaming when
-  the app server reports no active runtime. This clears stale stream ownership
-  before the next message instead of leaving the renderer in a repeated thread
-  history refresh path.
+- Completed thread resume and turn submission once again use the upstream
+  conversation ownership lifecycle. Removing the Linux-only ownership reset
+  and submit-time reclaim avoids false ownership after failed turn starts and
+  races between windows.
 - Updater DMG downloads now publish crash-durable, content-addressed files only
   after a complete streamed download. Concurrent daemon and wrapper rebuilds
   cannot truncate or replace each other's input, and DMG hashing stays bounded

@@ -16,8 +16,6 @@ const LINUX_SAFE_MONOSPACE_FONT_STACK =
   "\"Noto Sans Mono\", \"DejaVu Sans Mono\", \"Liberation Mono\", \"Ubuntu Mono\", ui-monospace, \"SFMono-Regular\", \"SF Mono\", Menlo, Consolas, monospace";
 const LINUX_TOOLTIP_COLLISION_PADDING_TOP = 44;
 const LINUX_WINDOW_CONTROLS_SAFE_AREA_RIGHT = 138;
-const LINUX_APP_SERVER_COMPLETED_RESUME_MARKER = "codexLinuxResumeShouldStream";
-const LINUX_APP_SERVER_UNOWNED_TURN_CLAIM_MARKER = "codexLinuxClaimUnownedTurn";
 
 function applyLinuxSafeMonospaceFontStackPatch(currentSource) {
   const safeLinuxMonoFontPattern =
@@ -866,75 +864,6 @@ function applyLinuxAppServerBackfillWaitPatch(currentSource) {
     console.warn(
       "WARN: App-server backfill wait patch applied only partially — startup backfill may still time out early",
     );
-  }
-
-  return patchedSource;
-}
-
-function applyLinuxCompletedResumeRecoveryPatch(currentSource) {
-  let patchedSource = currentSource;
-
-  if (!patchedSource.includes(LINUX_APP_SERVER_COMPLETED_RESUME_MARKER)) {
-    const completedResumeStreamingNeedle =
-      /(let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.at\(-1\)\?\?null;)([A-Za-z_$][\w$]*)\.markConversationStreaming\(([A-Za-z_$][\w$]*)\),\4\.setConversationStreamRole\(\5,\{role:`owner`\}\),/u;
-    const resumeLogNeedle =
-      /latestTurnStatus:([A-Za-z_$][\w$]*)\?\.status\?\?null,markedStreaming:!0,assignedStreamRole:([A-Za-z_$][\w$]*)\.getStreamRole\(([A-Za-z_$][\w$]*)\)\?\.role\?\?null/u;
-    const streamMatch = completedResumeStreamingNeedle.exec(patchedSource);
-    const logMatch = resumeLogNeedle.exec(patchedSource);
-
-    if (
-      streamMatch != null &&
-      logMatch != null &&
-      logMatch[1] === streamMatch[2] &&
-      logMatch[2] === streamMatch[4] &&
-      logMatch[3] === streamMatch[5]
-    ) {
-      const [, prefix, latestTurnVar, , managerVar, conversationIdVar] = streamMatch;
-      patchedSource = patchedSource
-        .replace(
-          completedResumeStreamingNeedle,
-          `${prefix}let ${LINUX_APP_SERVER_COMPLETED_RESUME_MARKER}=${latestTurnVar}?.status!==\`completed\`||${managerVar}.getConversation(${conversationIdVar})?.threadRuntimeStatus?.type===\`active\`;${LINUX_APP_SERVER_COMPLETED_RESUME_MARKER}?(${managerVar}.markConversationStreaming(${conversationIdVar}),${managerVar}.setConversationStreamRole(${conversationIdVar},{role:\`owner\`})):${managerVar}.streamState.removeConversation(${conversationIdVar}),`,
-        )
-        .replace(
-          resumeLogNeedle,
-          `latestTurnStatus:${latestTurnVar}?.status??null,markedStreaming:${LINUX_APP_SERVER_COMPLETED_RESUME_MARKER},assignedStreamRole:${managerVar}.getStreamRole(${conversationIdVar})?.role??null`,
-        );
-    } else if (
-      patchedSource.includes("maybe_resume_success") &&
-      patchedSource.includes("markConversationStreaming")
-    ) {
-      console.warn(
-        "WARN: Could not find completed resume streaming insertion point — skipping Linux completed resume recovery patch",
-      );
-    }
-  }
-
-  return patchedSource;
-}
-
-function applyLinuxUnownedTurnClaimPatch(currentSource) {
-  let patchedSource = currentSource;
-
-  if (!patchedSource.includes(LINUX_APP_SERVER_UNOWNED_TURN_CLAIM_MARKER)) {
-    const unownedTurnNeedle =
-      /if\(([A-Za-z_$][\w$]*)\)return ([A-Za-z_$][\w$]*)\.abort\(([A-Za-z_$][\w$]*),`follower_window_forwarded`\),\1\.result;if\(([A-Za-z_$][\w$]*)\.getStreamRole\(([A-Za-z_$][\w$]*)\)\?\.role!==`owner`\)throw Error\(([A-Za-z_$][\w$]*)\);if\(!\4\.isConversationStreaming\(\5\)\)/u;
-    const unownedTurnMatch = unownedTurnNeedle.exec(patchedSource);
-
-    if (unownedTurnMatch != null) {
-      const [, forwardedVar, abortManagerVar, userMessageIdVar, managerVar, conversationIdVar, errorVar] =
-        unownedTurnMatch;
-      patchedSource = patchedSource.replace(
-        unownedTurnNeedle,
-        `if(${forwardedVar})return ${abortManagerVar}.abort(${userMessageIdVar},\`follower_window_forwarded\`),${forwardedVar}.result;/*${LINUX_APP_SERVER_UNOWNED_TURN_CLAIM_MARKER}*/${managerVar}.getStreamRole(${conversationIdVar})==null&&(${managerVar}.markConversationStreaming(${conversationIdVar}),${managerVar}.setConversationStreamRole(${conversationIdVar},{role:\`owner\`}));if(${managerVar}.getStreamRole(${conversationIdVar})?.role!==\`owner\`)throw Error(${errorVar});if(!${managerVar}.isConversationStreaming(${conversationIdVar}))`,
-      );
-    } else if (
-      patchedSource.includes("follower_window_forwarded") &&
-      patchedSource.includes("Conversation is not being streamed.")
-    ) {
-      console.warn(
-        "WARN: Could not find unowned turn claim insertion point — completed resumed threads may reject new turns",
-      );
-    }
   }
 
   return patchedSource;
@@ -2080,8 +2009,6 @@ function patchCommentPreloadBundle(extractedDir) {
 module.exports = {
   applyBrowserAnnotationScreenshotPatch,
   applyLinuxAppServerBackfillWaitPatch,
-  applyLinuxCompletedResumeRecoveryPatch,
-  applyLinuxUnownedTurnClaimPatch,
   applyLinuxCompletedItemRecoveryPatch,
   applyLinuxRemoteTerminalStatusRecoveryPatch,
   applyLinuxAppServerFeatureEnablementPatch,
