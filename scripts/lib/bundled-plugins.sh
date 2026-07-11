@@ -280,33 +280,35 @@ build_linux_computer_use_backend() {
         return 0
     fi
 
-    # Step 2: System-installed binaries
-    if [ "${CODEX_LINUX_COMPUTER_USE_PREFER_VENDORED:-}" != "1" ]; then
+    # Steps 2-3 are opt-in: the vendored build stays the default so the
+    # repository only ships code it is responsible for. Set
+    # CODEX_LINUX_COMPUTER_USE_SYSTEM_INSTALL=1 to reuse a system-installed
+    # computer-use-linux (or install it from crates.io) instead of building
+    # the vendored crate.
+    if [ "${CODEX_LINUX_COMPUTER_USE_SYSTEM_INSTALL:-}" = "1" ]; then
+        # Step 2: System-installed binaries
         if system_backend="$(find_system_computer_use_binary computer-use-linux)" &&
             system_cosmic="$(find_system_computer_use_binary computer-use-linux-cosmic)"; then
             info "Using system computer-use-linux MCP binaries: $system_backend"
             printf '%s\n%s\n' "$system_backend" "$system_cosmic"
             return 0
         fi
-    fi
 
-    # Step 3: Install from crates.io
-    if [ "${CODEX_LINUX_COMPUTER_USE_PREFER_VENDORED:-}" != "1" ]; then
-        if ! cargo_cmd="$(find_cargo_for_linux_computer_use)"; then
-            warn "cargo not found; Linux Computer Use plugin will be unavailable"
-            return 1
-        fi
-
-        info "Installing computer-use-linux MCP from crates.io..."
-        if "$cargo_cmd" install --locked computer-use-linux >&2; then
-            if system_backend="$(find_system_computer_use_binary computer-use-linux)" &&
-                system_cosmic="$(find_system_computer_use_binary computer-use-linux-cosmic)"; then
-                printf '%s\n%s\n' "$system_backend" "$system_cosmic"
-                return 0
+        # Step 3: Install from crates.io
+        if cargo_cmd="$(find_cargo_for_linux_computer_use)"; then
+            info "Installing computer-use-linux MCP from crates.io..."
+            if "$cargo_cmd" install --locked computer-use-linux >&2; then
+                if system_backend="$(find_system_computer_use_binary computer-use-linux)" &&
+                    system_cosmic="$(find_system_computer_use_binary computer-use-linux-cosmic)"; then
+                    printf '%s\n%s\n' "$system_backend" "$system_cosmic"
+                    return 0
+                fi
+                warn "computer-use-linux binaries missing after crates.io install"
+            else
+                warn "Failed to install computer-use-linux from crates.io; falling back to vendored build"
             fi
-            warn "computer-use-linux binaries missing after crates.io install"
         else
-            warn "Failed to install computer-use-linux from crates.io; falling back to vendored build"
+            warn "cargo not found for crates.io install; falling back to vendored build"
         fi
     fi
 
@@ -367,6 +369,11 @@ stage_linux_computer_use_plugin() {
     cp "$cosmic_helper_binary" "$target_plugin/bin/codex-computer-use-cosmic"
     chmod 0755 "$target_plugin/bin/codex-computer-use-linux"
     chmod 0755 "$target_plugin/bin/codex-computer-use-cosmic"
+    if [ "${backend_binary##*/}" = "computer-use-linux" ]; then
+        # The published backend resolves its COSMIC helper by this sibling name.
+        cp "$cosmic_helper_binary" "$target_plugin/bin/computer-use-linux-cosmic"
+        chmod 0755 "$target_plugin/bin/computer-use-linux-cosmic"
+    fi
 
     local plugin_icon_source="${LINUX_ICON_SOURCE:-$ICON_SOURCE}"
     if [ -f "$plugin_icon_source" ]; then

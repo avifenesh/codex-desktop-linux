@@ -4384,6 +4384,46 @@ test_bundled_plugin_builders_accept_prebuilt_binaries() {
     assert_contains "$output_log" "$host"
     cmp -s "$chatgpt_icon" "$staged_plugins/computer-use/assets/app-icon.png" \
         || fail "Expected the bundled Computer Use plugin to use the selected ChatGPT icon"
+    [ ! -e "$staged_plugins/computer-use/bin/computer-use-linux-cosmic" ] \
+        || fail "Vendored/prebuilt Computer Use staging must not add the external helper alias"
+}
+
+test_bundled_plugin_system_computer_use_preserves_cosmic_helper_name() {
+    info "Checking opt-in system Computer Use staging preserves its helper contract"
+    local workspace="$TMP_DIR/bundled-plugin-system-computer-use"
+    local fake_home="$workspace/home"
+    local system_bin="$fake_home/.cargo/bin"
+    local backend="$system_bin/computer-use-linux"
+    local cosmic="$system_bin/computer-use-linux-cosmic"
+    local staged_plugins="$workspace/plugins"
+    local output_log="$workspace/output.log"
+
+    mkdir -p "$system_bin"
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        'helper="$(dirname "$0")/computer-use-linux-cosmic"' \
+        '[ -x "$helper" ] || { echo "missing COSMIC helper: $helper" >&2; exit 9; }' \
+        '"$helper"' > "$backend"
+    printf '%s\n' '#!/usr/bin/env bash' 'echo cosmic-ok' > "$cosmic"
+    chmod +x "$backend" "$cosmic"
+
+    (
+        SCRIPT_DIR="$REPO_DIR"
+        HOME="$fake_home"
+        CODEX_LINUX_COMPUTER_USE_SYSTEM_INSTALL=1
+        ICON_SOURCE="$REPO_DIR/assets/codex.png"
+        info() { echo "[INFO] $*" >&2; }
+        warn() { echo "[WARN] $*" >&2; }
+        error() { echo "[ERROR] $*" >&2; exit 1; }
+        # shellcheck disable=SC1091
+        source "$REPO_DIR/scripts/lib/bundled-plugins.sh"
+        stage_linux_computer_use_plugin "$staged_plugins"
+        "$staged_plugins/computer-use/bin/codex-computer-use-linux"
+    ) > "$output_log" 2>&1
+
+    assert_contains "$output_log" "Using system computer-use-linux MCP binaries"
+    assert_contains "$output_log" "cosmic-ok"
+    assert_file_exists "$staged_plugins/computer-use/bin/computer-use-linux-cosmic"
 }
 
 test_launcher_managed_node_handles_unset_path() {
@@ -9080,6 +9120,7 @@ main() {
     test_native_module_rebuild_uses_local_electron_rebuild_toolchain
     test_native_module_rebuild_accepts_prebuilt_source
     test_bundled_plugin_builders_accept_prebuilt_binaries
+    test_bundled_plugin_system_computer_use_preserves_cosmic_helper_name
     test_browser_use_node_repl_fallback_runtime
     test_browser_use_file_url_policy_patch_behavior
     test_browser_plugin_renamed_upstream_staging
