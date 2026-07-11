@@ -2,15 +2,21 @@
 
 const DEFAULT_PROJECT_NAME_STYLE = "font-weight: 700 !important; padding-top: 0.25rem;";
 const PROJECTS_SIDEBAR_ASSET_PATTERN =
-  /^app-initial~app-main~projects-index-page~remote-conversation-page-[^.]+\.js$/;
-const PROJECT_NAME_SELECTOR = ".group\\/folder-row .text-fade-truncate.pr-1";
+  /^app-initial~app-main~(?:remote-conversation-page~projects-index-page|projects-index-page~remote-conversation-page)-[^.]+\.js$/;
+const PROJECT_NAME_SELECTOR =
+  ".group\\/folder-row .min-w-0.truncate.pr-1,.group\\/folder-row .text-fade-truncate.pr-1";
 const STYLE_ID = "codex-linux-ui-tweaks-sidebar-project-name-style";
 const RUNTIME_MARKER = "codexLinuxUiTweaksSidebarProjectNameStyleRuntime";
 const UNSAFE_PROJECT_NAME_STYLE_PATTERN = /[{}@<>]|\r|\n|\/\*|\*\/|\burl\s*\(/i;
 
+// Each entry lists interchangeable shapes of the same marker; a bundle counts
+// as the projects sidebar bundle when every entry has at least one hit.
+// 26.623 rendered the project name as `min-w-0 truncate pr-1`; 26.707 renamed
+// it to `text-fade-truncate pr-1`.
 const SIDEBAR_PROJECT_NAME_MARKERS = [
-  "group/folder-row",
-  "className:`text-fade-truncate pr-1`",
+  ["sidebarElectron.projectsNavLink"],
+  ["group/folder-row"],
+  ["className:`min-w-0 truncate pr-1`", "className:`text-fade-truncate pr-1`"],
 ];
 
 function warn(message) {
@@ -77,11 +83,15 @@ function normalizedProjectNameStyle(context) {
 }
 
 function looksLikeSidebarProjectBundle(source) {
-  return SIDEBAR_PROJECT_NAME_MARKERS.every((marker) => source.includes(marker));
+  return SIDEBAR_PROJECT_NAME_MARKERS.every((alternatives) =>
+    alternatives.some((marker) => source.includes(marker)),
+  );
 }
 
 function hasPartialSidebarProjectMarkers(source) {
-  return SIDEBAR_PROJECT_NAME_MARKERS.some((marker) => source.includes(marker));
+  return SIDEBAR_PROJECT_NAME_MARKERS.some((alternatives) =>
+    alternatives.some((marker) => source.includes(marker)),
+  );
 }
 
 function applySidebarProjectNameStylePatch(source, context = {}) {
