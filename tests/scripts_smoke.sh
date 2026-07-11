@@ -2464,6 +2464,12 @@ test_candidate_install_is_transactional() {
     )
 }
 
+test_transactional_install_reenters_with_current_bash() {
+    info "Checking transactional install re-entry uses the active Bash binary"
+    assert_contains "$REPO_DIR/install.sh" '"$BASH" "$SCRIPT_DIR/install.sh" "${original_args[@]}"'
+    assert_contains "$REPO_DIR/install.sh" '"$BASH" "$SCRIPT_DIR/install.sh" --inspect'
+}
+
 test_native_shortcut_targets_compose_existing_flows() {
     info "Checking native install/update shortcut targets"
     local install_log="$TMP_DIR/make-install-native.log"
@@ -8591,6 +8597,7 @@ main() {
     test_fresh_reuse_dmg_uses_cache_when_metadata_matches
     test_rebuild_candidate_uses_validated_default_dmg
     test_candidate_install_is_transactional
+    test_transactional_install_reenters_with_current_bash
     test_native_shortcut_targets_compose_existing_flows
     test_fedora_dependency_bootstrap_installs_rpmbuild
     test_fedora_atomic_rpm_ostree_target_detection

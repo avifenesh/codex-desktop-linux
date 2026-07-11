@@ -110,11 +110,13 @@ transactional_install() {
     rm -rf "$feature_report_dir"
 
     info "Building a transactional candidate: $candidate_dir"
+    # Re-enter through the current Bash binary. Nix builds intentionally do not
+    # expose /bin/bash, so executing this script through its shebang is unsafe.
     if CODEX_INSTALL_TRANSACTION_ACTIVE=1 \
         CODEX_INSTALL_DIR="$candidate_dir" \
         CODEX_PATCH_REPORT_JSON="$core_report" \
         CODEX_REBUILD_REPORT_JSON="$rebuild_report" \
-        "$SCRIPT_DIR/install.sh" "${original_args[@]}"; then
+        "$BASH" "$SCRIPT_DIR/install.sh" "${original_args[@]}"; then
         build_status="success"
     fi
 
@@ -136,7 +138,7 @@ transactional_install() {
         info "Running the shared drift-sensitive feature release probe"
         if CODEX_INSTALL_TRANSACTION_ACTIVE=1 \
             CODEX_LINUX_FEATURES_CONFIG="$features_config" \
-            "$SCRIPT_DIR/install.sh" --inspect --report-dir "$feature_report_dir" "$dmg_path"; then
+            "$BASH" "$SCRIPT_DIR/install.sh" --inspect --report-dir "$feature_report_dir" "$dmg_path"; then
             feature_status="success"
         fi
     fi
