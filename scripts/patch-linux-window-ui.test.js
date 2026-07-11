@@ -1104,8 +1104,13 @@ test("default core patch descriptors are grouped and unique", () => {
     ),
     true,
   );
+  assert.equal(
+    computerUseInstallFlow.pattern.test(
+      "app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~gwqc41kz-current.js",
+    ),
+    true,
+  );
   for (const legacyName of [
-    "app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~current.js",
     "app-initial~app-main~remote-conversation-page~new-thread-panel-page~onboarding-page~appgen-~current.js",
     "plugins-availability-current.js",
     "use-plugin-install-flow-current.js",
@@ -5625,8 +5630,13 @@ test("discovers current app-server conversation core Linux webview patches", () 
     assert.ok(descriptor);
     assert.equal(descriptor.phase, "webview-asset");
     assert.equal(descriptor.ciPolicy, "optional");
-    assert.match(String(descriptor.pattern), /b76hmflu/);
     assert.equal(descriptor.pattern.test(currentConversationAsset), true);
+    assert.equal(
+      descriptor.pattern.test(
+        "app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~gwqc41kz-Bj9ubaFn.js",
+      ),
+      true,
+    );
     assert.equal(descriptor.pattern.test(legacyConversationAsset), false);
     assert.equal(descriptor.pattern.test(legacyLatestConversationAsset), false);
     assert.equal(descriptor.pattern.test(oldConversationAsset), false);
