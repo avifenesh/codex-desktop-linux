@@ -4,6 +4,25 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { findExportedAlias } = require("./minified-js.js");
 
+// Content cache for content-scan fallback. Entries are validated against mtime
+// and size before being served: patches write assets with plain fs.writeFileSync
+// between scans, and a stale cached read would make a later content-scan patch
+// "restore" the pre-patch bytes, silently reverting an earlier patch's edits to
+// the same chunk.
+const webviewAssetContentCache = new Map();
+
+function readWebviewAssetCached(filePath) {
+  const stat = fs.statSync(filePath);
+  const versionKey = `${stat.mtimeMs}:${stat.size}`;
+  const entry = webviewAssetContentCache.get(filePath);
+  if (entry !== undefined && entry.versionKey === versionKey) {
+    return entry.content;
+  }
+  const content = fs.readFileSync(filePath, "utf8");
+  webviewAssetContentCache.set(filePath, { versionKey, content });
+  return content;
+}
+
 function readDirectoryNames(dir) {
   if (!fs.existsSync(dir)) {
     return [];
@@ -39,27 +58,58 @@ function patchAssetFiles(extractedDir, filenamePattern, patchFn, missingWarnMess
     return { matched: 0, changed: 0 };
   }
 
-  const candidates = fs
+  let candidates = fs
     .readdirSync(webviewAssetsDir)
     .filter((name) => regexpTest(filenamePattern, name))
     .sort();
+  let contentScan = false;
 
   if (candidates.length === 0) {
-    console.warn(missingWarnMessage);
-    return { matched: 0, changed: 0 };
+    contentScan = true;
+    candidates = fs
+      .readdirSync(webviewAssetsDir)
+      .filter((name) => name.endsWith(".js"))
+      .sort();
   }
 
+  // Buffer writes until every candidate has been patched so a throw partway
+  // through leaves no half-patched mix of assets on disk. During a content
+  // scan the patch function runs over unrelated bundles, so its per-file
+  // "could not find" warnings are meaningless — silence them and let the
+  // single missing warning below speak when nothing matched at all.
+  const originalWarn = console.warn;
+  if (contentScan) {
+    console.warn = () => {};
+  }
   const pendingWrites = [];
-  for (const candidate of candidates) {
-    const filePath = path.join(webviewAssetsDir, candidate);
-    const currentSource = fs.readFileSync(filePath, "utf8");
-    const patchedSource = patchFn(currentSource);
-    if (patchedSource !== currentSource) {
-      pendingWrites.push({ filePath, patchedSource });
+  try {
+    for (const candidate of candidates) {
+      const filePath = path.join(webviewAssetsDir, candidate);
+      const currentSource = contentScan
+        ? readWebviewAssetCached(filePath)
+        : fs.readFileSync(filePath, "utf8");
+      const patchedSource = patchFn(currentSource);
+      if (patchedSource !== currentSource) {
+        pendingWrites.push({ filePath, patchedSource });
+      }
     }
+  } finally {
+    console.warn = originalWarn;
   }
   for (const { filePath, patchedSource } of pendingWrites) {
     fs.writeFileSync(filePath, patchedSource, "utf8");
+    webviewAssetContentCache.delete(filePath);
+  }
+
+  if (contentScan && pendingWrites.length === 0) {
+    console.warn(missingWarnMessage);
+    return { matched: 0, changed: 0 };
+  }
+  if (contentScan) {
+    console.log(
+      `Asset filename pattern missed; content scan patched ${pendingWrites.length} asset(s)`,
+    );
+    return { matched: pendingWrites.length, changed: pendingWrites.length };
   }
 
   return { matched: candidates.length, changed: pendingWrites.length };
@@ -78,9 +128,21 @@ function findRequiredWebviewAsset(webviewAssetsDir, filenamePattern, marker, des
     .readdirSync(webviewAssetsDir)
     .filter((name) => regexpTest(filenamePattern, name))
     .sort();
-  const matches = marker == null
+  let matches = marker == null
     ? candidates
     : candidates.filter((name) => readWebviewAsset(webviewAssetsDir, name).includes(marker));
+
+  if (matches.length === 0 && marker != null) {
+    // Chunk names drift across upstream releases; fall back to locating the
+    // bundle by its content marker across every JS asset.
+    matches = fs
+      .readdirSync(webviewAssetsDir)
+      .filter((name) => name.endsWith(".js"))
+      .sort()
+      .filter((name) =>
+        readWebviewAssetCached(path.join(webviewAssetsDir, name)).includes(marker),
+      );
+  }
 
   if (matches.length === 0) {
     throw new Error(`Could not find ${description} in ${webviewAssetsDir}`);
