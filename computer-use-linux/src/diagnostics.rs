@@ -1,6 +1,6 @@
 use crate::windowing::registry::{
     self, COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND,
-    HYPRLAND_BACKEND, KWIN_BACKEND,
+    HYPRLAND_BACKEND, I3_BACKEND, KWIN_BACKEND, X11_BACKEND,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -243,6 +243,23 @@ fn capability_map(
     }
     if windowing.cosmic_helper.ok {
         window_backends.push("cosmic".to_string());
+    }
+    // i3 and the generic X11/EWMH backend have no dedicated WindowingReport
+    // field; read them from the probe map (tried last) so the capability list
+    // matches the backends the registry will actually use.
+    if windowing
+        .backends
+        .get(I3_BACKEND)
+        .is_some_and(|check| check.ok)
+    {
+        window_backends.push(I3_BACKEND.to_string());
+    }
+    if windowing
+        .backends
+        .get(X11_BACKEND)
+        .is_some_and(|check| check.ok)
+    {
+        window_backends.push(X11_BACKEND.to_string());
     }
 
     let mut accessibility_backends = Vec::new();
@@ -587,14 +604,16 @@ fn windowing_report(platform: &PlatformReport) -> WindowingReport {
     let can_focus_apps = probes.iter().any(|probe| probe.can_focus_apps);
     let can_focus_windows = probes.iter().any(|probe| probe.can_focus_windows);
     let note = if can_list_windows {
-        if cosmic_helper.ok && is_cosmic_wayland_platform(platform) {
+        if !can_focus_windows {
+            "A window listing backend is available for list_windows, but focused-window and targeted-input verification are unavailable (for example wmctrl is present but xprop is missing on X11)."
+        } else if cosmic_helper.ok && is_cosmic_wayland_platform(platform) {
             "A COSMIC Wayland window backend is available for list_windows, focused_window, and targeted input verification."
         } else if kwin.ok {
             "A KWin/Plasma window backend is available for list_windows, focused_window, and targeted input verification."
         } else if hyprland.ok {
             "A Hyprland window backend is available for list_windows, focused_window, and targeted input verification."
         } else {
-            "A GNOME window listing backend is available for list_windows, focused_window, and targeted input verification."
+            "A window listing backend is available for list_windows, focused_window, and targeted input verification."
         }
     } else {
         "Window listing is unavailable or denied. Computer Use can still use screenshots, AT-SPI, and global ydotool input, but targeted window input cannot be verified. On GNOME, run setup_window_targeting to install the optional GNOME Shell extension backend. On COSMIC, ensure the bundled COSMIC helper is present and can connect to the session. On KDE/Plasma, ensure KWin exposes org.kde.KWin scripting on the session bus. On Hyprland, ensure hyprctl is available in the session."

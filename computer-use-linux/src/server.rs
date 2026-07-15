@@ -66,6 +66,50 @@ pub struct ComputerUseLinux {
     desktop_size: Arc<Mutex<Option<(u32, u32)>>>,
 }
 
+fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
+    let serde_json::Value::Object(object) = value else {
+        return;
+    };
+
+    let has_unsigned_format = matches!(
+        object.get("format").and_then(serde_json::Value::as_str),
+        Some("uint" | "uint8" | "uint16" | "uint32" | "uint64" | "usize")
+    );
+    if has_unsigned_format {
+        object.remove("format");
+    }
+
+    for nested in object.values_mut() {
+        match nested {
+            serde_json::Value::Object(_) => sanitize_unsigned_integer_formats(nested),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    sanitize_unsigned_integer_formats(item);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl ComputerUseLinux {
+    fn mcp_tool_router(&self) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        let mut router = Self::tool_router();
+        for route in router.map.values_mut() {
+            let input_schema = Arc::make_mut(&mut route.attr.input_schema);
+            for value in input_schema.values_mut() {
+                sanitize_unsigned_integer_formats(value);
+            }
+            if let Some(output_schema) = route.attr.output_schema.as_mut() {
+                for value in Arc::make_mut(output_schema).values_mut() {
+                    sanitize_unsigned_integer_formats(value);
+                }
+            }
+        }
+        router
+    }
+}
+
 #[tool_router]
 impl ComputerUseLinux {
     #[tool(
@@ -1247,7 +1291,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "move_window",
-        description = "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Requires the computer-use-linux GNOME Shell extension.",
+        description = "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Works through the Codex GNOME Shell extension or a generic X11/EWMH window manager (wmctrl).",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1261,16 +1305,15 @@ impl ComputerUseLinux {
     ) -> Json<WindowGeometryOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let target = params.target.clone().into_target();
-        self.window_geometry_op(received, &target, |window_id| async move {
-            crate::windowing::backends::gnome::move_extension_window(window_id, params.x, params.y)
-                .await
+        self.window_geometry_op(received, &target, |window| async move {
+            registry::move_window(&window, params.x, params.y).await
         })
         .await
     }
 
     #[tool(
         name = "resize_window",
-        description = "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Requires the computer-use-linux GNOME Shell extension.",
+        description = "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Works through the Codex GNOME Shell extension or a generic X11/EWMH window manager (wmctrl).",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1284,25 +1327,21 @@ impl ComputerUseLinux {
     ) -> Json<WindowGeometryOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let target = params.target.clone().into_target();
-        self.window_geometry_op(received, &target, |window_id| async move {
-            crate::windowing::backends::gnome::resize_extension_window(
-                window_id,
-                params.width,
-                params.height,
-            )
-            .await
+        self.window_geometry_op(received, &target, |window| async move {
+            registry::resize_window(&window, params.width, params.height).await
         })
         .await
     }
 }
 
 #[tool_handler(
+    router = self.mcp_tool_router(),
     name = "codex-computer-use-linux",
     // NOTE: keep in lockstep with Cargo.toml + package.json on every release.
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.3.1-linux-alpha1",
+    version = "0.4.0-linux-alpha1",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -2241,7 +2280,7 @@ impl ComputerUseLinux {
         op: F,
     ) -> Json<WindowGeometryOutput>
     where
-        F: FnOnce(u64) -> Fut,
+        F: FnOnce(crate::windowing::WindowInfo) -> Fut,
         Fut: Future<Output = Result<String>>,
     {
         let windows = match list_windows().await {
@@ -2251,7 +2290,7 @@ impl ComputerUseLinux {
                 return Json(WindowGeometryOutput {
                     ok: false,
                     implemented: true,
-                    backend: crate::windowing::GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                    backend: "unknown".to_string(),
                     window: None,
                     message: format!("Window listing failed: {error}"),
                     permissions_hint: window_permission_hint(&error),
@@ -2259,13 +2298,13 @@ impl ComputerUseLinux {
                 });
             }
         };
-        let window_id = match resolve_window_target(&windows, target) {
-            Ok(window) => window.window_id,
+        let window = match resolve_window_target(&windows, target) {
+            Ok(window) => window.clone(),
             Err(error) => {
                 return Json(WindowGeometryOutput {
                     ok: false,
                     implemented: true,
-                    backend: crate::windowing::GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                    backend: "unknown".to_string(),
                     window: None,
                     message: format!("{error:#}"),
                     permissions_hint: None,
@@ -2273,7 +2312,9 @@ impl ComputerUseLinux {
                 });
             }
         };
-        match op(window_id).await {
+        let backend = window.backend.clone();
+        let window_id = window.window_id;
+        match op(window).await {
             Ok(message) => {
                 // Re-query so the caller sees the compositor-final geometry
                 // (tiling constraints, minimum sizes, etc. may adjust it).
@@ -2291,7 +2332,7 @@ impl ComputerUseLinux {
                 Json(WindowGeometryOutput {
                     ok: true,
                     implemented: true,
-                    backend: crate::windowing::GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                    backend,
                     window,
                     message,
                     permissions_hint: None,
@@ -2303,7 +2344,7 @@ impl ComputerUseLinux {
                 Json(WindowGeometryOutput {
                     ok: false,
                     implemented: true,
-                    backend: crate::windowing::GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                    backend,
                     window: None,
                     permissions_hint: window_permission_hint(&error),
                     message: error,
@@ -3792,6 +3833,49 @@ mod tests {
                 Some(value) => std::env::set_var(self.key, value),
                 None => std::env::remove_var(self.key),
             }
+        }
+    }
+
+    #[test]
+    fn exported_tool_schemas_omit_unsigned_integer_formats() {
+        let tools = ComputerUseLinux::default().mcp_tool_router().list_all();
+        let value = serde_json::to_value(tools).unwrap();
+        let mut unsupported = Vec::new();
+        collect_unsigned_integer_formats(&value, "$", &mut unsupported);
+
+        assert!(
+            unsupported.is_empty(),
+            "unsupported unsigned integer formats: {unsupported:?}"
+        );
+    }
+
+    fn collect_unsigned_integer_formats(
+        value: &serde_json::Value,
+        path: &str,
+        unsupported: &mut Vec<String>,
+    ) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if matches!(
+                    object.get("format").and_then(serde_json::Value::as_str),
+                    Some("uint" | "uint8" | "uint16" | "uint32" | "uint64" | "usize")
+                ) {
+                    unsupported.push(path.to_string());
+                }
+                for (key, nested) in object {
+                    collect_unsigned_integer_formats(nested, &format!("{path}/{key}"), unsupported);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, nested) in items.iter().enumerate() {
+                    collect_unsigned_integer_formats(
+                        nested,
+                        &format!("{path}/{index}"),
+                        unsupported,
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
