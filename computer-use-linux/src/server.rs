@@ -295,14 +295,34 @@ impl ComputerUseLinux {
         let max_depth = params.max_depth.unwrap_or(12).min(12);
         let include_screenshot = params.include_screenshot.unwrap_or(true);
         let screenshot_options = params.screenshot_options();
+        let screenshot_target_requested = params.window_target().has_target();
         let app_filter = self
             .resolve_accessibility_app_filter(&params, window_context.as_ref())
             .await;
         let (screenshot, screenshot_error) = if include_screenshot {
-            match capture_screenshot_raw()
-                .await
-                .and_then(|raw| prepare_screenshot_payload(raw, screenshot_options))
-            {
+            let result = capture_screenshot_raw().await.and_then(|raw| {
+                if let Some(window) = window_context.as_ref() {
+                    let bounds = window.bounds.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "targeted screenshot requires window bounds; refusing to return the full desktop"
+                        )
+                    })?;
+                    prepare_app_state_screenshot(
+                        raw,
+                        Some(bounds),
+                        screenshot_target_requested,
+                        screenshot_options,
+                    )
+                } else {
+                    prepare_app_state_screenshot(
+                        raw,
+                        None,
+                        screenshot_target_requested,
+                        screenshot_options,
+                    )
+                }
+            });
+            match result {
                 Ok(capture) => (Some(capture), None),
                 Err(error) => (None, Some(format!("{error:#}"))),
             }
@@ -1341,7 +1361,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.4.0-linux-alpha1",
+    version = "0.4.1-linux-alpha1",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -1938,9 +1958,9 @@ struct ActionOutput {
 impl ComputerUseLinux {
     fn is_wayland_session(&self) -> bool {
         crate::diagnostics::hydrate_session_bus_env();
-        env::var("XDG_SESSION_TYPE")
-            .ok()
-            .is_some_and(|value| value.eq_ignore_ascii_case("wayland"))
+        let session_type = env::var("XDG_SESSION_TYPE").ok();
+        let wayland_display = env::var("WAYLAND_DISPLAY").ok();
+        session_is_wayland(session_type.as_deref(), wayland_display.as_deref())
     }
 
     // The Wayland remote-desktop portal is now a *fallback* for input: when a
@@ -3001,6 +3021,56 @@ fn data_url_payload(data_url: &str) -> String {
         .to_string()
 }
 
+fn session_is_wayland(session_type: Option<&str>, wayland_display: Option<&str>) -> bool {
+    match session_type {
+        Some(value) => value.eq_ignore_ascii_case("wayland"),
+        None => wayland_display.is_some_and(|value| !value.is_empty()),
+    }
+}
+
+fn prepare_app_state_screenshot(
+    mut raw: RawScreenshotCapture,
+    bounds: Option<&crate::windowing::WindowBounds>,
+    target_requested: bool,
+    options: ScreenshotPayloadOptions,
+) -> Result<ScreenshotCapture> {
+    if target_requested && bounds.is_none() {
+        anyhow::bail!(
+            "targeted screenshot requires a resolved window; refusing to return the full desktop"
+        );
+    }
+    if let Some(bounds) = bounds {
+        let (mut x, mut y, mut width, mut height) = window_crop_rect(bounds).ok_or_else(|| {
+            anyhow::anyhow!(
+                "targeted screenshot has unusable window bounds; refusing to return the full desktop"
+            )
+        })?;
+        if x < 0 {
+            width = width.saturating_sub(x.unsigned_abs());
+            x = 0;
+        }
+        if y < 0 {
+            height = height.saturating_sub(y.unsigned_abs());
+            y = 0;
+        }
+        if width == 0 || height == 0 {
+            anyhow::bail!(
+                "targeted screenshot window is outside the captured desktop; refusing to return the full desktop"
+            );
+        }
+        let (bytes, width, height) = crop_png(&raw.bytes, x, y, width, height)
+            .map_err(|error| anyhow::anyhow!("targeted screenshot crop failed: {error}"))?;
+        raw = RawScreenshotCapture {
+            mime_type: raw.mime_type,
+            bytes,
+            source: raw.source,
+            width,
+            height,
+        };
+    }
+    prepare_screenshot_payload(raw, options)
+}
+
 /// Convert a window's bounds into a crop rectangle, if it has a usable origin
 /// and non-zero size.
 fn window_crop_rect(bounds: &crate::windowing::WindowBounds) -> Option<(i32, i32, u32, u32)> {
@@ -3922,6 +3992,95 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
             .unwrap();
         out
+    }
+
+    #[test]
+    fn targeted_app_state_crops_before_screenshot_payload_resize() {
+        let raw = RawScreenshotCapture {
+            mime_type: "image/png".to_string(),
+            bytes: solid_png(400, 200),
+            source: "test".to_string(),
+            width: 400,
+            height: 200,
+        };
+        let bounds = WindowBounds {
+            x: Some(50),
+            y: Some(20),
+            width: 200,
+            height: 100,
+        };
+        let capture = prepare_app_state_screenshot(
+            raw,
+            Some(&bounds),
+            true,
+            ScreenshotPayloadOptions {
+                max_width: Some(100),
+                max_height: Some(100),
+                max_bytes: Some(1024 * 1024),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            (capture.coordinate_width, capture.coordinate_height),
+            (200, 100)
+        );
+        assert_eq!((capture.width, capture.height), (100, 50));
+    }
+
+    #[test]
+    fn unresolved_app_state_target_refuses_full_desktop_screenshot() {
+        let raw = RawScreenshotCapture {
+            mime_type: "image/png".to_string(),
+            bytes: solid_png(400, 200),
+            source: "test".to_string(),
+            width: 400,
+            height: 200,
+        };
+
+        let error =
+            prepare_app_state_screenshot(raw, None, true, ScreenshotPayloadOptions::default())
+                .unwrap_err();
+
+        assert!(error.to_string().contains("requires a resolved window"));
+    }
+
+    #[test]
+    fn targeted_app_state_crops_only_visible_part_of_offscreen_window() {
+        let raw = RawScreenshotCapture {
+            mime_type: "image/png".to_string(),
+            bytes: solid_png(400, 200),
+            source: "test".to_string(),
+            width: 400,
+            height: 200,
+        };
+        let bounds = WindowBounds {
+            x: Some(-50),
+            y: Some(-40),
+            width: 100,
+            height: 100,
+        };
+
+        let capture = prepare_app_state_screenshot(
+            raw,
+            Some(&bounds),
+            true,
+            ScreenshotPayloadOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            (capture.coordinate_width, capture.coordinate_height),
+            (50, 60)
+        );
+    }
+
+    #[test]
+    fn wayland_display_is_enough_to_select_portal_fallback() {
+        assert!(session_is_wayland(None, Some("wayland-1")));
+        assert!(session_is_wayland(Some("wayland"), None));
+        assert!(!session_is_wayland(Some("x11"), None));
     }
 
     #[test]
