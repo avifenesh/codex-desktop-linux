@@ -33,7 +33,7 @@ use std::{
     env,
     future::Future,
     os::unix::net::{UnixDatagram, UnixStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
@@ -45,7 +45,7 @@ use tokio::{
 };
 use zbus::{Connection as ZbusConnection, Proxy as ZbusProxy};
 
-const YDOTOOL_TIMEOUT: Duration = Duration::from_secs(10);
+const INPUT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const YDOTOOL_TYPE_CHARS_PER_SECOND: u64 = 20;
 const KDE_CLIPBOARD_DBUS_TIMEOUT: Duration = Duration::from_secs(3);
 const KDE_KLIPPER_SERVICE: &str = "org.kde.klipper";
@@ -1159,7 +1159,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "press_key",
-        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
+        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1184,6 +1184,48 @@ impl ComputerUseLinux {
                 });
             }
         };
+        let Some((chord_modifiers, chord_key)) = key_chord(&params.key) else {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "press_key".to_string(),
+                message: "Unsupported key. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit.".to_string(),
+                received,
+            });
+        };
+        if self.should_prefer_portal_keyboard_for_chords() {
+            match self.ensure_portal_keyboard_session().await {
+                Ok(Some(session)) => {
+                    let modifiers: Vec<i32> =
+                        chord_modifiers.iter().map(|m| i32::from(*m)).collect();
+                    match press_keycode_chord(&session, &modifiers, i32::from(chord_key)).await {
+                        Ok(()) => {
+                            let notes = self.input_landing_notes(focus.as_ref(), false).await;
+                            return Json(with_notes(
+                                successful_action_with_focus(
+                                    "press_key",
+                                    "Action sent through the remote desktop portal.",
+                                    received,
+                                    focus,
+                                ),
+                                notes,
+                            ));
+                        }
+                        Err(error) => {
+                            self.clear_portal_keyboard_session();
+                            return Json(action_result_with_focus(
+                                "press_key",
+                                Err(format!("{error:#}")),
+                                received,
+                                focus,
+                            ));
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
+        }
         let Some(key_events) = key_sequence(&params.key) else {
             return Json(ActionOutput {
                 ok: false,
@@ -1193,6 +1235,34 @@ impl ComputerUseLinux {
                 received,
             });
         };
+        if self.should_prefer_xdotool_keyboard() {
+            if let Some(spec) = xdotool_key_spec(&params.key) {
+                let xdotool_args = vec!["key".to_string(), "--clearmodifiers".to_string(), spec];
+                let mut ydotool_args = vec!["key".to_string()];
+                ydotool_args.extend(key_events.clone());
+                let result = run_xdotool_or_fallback(Path::new("xdotool"), &xdotool_args, || {
+                    run_ydotool(&ydotool_args)
+                })
+                .await;
+                let used_xdotool = result
+                    .as_ref()
+                    .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
+                let mut output = action_result_with_focus(
+                    "press_key",
+                    result.map(|result| vec![result.output]),
+                    received,
+                    focus.clone(),
+                );
+                if used_xdotool {
+                    output.message = "Action sent through xdotool (X11 XTEST).".to_string();
+                }
+                if output.ok && focus.is_some() {
+                    let notes = self.input_landing_notes(focus.as_ref(), false).await;
+                    output = with_notes(output, notes);
+                }
+                return Json(output);
+            }
+        }
         let mut args = vec!["key".to_string()];
         args.extend(key_events);
         let result = run_ydotool(&args).await.map(|output| vec![output]);
@@ -1298,6 +1368,30 @@ impl ComputerUseLinux {
                 }
             }
         }
+        if self.should_prefer_xdotool_keyboard() {
+            let args = xdotool_type_args(&params.text);
+            let result = run_xdotool_or_fallback(Path::new("xdotool"), &args, || {
+                run_ydotool_type_text(&params.text)
+            })
+            .await;
+            let used_xdotool = result
+                .as_ref()
+                .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
+            let mut output = action_result_with_focus(
+                "type_text",
+                result.map(|result| vec![result.output]),
+                received,
+                focus.clone(),
+            );
+            if used_xdotool {
+                output.message = "Action sent through xdotool (X11 XTEST).".to_string();
+            }
+            if output.ok && focus.is_some() {
+                let notes = self.input_landing_notes(focus.as_ref(), true).await;
+                output = with_notes(output, notes);
+            }
+            return Json(output);
+        }
         let result = run_ydotool_type_text(&params.text)
             .await
             .map(|output| vec![output]);
@@ -1361,7 +1455,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.4.1-linux-alpha1",
+    version = "0.4.2-linux-alpha1",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -2004,11 +2098,55 @@ impl ComputerUseLinux {
         self.is_wayland_session() && !self.is_kde_wayland_session() && ydotool_socket().is_none()
     }
 
+    /// Portal keyboard policy for `press_key` chords. Unlike literal text
+    /// (where KDE prefers the clipboard paste backend), key chords have no
+    /// clipboard route, so the portal keyboard session is preferred on any
+    /// Wayland session, including Plasma. Reuse an active session even when
+    /// ydotool is available; otherwise prefer the portal only when forced or
+    /// when ydotool is absent.
+    fn should_prefer_portal_keyboard_for_chords(&self) -> bool {
+        if env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+        ]) {
+            return false;
+        }
+        if !self.is_wayland_session() {
+            return false;
+        }
+        if self.cached_portal_keyboard_session().is_some()
+            || env_flag_enabled_any(&[
+                "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD",
+            ])
+        {
+            return true;
+        }
+        ydotool_socket().is_none()
+    }
+
     fn should_prefer_kde_clipboard_text_backend(&self) -> bool {
         !env_flag_enabled_any(&[
             "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
             "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
         ]) && self.is_kde_wayland_session()
+    }
+
+    /// Prefer XTEST on X11 because ydotool scancodes are re-mapped by XKB.
+    fn should_prefer_xdotool_keyboard(&self) -> bool {
+        if env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+        ]) {
+            return false;
+        }
+        if env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD",
+            "CODEX_COMPUTER_USE_FORCE_XDOTOOL_KEYBOARD",
+        ]) {
+            return env_var_non_empty("DISPLAY") && xdotool_available();
+        }
+        !self.is_wayland_session() && env_var_non_empty("DISPLAY") && xdotool_available()
     }
 
     fn is_kde_wayland_session(&self) -> bool {
@@ -3012,6 +3150,12 @@ fn env_flag_enabled_any(keys: &[&str]) -> bool {
     keys.iter().any(|key| env_flag_enabled(key))
 }
 
+fn env_var_non_empty(key: &str) -> bool {
+    env::var(key)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
 /// Return the base64 payload of a `data:` URL (or the original string if bare).
 fn data_url_payload(data_url: &str) -> String {
     data_url
@@ -3401,7 +3545,7 @@ async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
     command.stderr(Stdio::piped());
 
     match command.spawn() {
-        Ok(child) => match wait_for_ydotool_output(child).await {
+        Ok(child) => match wait_for_command_output(child, "ydotool").await {
             Ok(output) if output.status.success() => Ok(output),
             Ok(output) => Err(ydotool_output_error(output)),
             Err(error) => Err(error),
@@ -3429,7 +3573,8 @@ async fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String
                 }
             }
             let output =
-                wait_for_ydotool_output_with_timeout(child, ydotool_type_timeout(text)).await?;
+                wait_for_command_output_with_timeout(child, "ydotool", ydotool_type_timeout(text))
+                    .await?;
             if output.status.success() {
                 Ok(output)
             } else {
@@ -3440,12 +3585,16 @@ async fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String
     }
 }
 
-async fn wait_for_ydotool_output(child: TokioChild) -> std::result::Result<Output, String> {
-    wait_for_ydotool_output_with_timeout(child, YDOTOOL_TIMEOUT).await
+async fn wait_for_command_output(
+    child: TokioChild,
+    command: &str,
+) -> std::result::Result<Output, String> {
+    wait_for_command_output_with_timeout(child, command, INPUT_COMMAND_TIMEOUT).await
 }
 
-async fn wait_for_ydotool_output_with_timeout(
+async fn wait_for_command_output_with_timeout(
     mut child: TokioChild,
+    command: &str,
     timeout_duration: Duration,
 ) -> std::result::Result<Output, String> {
     let stdout_reader = read_child_pipe(child.stdout.take());
@@ -3457,11 +3606,11 @@ async fn wait_for_ydotool_output_with_timeout(
             stdout_reader.abort();
             stderr_reader.abort();
             return Err(format!(
-                "ydotool timed out after {}s",
+                "{command} timed out after {}s",
                 timeout_duration.as_secs()
             ));
         }
-        Ok(result) => result.map_err(|error| format!("failed to wait for ydotool: {error}"))?,
+        Ok(result) => result.map_err(|error| format!("failed to wait for {command}: {error}"))?,
     };
     let stdout = stdout_reader.await.unwrap_or_default();
     let stderr = stderr_reader.await.unwrap_or_default();
@@ -3487,7 +3636,7 @@ where
 
 fn ydotool_type_timeout(text: &str) -> Duration {
     let text_seconds = (text.chars().count() as u64).div_ceil(YDOTOOL_TYPE_CHARS_PER_SECOND);
-    Duration::from_secs(YDOTOOL_TIMEOUT.as_secs().saturating_add(text_seconds))
+    Duration::from_secs(INPUT_COMMAND_TIMEOUT.as_secs().saturating_add(text_seconds))
 }
 
 const EVDEV_KEY_LEFTCTRL: i32 = 29;
@@ -3632,6 +3781,171 @@ fn ydotool_output_error(output: Output) -> String {
     command_output_error("ydotool", output)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyboardCommandBackend {
+    Xdotool,
+    Ydotool,
+}
+
+struct KeyboardCommandResult {
+    output: Output,
+    backend: KeyboardCommandBackend,
+}
+
+enum XdotoolAttempt {
+    Unavailable,
+    Finished(std::result::Result<Output, String>),
+}
+
+/// Run X11 keyboard input through XTEST so the live XKB layout resolves keys.
+async fn run_xdotool(program: &Path, args: &[String]) -> XdotoolAttempt {
+    let mut command = TokioCommand::new(program);
+    command.args(args);
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    match command.spawn() {
+        Ok(child) => {
+            XdotoolAttempt::Finished(match wait_for_command_output(child, "xdotool").await {
+                Ok(output) if output.status.success() => Ok(output),
+                Ok(output) => Err(command_output_error("xdotool", output)),
+                Err(error) => Err(error),
+            })
+        }
+        Err(_) => XdotoolAttempt::Unavailable,
+    }
+}
+
+async fn run_xdotool_or_fallback<F, Fut>(
+    program: &Path,
+    args: &[String],
+    fallback: F,
+) -> std::result::Result<KeyboardCommandResult, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::result::Result<Output, String>>,
+{
+    match run_xdotool(program, args).await {
+        XdotoolAttempt::Unavailable => fallback().await.map(|output| KeyboardCommandResult {
+            output,
+            backend: KeyboardCommandBackend::Ydotool,
+        }),
+        XdotoolAttempt::Finished(result) => result.map(|output| KeyboardCommandResult {
+            output,
+            backend: KeyboardCommandBackend::Xdotool,
+        }),
+    }
+}
+
+fn xdotool_available() -> bool {
+    which_in_path("xdotool")
+}
+
+fn xdotool_type_args(text: &str) -> Vec<String> {
+    vec![
+        "type".to_string(),
+        "--clearmodifiers".to_string(),
+        "--delay".to_string(),
+        "0".to_string(),
+        "--".to_string(),
+        text.to_string(),
+    ]
+}
+
+fn which_in_path(binary: &str) -> bool {
+    let Ok(path) = env::var("PATH") else {
+        return false;
+    };
+    env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(binary);
+        std::fs::metadata(&candidate)
+            .map(|meta| meta.is_file())
+            .unwrap_or(false)
+    })
+}
+
+/// Map the accepted key grammar to an `xdotool key` X11 keysym spec.
+fn xdotool_key_spec(key: &str) -> Option<String> {
+    let parts = key
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let (key_part, modifier_parts) = parts.split_last()?;
+
+    key_chord(key)?;
+
+    let mut spec = Vec::new();
+    for part in modifier_parts {
+        spec.push(xdotool_modifier_name(part)?.to_string());
+    }
+
+    if modifier_parts.is_empty() {
+        if let Some(bare) = xdotool_modifier_keysym(key_part) {
+            return Some(bare.to_string());
+        }
+    }
+    spec.push(xdotool_keysym_name(key_part)?);
+    Some(spec.join("+"))
+}
+
+fn xdotool_modifier_name(key: &str) -> Option<&'static str> {
+    match normalize_key(key).as_str() {
+        "ctrl" | "control" => Some("ctrl"),
+        "alt" | "option" => Some("alt"),
+        "shift" => Some("shift"),
+        "meta" | "super" | "cmd" | "command" => Some("super"),
+        _ => None,
+    }
+}
+
+fn xdotool_modifier_keysym(key: &str) -> Option<&'static str> {
+    match normalize_key(key).as_str() {
+        "ctrl" | "control" => Some("ctrl"),
+        "alt" | "option" => Some("alt"),
+        "shift" => Some("shift"),
+        "meta" | "super" | "cmd" | "command" => Some("super"),
+        _ => None,
+    }
+}
+
+fn xdotool_keysym_name(key: &str) -> Option<String> {
+    let normalized = normalize_key(key);
+    let named = match normalized.as_str() {
+        "enter" | "return" => "Return",
+        "escape" | "esc" => "Escape",
+        "tab" => "Tab",
+        "backspace" => "BackSpace",
+        "delete" | "del" => "Delete",
+        "space" => "space",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" | "page_up" => "Page_Up",
+        "pagedown" | "page_down" => "Page_Down",
+        "arrowleft" | "left" => "Left",
+        "arrowright" | "right" => "Right",
+        "arrowup" | "up" => "Up",
+        "arrowdown" | "down" => "Down",
+        "f1" => "F1",
+        "f2" => "F2",
+        "f3" => "F3",
+        "f4" => "F4",
+        "f5" => "F5",
+        "f6" => "F6",
+        "f7" => "F7",
+        "f8" => "F8",
+        "f9" => "F9",
+        "f10" => "F10",
+        "f11" => "F11",
+        "f12" => "F12",
+        value if value.len() == 1 && value.as_bytes()[0].is_ascii_alphanumeric() => {
+            return Some(value.to_string());
+        }
+        _ => return None,
+    };
+    Some(named.to_string())
+}
+
 fn command_output_error(command: &str, output: Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -3699,7 +4013,8 @@ fn mouse_button_code(button: Option<&str>) -> String {
     .to_string()
 }
 
-fn key_sequence(key: &str) -> Option<Vec<String>> {
+/// Parse a chord into held modifier evdev codes and the final key code.
+fn key_chord(key: &str) -> Option<(Vec<u16>, u16)> {
     let parts = key
         .split('+')
         .map(str::trim)
@@ -3708,7 +4023,7 @@ fn key_sequence(key: &str) -> Option<Vec<String>> {
     let (key_part, modifier_parts) = parts.split_last()?;
     if modifier_parts.is_empty() {
         if let Some(modifier) = modifier_keycode(key_part) {
-            return Some(vec![format!("{modifier}:1"), format!("{modifier}:0")]);
+            return Some((Vec::new(), modifier));
         }
     }
     let mut modifiers = Vec::new();
@@ -3716,7 +4031,11 @@ fn key_sequence(key: &str) -> Option<Vec<String>> {
         modifiers.push(modifier_keycode(part)?);
     }
     let keycode = keycode(key_part)?;
+    Some((modifiers, keycode))
+}
 
+fn key_sequence(key: &str) -> Option<Vec<String>> {
+    let (modifiers, keycode) = key_chord(key)?;
     let mut events = Vec::new();
     for modifier in &modifiers {
         events.push(format!("{modifier}:1"));
@@ -3883,6 +4202,7 @@ mod tests {
     use super::*;
     use crate::atspi_tree::{AccessibilityAction, Bounds};
     use crate::windows::{WindowBounds, GNOME_SHELL_EXTENSION_BACKEND};
+    use std::os::unix::fs::PermissionsExt;
 
     struct EnvVarGuard {
         key: &'static str,
@@ -4761,6 +5081,15 @@ mod tests {
     }
 
     #[test]
+    fn key_chord_splits_modifiers_and_key() {
+        assert_eq!(key_chord("Ctrl+Shift+P"), Some((vec![29, 42], 25)));
+        assert_eq!(key_chord("Ctrl+S"), Some((vec![29], 31)));
+        assert_eq!(key_chord("Enter"), Some((vec![], 28)));
+        assert_eq!(key_chord("Super"), Some((vec![], 125)));
+        assert_eq!(key_chord("NotAKey"), None);
+    }
+
+    #[test]
     fn key_sequence_presses_modifiers_around_key() {
         assert_eq!(
             key_sequence("Ctrl+Shift+P"),
@@ -4781,6 +5110,126 @@ mod tests {
             key_sequence("Super"),
             Some(vec!["125:1".to_string(), "125:0".to_string()])
         );
+    }
+
+    #[test]
+    fn xdotool_key_spec_maps_named_keys_to_x11_keysyms() {
+        assert_eq!(xdotool_key_spec("Return"), Some("Return".to_string()));
+        assert_eq!(xdotool_key_spec("enter"), Some("Return".to_string()));
+        assert_eq!(xdotool_key_spec("Escape"), Some("Escape".to_string()));
+        assert_eq!(xdotool_key_spec("backspace"), Some("BackSpace".to_string()));
+        assert_eq!(xdotool_key_spec("PageUp"), Some("Page_Up".to_string()));
+        assert_eq!(xdotool_key_spec("ArrowLeft"), Some("Left".to_string()));
+        assert_eq!(xdotool_key_spec("f5"), Some("F5".to_string()));
+        assert_eq!(xdotool_key_spec("space"), Some("space".to_string()));
+    }
+
+    #[test]
+    fn xdotool_key_spec_maps_chords_with_modifier_prefixes() {
+        assert_eq!(xdotool_key_spec("ctrl+a"), Some("ctrl+a".to_string()));
+        assert_eq!(xdotool_key_spec("Ctrl+S"), Some("ctrl+s".to_string()));
+        assert_eq!(
+            xdotool_key_spec("Ctrl+Shift+P"),
+            Some("ctrl+shift+p".to_string())
+        );
+        assert_eq!(
+            xdotool_key_spec("Meta+Return"),
+            Some("super+Return".to_string())
+        );
+        assert_eq!(xdotool_key_spec("Alt+F4"), Some("alt+F4".to_string()));
+    }
+
+    #[test]
+    fn xdotool_key_spec_maps_bare_modifier_to_single_keysym() {
+        assert_eq!(xdotool_key_spec("Super"), Some("super".to_string()));
+        assert_eq!(xdotool_key_spec("ctrl"), Some("ctrl".to_string()));
+    }
+
+    #[test]
+    fn xdotool_type_disables_per_character_delay_for_long_input() {
+        let text = "x".repeat(10_000);
+        let args = xdotool_type_args(&text);
+
+        assert_eq!(
+            &args[..5],
+            ["type", "--clearmodifiers", "--delay", "0", "--"]
+        );
+        assert_eq!(args[5], text);
+    }
+
+    #[tokio::test]
+    async fn launched_xdotool_type_failure_does_not_run_ydotool_fallback() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-xdotool-fallback-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).expect("create command test directory");
+        let xdotool = dir.join("xdotool");
+        let ydotool = dir.join("ydotool");
+        let xdotool_marker = dir.join("xdotool-ran");
+        let ydotool_marker = dir.join("ydotool-ran");
+        std::fs::write(
+            &xdotool,
+            format!("#!/bin/sh\ntouch '{}'\nexit 9\n", xdotool_marker.display()),
+        )
+        .expect("write fake xdotool");
+        std::fs::write(
+            &ydotool,
+            format!("#!/bin/sh\ntouch '{}'\n", ydotool_marker.display()),
+        )
+        .expect("write fake ydotool");
+        std::fs::set_permissions(&xdotool, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake xdotool executable");
+        std::fs::set_permissions(&ydotool, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake ydotool executable");
+
+        let result = run_xdotool_or_fallback(&xdotool, &xdotool_type_args("long text"), || async {
+            TokioCommand::new(&ydotool)
+                .output()
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert!(xdotool_marker.exists(), "fake xdotool did not execute");
+        assert!(
+            !ydotool_marker.exists(),
+            "ydotool fallback replayed text after xdotool started"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn unavailable_xdotool_uses_ydotool_fallback() {
+        let result = run_xdotool_or_fallback(
+            Path::new("/definitely/missing/xdotool"),
+            &xdotool_type_args("text"),
+            || async {
+                TokioCommand::new("sh")
+                    .args(["-c", "exit 0"])
+                    .output()
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+        )
+        .await
+        .expect("spawn failure should use fallback");
+
+        assert_eq!(result.backend, KeyboardCommandBackend::Ydotool);
+        assert!(result.output.status.success());
+    }
+
+    #[test]
+    fn xdotool_key_spec_rejects_everything_key_chord_rejects() {
+        for key in ["NotAKey", "", "ctrl+", "ctrl+NotAKey", "f13", "hyper+a"] {
+            assert_eq!(
+                xdotool_key_spec(key).is_some(),
+                key_chord(key).is_some(),
+                "backend grammars diverged for {key:?}"
+            );
+        }
     }
 
     #[test]
@@ -4817,14 +5266,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ydotool_wait_drains_output_before_exit() {
+    async fn command_wait_drains_output_before_exit() {
         let mut command = tokio::process::Command::new("sh");
         command.args(["-c", "yes noisy | head -c 200000 >&2; exit 7"]);
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
 
-        let output = wait_for_ydotool_output_with_timeout(
+        let output = wait_for_command_output_with_timeout(
             command.spawn().expect("spawn noisy child"),
+            "test-command",
             Duration::from_secs(5),
         )
         .await

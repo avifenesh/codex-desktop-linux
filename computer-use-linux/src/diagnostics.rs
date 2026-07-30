@@ -29,6 +29,14 @@ const DESKTOP_ENV_KEYS: &[&str] = &[
     "XDG_RUNTIME_DIR",
     "XDG_SESSION_TYPE",
 ];
+const FORCE_YDOTOOL_KEYBOARD_ENV_KEYS: &[&str] = &[
+    "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+    "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+];
+const FORCE_XDOTOOL_KEYBOARD_ENV_KEYS: &[&str] = &[
+    "COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD",
+    "CODEX_COMPUTER_USE_FORCE_XDOTOOL_KEYBOARD",
+];
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DoctorReport {
@@ -123,6 +131,9 @@ pub struct InputReport {
     pub ydotoold: Check,
     pub ydotool_socket: Check,
     pub uinput: Check,
+    /// X11 XTEST keyboard backend. Preferred over ydotool on X11 sessions,
+    /// where raw evdev scancodes are re-mapped by the active XKB layout.
+    pub xdotool: Check,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -208,6 +219,11 @@ fn capability_map(
     }
     if portals.remote_desktop.ok {
         input_backends.push("portal".to_string());
+    }
+    let force_ydotool = env_flag_enabled_any(FORCE_YDOTOOL_KEYBOARD_ENV_KEYS);
+    let force_xdotool = env_flag_enabled_any(FORCE_XDOTOOL_KEYBOARD_ENV_KEYS);
+    if should_advertise_xdotool(platform, input, force_ydotool, force_xdotool) {
+        input_backends.push("xdotool".to_string());
     }
     if input.ydotool_socket.ok {
         input_backends.push("ydotool".to_string());
@@ -649,6 +665,7 @@ fn input_report() -> InputReport {
         ydotoold: process_check("ydotoold"),
         ydotool_socket: ydotool_socket_check(),
         uinput: read_write_path_check(Path::new("/dev/uinput")),
+        xdotool: command_path_check("xdotool"),
     }
 }
 
@@ -817,6 +834,36 @@ fn user_id() -> Option<String> {
 
 fn command_path_check(command: &str) -> Check {
     command_check("sh", &["-c", &format!("command -v {command}")])
+}
+
+fn platform_is_wayland(platform: &PlatformReport) -> bool {
+    match platform.xdg_session_type.as_deref() {
+        Some(value) => value.eq_ignore_ascii_case("wayland"),
+        None => platform
+            .wayland_display
+            .as_deref()
+            .is_some_and(|display| !display.trim().is_empty()),
+    }
+}
+
+fn should_advertise_xdotool(
+    platform: &PlatformReport,
+    input: &InputReport,
+    force_ydotool: bool,
+    force_xdotool: bool,
+) -> bool {
+    !force_ydotool
+        && input.xdotool.ok
+        && platform
+            .display
+            .as_deref()
+            .is_some_and(|display| !display.trim().is_empty())
+        && (force_xdotool || !platform_is_wayland(platform))
+}
+
+fn env_flag_enabled_any(keys: &[&str]) -> bool {
+    keys.iter()
+        .any(|key| env::var(key).ok().as_deref() == Some("1"))
 }
 
 fn process_check(process_name: &str) -> Check {
@@ -1101,6 +1148,7 @@ mod tests {
             ydotoold,
             ydotool_socket,
             uinput,
+            xdotool: Check::fail("missing xdotool"),
         }
     }
 
@@ -1178,6 +1226,82 @@ mod tests {
         assert!(process_env_has_graphical_display(&with_display));
         assert!(process_env_has_graphical_display(&with_wayland));
         assert!(!process_env_has_graphical_display(&without_display));
+    }
+
+    #[test]
+    fn capabilities_prefer_xdotool_before_ydotool_on_x11() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        let input = InputReport {
+            ydotool: Check::ok("ydotool"),
+            ydotoold: Check::ok("ydotoold"),
+            ydotool_socket: Check::ok("connectable"),
+            uinput: Check::fail("missing"),
+            xdotool: Check::ok("xdotool"),
+        };
+
+        let capabilities = capability_map(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility_report(Check::fail("missing"), Check::fail("missing")),
+            &windowing_report(false, false),
+            &input,
+        );
+
+        assert_eq!(capabilities.input, ["xdotool", "ydotool"]);
+        assert_eq!(capabilities.preferred.input.as_deref(), Some("xdotool"));
+    }
+
+    #[test]
+    fn capabilities_require_display_to_advertise_xdotool() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        platform.display = None;
+        let input = InputReport {
+            ydotool: Check::ok("ydotool"),
+            ydotoold: Check::ok("ydotoold"),
+            ydotool_socket: Check::ok("connectable"),
+            uinput: Check::fail("missing"),
+            xdotool: Check::ok("xdotool"),
+        };
+
+        let capabilities = capability_map(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility_report(Check::fail("missing"), Check::fail("missing")),
+            &windowing_report(false, false),
+            &input,
+        );
+
+        assert_eq!(capabilities.input, ["ydotool"]);
+        assert_eq!(capabilities.preferred.input.as_deref(), Some("ydotool"));
+    }
+
+    #[test]
+    fn xdotool_diagnostics_force_overrides_match_runtime_precedence() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("wayland".to_string());
+        let mut input = input_report(false);
+        input.xdotool = Check::ok("xdotool");
+
+        assert!(should_advertise_xdotool(&platform, &input, false, true));
+        assert!(!should_advertise_xdotool(&platform, &input, true, true));
+        assert_eq!(
+            FORCE_XDOTOOL_KEYBOARD_ENV_KEYS,
+            [
+                "COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_XDOTOOL_KEYBOARD"
+            ]
+        );
+        assert_eq!(
+            FORCE_YDOTOOL_KEYBOARD_ENV_KEYS,
+            [
+                "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD"
+            ]
+        );
     }
 
     #[test]
