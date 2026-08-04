@@ -31,13 +31,18 @@ const LINUX_CHROME_NATIVE_HOST_RUNTIME_APP_SERVER_CODEX_MARKER =
   "/*codexLinuxChromeNativeHostAppServerCodexRuntime*/";
 const LINUX_CHROME_NATIVE_HOST_RUNTIME_APP_SERVER_SOURCE_PATH_MARKER =
   "/*codexLinuxChromePluginAppServerSourcePath*/";
+const LINUX_CHROME_PLUGIN_RUNTIME_CONFIG_MARKER =
+  "/*codexLinuxChromePluginRuntimeConfig*/";
 const LINUX_CHROME_NATIVE_HOST_RUNTIME_APP_SERVER_MARKERS = [
   LINUX_CHROME_NATIVE_HOST_RUNTIME_APP_SERVER_RUNTIME_MARKER,
   LINUX_CHROME_NATIVE_HOST_RUNTIME_APP_SERVER_CODEX_MARKER,
   LINUX_CHROME_NATIVE_HOST_RUNTIME_APP_SERVER_SOURCE_PATH_MARKER,
+  LINUX_CHROME_PLUGIN_RUNTIME_CONFIG_MARKER,
 ];
 const LINUX_CHROME_PLUGIN_APP_SERVER_SOURCE_PATH_HELPER =
   "function codexLinuxChromePluginAppServerSourcePath(e){return e.codexCliPath}";
+const LINUX_CHROME_PLUGIN_RUNTIME_CONFIG_HELPER =
+  "async function codexLinuxChromePluginRuntimeConfig(e){if(process.platform!==`linux`)return e;let n=require(`node:path`),r=require(`node:fs/promises`),i=process.geteuid?.();if(!Number.isInteger(i))throw Error(`Linux Chrome plugin runtime owner is unavailable`);let a=n.resolve(e.codexHome),o=await r.realpath(a),s=await r.realpath(e.pluginRoot),c=n.join(o,`plugins`,`cache`),l=n.relative(c,s);if(l===``||l===`..`||l.startsWith(`..${n.sep}`)||n.isAbsolute(l))throw Error(`Linux Chrome plugin cache path is outside CODEX_HOME`);let u=l.split(n.sep);if(u.length!==3||u[0]!==`openai-bundled`||u[1]!==`chrome`)return e;let d=n.dirname(s),f=n.join(o,`plugins`,`linux-runtime-cache`,u[0],u[1]),p=n.join(f,`latest`),m=await r.realpath(p),h=n.relative(f,m);if(h!==u[2]||n.isAbsolute(h))throw Error(`Linux Chrome plugin runtime version does not match installed plugin`);let g=await r.lstat(p);if(!g.isSymbolicLink()||g.uid!==i)throw Error(`Linux Chrome plugin runtime link is not trusted`);let _=[o,n.join(o,`plugins`),n.join(o,`plugins`,`linux-runtime-cache`),n.join(o,`plugins`,`linux-runtime-cache`,u[0]),f,m];for(let e of _){let t=await r.lstat(e);if(t.isSymbolicLink()||!t.isDirectory()||t.uid!==i||(t.mode&18)!==0)throw Error(`Linux Chrome plugin runtime parent is not trusted`)}let v=async e=>{let t=await r.lstat(e);if(t.isSymbolicLink()||!t.isDirectory()&&!t.isFile()||t.uid!==i||(t.mode&18)!==0)throw Error(`Linux Chrome plugin runtime is not trusted`);if(t.isDirectory())for(let t of await r.readdir(e))await v(n.join(e,t))};await v(m);let y=await r.lstat(n.join(m,`extension-host`,`linux`,process.arch,`extension-host`));if(!y.isFile()||(y.mode&73)===0)throw Error(`Linux Chrome plugin runtime host is not executable`);let b=JSON.parse(await r.readFile(n.join(m,`scripts`,`extension-ids.json`),`utf8`)).extensionIds;if(!Array.isArray(b)||b.length===0||b.some(e=>typeof e!==`string`||!/^[a-p]{32}$/.test(e)))throw Error(`Linux Chrome plugin runtime extension IDs are invalid`);let x=[o,n.join(o,`plugins`),c,n.join(c,u[0]),d];for(let e of x){let t=await r.lstat(e);if(t.isSymbolicLink()||!t.isDirectory()||t.uid!==i)throw Error(`Linux Chrome plugin cache parent is not trusted`);await r.chmod(e,t.mode&~18)}let w=n.dirname(n.resolve(e.pluginRoot));if(await r.realpath(w)!==d)throw Error(`Linux Chrome plugin cache path is outside CODEX_HOME`);let C=n.join(w,`.codex-linux-runtime`);try{let e=await r.lstat(C);if(!e.isSymbolicLink())throw Error(`Linux Chrome plugin runtime bridge is not trusted`)}catch(e){if(e?.code!==`ENOENT`)throw e}let S=`${C}.tmp-${require(`node:crypto`).randomUUID()}`;try{await r.symlink(m,S,`dir`),await r.rename(S,C)}finally{await r.rm(S,{force:!0})}if(await r.realpath(C)!==m)throw Error(`Linux Chrome plugin runtime bridge is not trusted`);return{...e,pluginRoot:C,extensionIds:[...new Set(b)]}}";
 const CURRENT_CHROME_NATIVE_HOST_RUNTIME_MESSAGE =
   "Missing bundled Electron runtime required to sync Chrome native host resources";
 const CURRENT_CHROME_APP_SERVER_CODEX_RUNTIME_MESSAGE =
@@ -81,6 +86,7 @@ function hasCompleteModernChromeNativeHostRuntimePatch(source) {
 function hasCompleteCurrentChromeAppServerRuntimePatch(source) {
   return markerCount(source, LINUX_CHROME_NATIVE_HOST_RUNTIME_HELPER) === 1 &&
     markerCount(source, LINUX_CHROME_PLUGIN_APP_SERVER_SOURCE_PATH_HELPER) === 1 &&
+    markerCount(source, LINUX_CHROME_PLUGIN_RUNTIME_CONFIG_HELPER) === 1 &&
     LINUX_CHROME_NATIVE_HOST_RUNTIME_APP_SERVER_MARKERS.every((marker) =>
       markerCount(source, marker) === 1
     ) &&
@@ -100,6 +106,12 @@ function hasCompleteCurrentChromeAppServerRuntimePatch(source) {
       source,
       new RegExp(
         String.raw`\/\*codexLinuxChromeNativeHostAppServerCodexRuntime\*\/async function ${IDENTIFIER_PATTERN}\((?<codexConfig>${IDENTIFIER_PATTERN})\)\{let (?<codexPath>${IDENTIFIER_PATTERN})=${IDENTIFIER_PATTERN}\(\k<codexConfig>\)\?\?codexLinuxChromeNativeHostRuntimeEnv\(\`CODEX_CLI_PATH\`\)\?\?codexLinuxChromeNativeHostRuntimePath\(\`codex\`\);if\(\k<codexPath>==null\)throw Error\(.+?\);return ${IDENTIFIER_PATTERN}\(\{codexCliPath:\k<codexPath>,codexHome:\k<codexConfig>\.codexHome,nativeHostName:\k<codexConfig>\.nativeHostName\}\)\}`,
+      ),
+    ) &&
+    matchesExactlyOnce(
+      source,
+      new RegExp(
+        String.raw`\/\*codexLinuxChromePluginRuntimeConfig\*\/async function ${IDENTIFIER_PATTERN}\((?<runtimeConfig>${IDENTIFIER_PATTERN})\)\{\k<runtimeConfig>=await codexLinuxChromePluginRuntimeConfig\(\k<runtimeConfig>\);let ${IDENTIFIER_PATTERN}=\[\.\.\.new Set\(\[\.\.\.\k<runtimeConfig>\.extensionIds,\.\.\.${IDENTIFIER_PATTERN}\(\k<runtimeConfig>\.nativeHostName\)\]\)\],`,
       ),
     );
 }
@@ -364,9 +376,27 @@ function applyCurrentChromeAppServerRuntimePatches(currentSource, helper) {
     return null;
   }
 
+  patchedSource = applyLinuxChromePluginRuntimeConfigPatch(patchedSource);
+  if (patchedSource == null) {
+    return null;
+  }
+
   return hasCompleteCurrentChromeAppServerRuntimePatch(patchedSource)
     ? patchedSource
     : null;
+}
+
+function applyLinuxChromePluginRuntimeConfigPatch(currentSource) {
+  const registrationRegex =
+    /async function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=\[\.\.\.new Set\(\[\.\.\.\2\.extensionIds,\.\.\.([A-Za-z_$][\w$]*)\(\2\.nativeHostName\)\]\)\],/;
+  const match = currentSource.match(registrationRegex);
+  if (match == null) {
+    return null;
+  }
+  const [originalPrefix, functionName, configVar, extensionIdsVar, bundledIdsFn] = match;
+  const replacement =
+    `${LINUX_CHROME_PLUGIN_RUNTIME_CONFIG_HELPER}${LINUX_CHROME_PLUGIN_RUNTIME_CONFIG_MARKER}async function ${functionName}(${configVar}){${configVar}=await codexLinuxChromePluginRuntimeConfig(${configVar});let ${extensionIdsVar}=[...new Set([...${configVar}.extensionIds,...${bundledIdsFn}(${configVar}.nativeHostName)])],`;
+  return currentSource.replace(originalPrefix, replacement);
 }
 
 function applyLinuxChromePluginAppServerSourcePathPatch(currentSource) {
