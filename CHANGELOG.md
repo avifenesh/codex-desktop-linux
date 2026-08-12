@@ -11,10 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   updates automatically** setting. Turning it off keeps notification and DMG
   verification active while deferring local package builds until an explicit
   **Check for updates**.
-- The embedded Computer Use backend is synchronized to standalone v0.4.7 as
-  `0.4.7-linux-alpha1`, including generic X11/EWMH window control, X11
-  `xdotool` keyboard, text, and coordinate-click input, KDE portal scroll
-  polarity, and portal key chords, with generic X11 registered last.
+- The embedded Computer Use backend is synchronized to standalone v0.4.9 as
+  `0.4.9-linux-alpha1`. AT-SPI snapshots now reach deeply nested GTK4 controls
+  with larger bounded defaults, concurrent indexed child reads, independent
+  discovery and traversal budgets, and a fixed snapshot deadline.
 - A shared upstream DMG acceptance profile now produces the same structured
   decision for local installs, updater rebuilds, and scheduled CI. Scheduled
   rejections create one fingerprinted drift issue and supersede issues for
