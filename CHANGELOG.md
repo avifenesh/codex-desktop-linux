@@ -16,6 +16,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   Chrome-host, and input replay-safety boundaries while adding bounded KWin
   script transactions, stronger GNOME setup process cleanup, and explicit
   requested-versus-emitted absolute-pointer coordinates.
+- The embedded Computer Use MCP now carries the standalone opt-in `run_shell`
+  tool. It remains absent unless `CODEX_COMPUTER_USE_ENABLE_SHELL=1` (or the
+  standalone `COMPUTER_USE_LINUX_ENABLE_SHELL=1` compatibility alias), preserves
+  Codex naming and DBus boundaries, clears ambient credentials, bounds execution
+  and output, and records command digests without becoming a sandbox.
 - A shared upstream DMG acceptance profile now produces the same structured
   decision for local installs, updater rebuilds, and scheduled CI. Scheduled
   rejections create one fingerprinted drift issue and supersede issues for
