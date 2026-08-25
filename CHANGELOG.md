@@ -17,7 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   script transactions, stronger GNOME setup process cleanup, and explicit
   requested-versus-emitted absolute-pointer coordinates.
 - The embedded Computer Use MCP now carries the standalone opt-in `run_shell`
-  tool. It remains absent unless `CODEX_COMPUTER_USE_ENABLE_SHELL=1`, preserves
+  tool. It remains absent unless `CODEX_COMPUTER_USE_ENABLE_SHELL=1` (or the
+  standalone `COMPUTER_USE_LINUX_ENABLE_SHELL=1` compatibility alias), preserves
   Codex naming and DBus boundaries, clears ambient credentials, bounds execution
   and output, and records command digests without becoming a sandbox.
 - A shared upstream DMG acceptance profile now produces the same structured
