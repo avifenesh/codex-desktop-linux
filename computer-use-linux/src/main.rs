@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
             let cap = screenshot::capture_screenshot_raw().await?;
             eprintln!("desktop logical size: {}x{}", cap.width, cap.height);
             let mut p = abs_pointer::AbsPointer::create(cap.width as i32, cap.height as i32)?;
-            p.click(x, y, abs_pointer::PointerButton::Left, 1)?;
+            let _ = p.click(x, y, abs_pointer::PointerButton::Left, 1)?;
             println!(
                 "{}",
                 serde_json::json!({"ok": true, "x": x, "y": y, "w": cap.width, "h": cap.height})

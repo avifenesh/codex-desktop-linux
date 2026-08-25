@@ -729,12 +729,15 @@ impl ComputerUseLinux {
         // relative-only device (faked `--absolute` via pin-to-corner + relative
         // move, which acceleration + fractional scaling distort) and unlike the
         // portal (per-monitor coordinate scaling + an approval dialog), the
-        // absolute pointer lands exactly at the screenshot pixel.
-        // Off-screen coordinates "succeed" at the uinput layer while landing on
-        // no visible pixel — surface that instead of a silent no-op.
+        // absolute pointer uses screenshot-pixel coordinates directly and
+        // reports the point it emitted after desktop-edge clamping. Keep the
+        // operation guard through cancellation so a partial click is never
+        // replayed through a fallback backend.
         let off_screen_note = self.off_screen_note_for_point(x, y).await;
-        if self.ensure_abs_pointer().await {
-            let btn = crate::abs_pointer::PointerButton::from_name(params.button.as_deref());
+        if let (true, Some(btn)) = (
+            self.ensure_abs_pointer().await,
+            crate::abs_pointer::PointerButton::from_name(params.button.as_deref()),
+        ) {
             let count = params.click_count.unwrap_or(1).clamp(1, 10);
             let abs_pointer = Arc::clone(&self.abs_pointer);
             let (returned_guard, clicked) =
@@ -763,7 +766,7 @@ impl ComputerUseLinux {
             };
             input_guard = returned_guard;
             match clicked {
-                Ok(Some(Ok(()))) => {
+                Ok(Some(Ok(landing))) => {
                     return Json(with_notes(
                         pointer_action_result(ActionOutput {
                             ok: true,
@@ -772,7 +775,7 @@ impl ComputerUseLinux {
                             message: "Action sent through the uinput absolute pointer.".to_string(),
                             received,
                         }),
-                        off_screen_note.clone(),
+                        abs_pointer_clamp_note(landing).or(off_screen_note.clone()),
                     ));
                 }
                 Ok(Some(Err(error))) => {
@@ -791,6 +794,7 @@ impl ComputerUseLinux {
                 Err(_) => unreachable!("missing guard already handled the guarded task failure"),
             }
         }
+        let off_screen_note = self.off_screen_note_for_point(x, y).await;
         if let Some(session) = self.cached_portal_pointer_session() {
             let Some((portal_x, portal_y)) =
                 portal_target_point.or_else(|| self.logical_portal_point(&session, x, y))
@@ -1928,7 +1932,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.4.9-linux-alpha1",
+    version = "0.4.10-linux-alpha1",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -4453,6 +4457,15 @@ fn with_notes(mut output: ActionOutput, notes: impl IntoIterator<Item = String>)
     output
 }
 
+fn abs_pointer_clamp_note(landing: crate::abs_pointer::PointerLanding) -> Option<String> {
+    (landing.requested != landing.emitted).then(|| {
+        format!(
+            "Requested coordinate {},{} was clamped to {},{} by the uinput absolute pointer.",
+            landing.requested.0, landing.requested.1, landing.emitted.0, landing.emitted.1
+        )
+    })
+}
+
 fn focus_satisfies_target(focus: &WindowFocusResult, target: &WindowTarget) -> bool {
     if target.requires_exact_focus() {
         focus.exact_window_focused
@@ -5863,6 +5876,27 @@ mod tests {
             assert!(error.contains("inside target-window bounds"));
             assert_eq!((params.x, params.y), (Some(x), Some(y)));
         }
+    }
+
+    #[test]
+    fn absolute_pointer_note_reports_the_emitted_coordinate() {
+        assert_eq!(
+            abs_pointer_clamp_note(crate::abs_pointer::PointerLanding {
+                requested: (1920, 1080),
+                emitted: (1919, 1079),
+            }),
+            Some(
+                "Requested coordinate 1920,1080 was clamped to 1919,1079 by the uinput absolute pointer."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            abs_pointer_clamp_note(crate::abs_pointer::PointerLanding {
+                requested: (640, 480),
+                emitted: (640, 480),
+            }),
+            None
+        );
     }
 
     #[test]
