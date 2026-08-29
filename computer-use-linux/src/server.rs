@@ -39,7 +39,7 @@ use std::{
     future::Future,
     os::unix::{
         ffi::OsStrExt,
-        fs::{FileTypeExt, MetadataExt},
+        fs::{FileTypeExt, MetadataExt, PermissionsExt},
         net::UnixDatagram,
     },
     path::{Path, PathBuf},
@@ -5313,11 +5313,9 @@ where
     Fut: Future<Output = std::result::Result<Output, String>>,
 {
     let available = if program.components().count() > 1 {
-        std::fs::metadata(program)
-            .map(|meta| meta.is_file())
-            .unwrap_or(false)
+        wtype_file_available(program)
     } else {
-        program.to_str().is_some_and(which_in_path)
+        program.to_str().is_some_and(wtype_in_path)
     };
     if !available {
         return fallback().await.map(|output| KeyboardCommandResult {
@@ -5328,14 +5326,23 @@ where
 
     let mut command = TokioCommand::new(program);
     command.arg("-");
-    let output = crate::command_runner::output_with_stdin(
+    let output = match crate::command_runner::output_with_stdin(
         command,
         "run wtype",
         ydotool_type_timeout(text),
         text.as_bytes().to_vec(),
     )
     .await
-    .map_err(|error| format!("{error:#}"))?;
+    {
+        Ok(output) => output,
+        Err(error) if wtype_spawn_unavailable(&error) => {
+            return fallback().await.map(|output| KeyboardCommandResult {
+                output,
+                backend: KeyboardCommandBackend::Ydotool,
+            });
+        }
+        Err(error) => return Err(format!("{error:#}")),
+    };
     if output.status.success() {
         Ok(KeyboardCommandResult {
             output,
@@ -5351,7 +5358,32 @@ fn xdotool_available() -> bool {
 }
 
 fn wtype_available() -> bool {
-    which_in_path("wtype")
+    wtype_in_path("wtype")
+}
+
+fn wtype_file_available(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+fn wtype_in_path(binary: &str) -> bool {
+    let Ok(path) = env::var("PATH") else {
+        return false;
+    };
+    env::split_paths(&path).any(|directory| wtype_file_available(&directory.join(binary)))
+}
+
+fn wtype_spawn_unavailable(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    [
+        "No such file or directory",
+        "Permission denied",
+        "Exec format error",
+        "Text file busy",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 fn prefer_wtype_keyboard(
@@ -7034,6 +7066,56 @@ mod tests {
         .expect("missing wtype should use fallback");
 
         assert_eq!(result.backend, KeyboardCommandBackend::Ydotool);
+    }
+
+    #[tokio::test]
+    async fn non_executable_wtype_uses_ydotool_fallback() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-computer-use-linux-wtype-nonexec-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).expect("create command test directory");
+        let wtype = dir.join("wtype");
+        std::fs::write(&wtype, "#!/bin/sh\nexit 0\n").expect("write fake wtype");
+
+        let result = run_wtype_type_text_or_fallback(&wtype, "text", || async {
+            TokioCommand::new("true")
+                .output()
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .expect("non-executable wtype should use fallback");
+
+        assert_eq!(result.backend, KeyboardCommandBackend::Ydotool);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn missing_wtype_interpreter_uses_ydotool_fallback() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-computer-use-linux-wtype-interpreter-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).expect("create command test directory");
+        let wtype = dir.join("wtype");
+        std::fs::write(&wtype, "#!/definitely/missing/interpreter\n").expect("write fake wtype");
+        std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake wtype executable");
+
+        let result = run_wtype_type_text_or_fallback(&wtype, "text", || async {
+            TokioCommand::new("true")
+                .output()
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .expect("missing interpreter should use fallback");
+
+        assert_eq!(result.backend, KeyboardCommandBackend::Ydotool);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
