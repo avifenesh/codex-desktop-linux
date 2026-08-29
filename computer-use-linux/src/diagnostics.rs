@@ -287,6 +287,7 @@ fn capability_map_with_portal_keyboard(
     }
     let force_ydotool = env_flag_enabled_any(FORCE_YDOTOOL_KEYBOARD_ENV_KEYS);
     let force_xdotool = env_flag_enabled_any(FORCE_XDOTOOL_KEYBOARD_ENV_KEYS);
+    let force_portal_keyboard = env_flag_enabled_any(FORCE_PORTAL_KEYBOARD_ENV_KEYS);
     let portal_pointer_available = portal_pointer_input_available(platform, portals);
     let portal_keyboard_available =
         portal_keyboard_input_available(platform, remote_desktop_keyboard);
@@ -302,11 +303,13 @@ fn capability_map_with_portal_keyboard(
     if should_advertise_xdotool(platform, input, force_ydotool, force_xdotool) {
         input_backends.push("xdotool".to_string());
     }
-    if platform_is_wayland(platform)
-        && wtype_compatible_wayland_desktop(platform.xdg_current_desktop.as_deref())
-        && input.wtype.ok
-        && !force_ydotool
-    {
+    if should_advertise_wtype(
+        platform,
+        input,
+        force_ydotool,
+        force_xdotool,
+        force_portal_keyboard,
+    ) {
         input_backends.push("wtype".to_string());
     }
     if portal_available && portal_forced_for_all_input {
@@ -912,13 +915,35 @@ fn can_send_development_input(
 ) -> bool {
     let force_ydotool = env_flag_enabled_any(FORCE_YDOTOOL_KEYBOARD_ENV_KEYS);
     let force_xdotool = env_flag_enabled_any(FORCE_XDOTOOL_KEYBOARD_ENV_KEYS);
+    let force_portal_keyboard = env_flag_enabled_any(FORCE_PORTAL_KEYBOARD_ENV_KEYS);
+    if force_portal_keyboard {
+        return portal_keyboard_input_available(platform, remote_desktop_keyboard);
+    }
+    if force_xdotool {
+        return should_advertise_xdotool(platform, input, force_ydotool, true);
+    }
+    if force_ydotool {
+        return input.ydotool.ok && input.ydotool_socket.ok;
+    }
     portal_keyboard_input_available(platform, remote_desktop_keyboard)
-        || platform_is_wayland(platform)
-            && wtype_compatible_wayland_desktop(platform.xdg_current_desktop.as_deref())
-            && input.wtype.ok
-            && !force_ydotool
+        || should_advertise_wtype(platform, input, false, false, false)
         || should_advertise_xdotool(platform, input, force_ydotool, force_xdotool)
         || input.ydotool.ok && input.ydotool_socket.ok
+}
+
+fn should_advertise_wtype(
+    platform: &PlatformReport,
+    input: &InputReport,
+    force_ydotool: bool,
+    force_xdotool: bool,
+    force_portal_keyboard: bool,
+) -> bool {
+    platform_is_wayland(platform)
+        && wtype_compatible_wayland_desktop(platform.xdg_current_desktop.as_deref())
+        && input.wtype.ok
+        && !force_ydotool
+        && !force_xdotool
+        && !force_portal_keyboard
 }
 
 fn portal_pointer_input_available(platform: &PlatformReport, portals: &PortalReport) -> bool {
@@ -1823,6 +1848,29 @@ mod tests {
         assert!(!wtype_compatible_wayland_desktop(Some("GNOME")));
         assert!(!wtype_compatible_wayland_desktop(Some("KDE;Plasma")));
         assert!(!wtype_compatible_wayland_desktop(Some("COSMIC")));
+    }
+
+    #[test]
+    fn wtype_capability_honors_keyboard_backend_overrides() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("wayland".to_string());
+        platform.xdg_current_desktop = Some("Hyprland".to_string());
+        platform.wayland_display = Some("wayland-0".to_string());
+        let mut input = input_report(false);
+        input.wtype = Check::ok("wtype");
+
+        assert!(should_advertise_wtype(
+            &platform, &input, false, false, false
+        ));
+        assert!(!should_advertise_wtype(
+            &platform, &input, true, false, false
+        ));
+        assert!(!should_advertise_wtype(
+            &platform, &input, false, true, false
+        ));
+        assert!(!should_advertise_wtype(
+            &platform, &input, false, false, true
+        ));
     }
 
     #[test]

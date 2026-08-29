@@ -6994,14 +6994,16 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create command test directory");
         let wtype = dir.join("wtype");
+        let wtype_source = dir.join("wtype.source");
         let captured = dir.join("captured");
         std::fs::write(
-            &wtype,
+            &wtype_source,
             format!("#!/bin/sh\ncat > '{}'\n", captured.display()),
         )
         .expect("write fake wtype");
-        std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o700))
+        std::fs::set_permissions(&wtype_source, std::fs::Permissions::from_mode(0o700))
             .expect("make fake wtype executable");
+        std::fs::rename(&wtype_source, &wtype).expect("publish fake wtype atomically");
         let text = "Zwölf Yaks aßen Öl über München";
 
         let result = run_wtype_type_text_or_fallback(&wtype, text, || async {
@@ -7043,10 +7045,12 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create command test directory");
         let wtype = dir.join("wtype");
+        let wtype_source = dir.join("wtype.source");
         let fallback_marker = dir.join("ydotool-ran");
-        std::fs::write(&wtype, "#!/bin/sh\nexit 9\n").expect("write fake wtype");
-        std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o700))
+        std::fs::write(&wtype_source, "#!/bin/sh\nexit 9\n").expect("write fake wtype");
+        std::fs::set_permissions(&wtype_source, std::fs::Permissions::from_mode(0o700))
             .expect("make fake wtype executable");
+        std::fs::rename(&wtype_source, &wtype).expect("publish fake wtype atomically");
 
         let result = run_wtype_type_text_or_fallback(&wtype, "text", || async {
             std::fs::write(&fallback_marker, "ran").unwrap();
