@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- The embedded Computer Use backend is synchronized to standalone v0.4.10
+  post-release input fixes as `0.4.10-linux-alpha2`. Compatible Wayland
+  compositors now use the UTF-8-preserving `wtype` virtual-keyboard backend
+  when available, with bounded ydotool fallback and no replay after a launched
+  wtype failure; GNOME, KDE/Plasma, and COSMIC retain their existing guarded
+  paths.
+
 - A disabled-by-default `deferred-update-build` Linux feature adds a **Build
   updates automatically** setting. Turning it off keeps notification and DMG
   verification active while deferring local package builds until an explicit
