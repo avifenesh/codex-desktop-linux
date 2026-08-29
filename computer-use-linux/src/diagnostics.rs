@@ -869,7 +869,7 @@ fn readiness_report_with_portal_keyboard(
 
     if !can_send_development_input {
         blockers.push(
-            "Development keyboard input is unavailable; enable XDG RemoteDesktop portal input or install wtype on compatible Wayland compositors, install xdotool with DISPLAY on X11, or use ydotool with a connectable ydotoold socket. Read/write /dev/uinput alone provides only absolute pointer input."
+            "Development keyboard input for press_key is unavailable; enable XDG RemoteDesktop portal input, install xdotool with DISPLAY on X11, or use ydotool with a connectable ydotoold socket. wtype on compatible Wayland compositors supports literal type_text only. Read/write /dev/uinput alone provides only absolute pointer input."
                 .to_string(),
         );
     }
@@ -889,7 +889,7 @@ fn readiness_report_with_portal_keyboard(
     } else if !can_focus_windows {
         "Enable an exact-focus window backend before using window_id, title, or terminal-targeted input.".to_string()
     } else if !can_send_development_input {
-        "Enable a keyboard-capable input backend: enable the XDG RemoteDesktop portal or install wtype on compatible Wayland compositors, install xdotool for X11, or start ydotoold with a socket accessible to this desktop user."
+        "Enable a keyboard-capable input backend for press_key: enable the XDG RemoteDesktop portal, install xdotool for X11, or start ydotoold with a socket accessible to this desktop user. wtype alone supports literal type_text only."
             .to_string()
     } else {
         "Computer Use is ready: AT-SPI tree support, window targeting, and a Linux input backend are available."
@@ -926,7 +926,6 @@ fn can_send_development_input(
         return input.ydotool.ok && input.ydotool_socket.ok;
     }
     portal_keyboard_input_available(platform, remote_desktop_keyboard)
-        || should_advertise_wtype(platform, input, false, false, false)
         || should_advertise_xdotool(platform, input, force_ydotool, force_xdotool)
         || input.ydotool.ok && input.ydotool_socket.ok
 }
@@ -1837,7 +1836,11 @@ mod tests {
 
         assert_eq!(capabilities.input, ["wtype"]);
         assert_eq!(capabilities.preferred.input.as_deref(), Some("wtype"));
-        assert!(readiness.can_send_development_input);
+        assert!(!readiness.can_send_development_input);
+        assert!(readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("press_key")));
     }
 
     #[test]
