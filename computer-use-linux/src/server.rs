@@ -2914,6 +2914,9 @@ impl ComputerUseLinux {
         ]) {
             return self.is_wayland_session() && !self.is_kde_wayland_session();
         }
+        if self.should_prefer_wtype_keyboard() {
+            return false;
+        }
         !self.is_kde_wayland_session()
             && should_prefer_portal_backend_by_default(
                 self.is_wayland_session(),
@@ -2988,6 +2991,14 @@ impl ComputerUseLinux {
             env_flag_enabled_any(&[
                 "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
                 "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+            ]),
+            env_flag_enabled_any(&[
+                "COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_XDOTOOL_KEYBOARD",
+            ]),
+            env_flag_enabled_any(&[
+                "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD",
             ]),
             self.is_wayland_session(),
             crate::diagnostics::wtype_compatible_wayland_desktop(
@@ -5345,11 +5356,18 @@ fn wtype_available() -> bool {
 
 fn prefer_wtype_keyboard(
     force_ydotool: bool,
+    force_xdotool: bool,
+    force_portal: bool,
     is_wayland: bool,
     compatible_desktop: bool,
     available: bool,
 ) -> bool {
-    !force_ydotool && is_wayland && compatible_desktop && available
+    !force_ydotool
+        && !force_xdotool
+        && !force_portal
+        && is_wayland
+        && compatible_desktop
+        && available
 }
 
 fn xdotool_type_args(text: &str) -> Vec<String> {
@@ -6952,11 +6970,19 @@ mod tests {
 
     #[test]
     fn wayland_prefers_wtype_unless_ydotool_is_forced() {
-        assert!(prefer_wtype_keyboard(false, true, true, true));
-        assert!(!prefer_wtype_keyboard(true, true, true, true));
-        assert!(!prefer_wtype_keyboard(false, false, true, true));
-        assert!(!prefer_wtype_keyboard(false, true, false, true));
-        assert!(!prefer_wtype_keyboard(false, true, true, false));
+        assert!(prefer_wtype_keyboard(false, false, false, true, true, true));
+        assert!(!prefer_wtype_keyboard(true, false, false, true, true, true));
+        assert!(!prefer_wtype_keyboard(false, true, false, true, true, true));
+        assert!(!prefer_wtype_keyboard(false, false, true, true, true, true));
+        assert!(!prefer_wtype_keyboard(
+            false, false, false, false, true, true
+        ));
+        assert!(!prefer_wtype_keyboard(
+            false, false, false, true, false, true
+        ));
+        assert!(!prefer_wtype_keyboard(
+            false, false, false, true, true, false
+        ));
     }
 
     #[tokio::test]
