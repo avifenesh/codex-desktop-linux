@@ -39,7 +39,7 @@ use std::{
     future::Future,
     os::unix::{
         ffi::OsStrExt,
-        fs::{FileTypeExt, MetadataExt},
+        fs::{FileTypeExt, MetadataExt, PermissionsExt},
         net::UnixDatagram,
     },
     path::{Path, PathBuf},
@@ -1868,6 +1868,35 @@ impl ComputerUseLinux {
                 }
             }
         }
+        if self.should_prefer_wtype_keyboard() {
+            let text = params.text.clone();
+            let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+                run_wtype_type_text_or_fallback(Path::new("wtype"), &text, || {
+                    run_ydotool_type_text(&text)
+                })
+                .await
+            })
+            .await;
+            let _input_guard = input_guard;
+            let used_wtype = result
+                .as_ref()
+                .is_ok_and(|result| result.backend == KeyboardCommandBackend::Wtype);
+            let mut output = action_result_with_focus(
+                "type_text",
+                result.map(|result| vec![result.output]),
+                received,
+                focus.clone(),
+            );
+            if used_wtype {
+                output.message =
+                    "Action sent through wtype (Wayland virtual-keyboard protocol).".to_string();
+            }
+            if output.ok && focus.is_some() {
+                let notes = self.input_landing_notes(focus.as_ref(), true).await;
+                output = with_notes(output, notes);
+            }
+            return Json(output);
+        }
         if self.should_prefer_xdotool_keyboard() {
             let args = xdotool_type_args(&params.text);
             let text = params.text.clone();
@@ -1965,7 +1994,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.4.10-linux-alpha1",
+    version = "0.4.10-linux-alpha2",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility. run_shell is absent unless CODEX_COMPUTER_USE_ENABLE_SHELL=1 or the standalone COMPUTER_USE_LINUX_ENABLE_SHELL=1 compatibility alias; when enabled it is same-user arbitrary host execution, not a sandbox, and hosts should require explicit approval."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -2885,6 +2914,9 @@ impl ComputerUseLinux {
         ]) {
             return self.is_wayland_session() && !self.is_kde_wayland_session();
         }
+        if self.should_prefer_wtype_keyboard() {
+            return false;
+        }
         !self.is_kde_wayland_session()
             && should_prefer_portal_backend_by_default(
                 self.is_wayland_session(),
@@ -2951,6 +2983,28 @@ impl ComputerUseLinux {
             self.is_wayland_session(),
             env_var_non_empty("DISPLAY"),
             xdotool_available(),
+        )
+    }
+
+    fn should_prefer_wtype_keyboard(&self) -> bool {
+        prefer_wtype_keyboard(
+            env_flag_enabled_any(&[
+                "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+            ]),
+            env_flag_enabled_any(&[
+                "COMPUTER_USE_LINUX_FORCE_XDOTOOL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_XDOTOOL_KEYBOARD",
+            ]),
+            env_flag_enabled_any(&[
+                "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD",
+            ]),
+            self.is_wayland_session(),
+            crate::diagnostics::wtype_compatible_wayland_desktop(
+                env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+            ),
+            wtype_available(),
         )
     }
 
@@ -5190,6 +5244,7 @@ fn ydotool_output_error(output: Output) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyboardCommandBackend {
+    Wtype,
     Xdotool,
     Ydotool,
 }
@@ -5248,8 +5303,103 @@ where
     }
 }
 
+async fn run_wtype_type_text_or_fallback<F, Fut>(
+    program: &Path,
+    text: &str,
+    fallback: F,
+) -> std::result::Result<KeyboardCommandResult, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::result::Result<Output, String>>,
+{
+    let available = if program.components().count() > 1 {
+        wtype_file_available(program)
+    } else {
+        program.to_str().is_some_and(wtype_in_path)
+    };
+    if !available {
+        return fallback().await.map(|output| KeyboardCommandResult {
+            output,
+            backend: KeyboardCommandBackend::Ydotool,
+        });
+    }
+
+    let mut command = TokioCommand::new(program);
+    command.arg("-");
+    let output = match crate::command_runner::output_with_stdin(
+        command,
+        "run wtype",
+        ydotool_type_timeout(text),
+        text.as_bytes().to_vec(),
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(error) if wtype_spawn_unavailable(&error) => {
+            return fallback().await.map(|output| KeyboardCommandResult {
+                output,
+                backend: KeyboardCommandBackend::Ydotool,
+            });
+        }
+        Err(error) => return Err(format!("{error:#}")),
+    };
+    if output.status.success() {
+        Ok(KeyboardCommandResult {
+            output,
+            backend: KeyboardCommandBackend::Wtype,
+        })
+    } else {
+        Err(command_output_error("wtype", output))
+    }
+}
+
 fn xdotool_available() -> bool {
     which_in_path("xdotool")
+}
+
+fn wtype_available() -> bool {
+    wtype_in_path("wtype")
+}
+
+fn wtype_file_available(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+fn wtype_in_path(binary: &str) -> bool {
+    let Ok(path) = env::var("PATH") else {
+        return false;
+    };
+    env::split_paths(&path).any(|directory| wtype_file_available(&directory.join(binary)))
+}
+
+fn wtype_spawn_unavailable(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    [
+        "No such file or directory",
+        "Permission denied",
+        "Exec format error",
+        "Text file busy",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn prefer_wtype_keyboard(
+    force_ydotool: bool,
+    force_xdotool: bool,
+    force_portal: bool,
+    is_wayland: bool,
+    compatible_desktop: bool,
+    available: bool,
+) -> bool {
+    !force_ydotool
+        && !force_xdotool
+        && !force_portal
+        && is_wayland
+        && compatible_desktop
+        && available
 }
 
 fn xdotool_type_args(text: &str) -> Vec<String> {
@@ -6848,6 +6998,157 @@ mod tests {
             ["type", "--clearmodifiers", "--delay", "0", "--"]
         );
         assert_eq!(args[5], text);
+    }
+
+    #[test]
+    fn wayland_prefers_wtype_unless_ydotool_is_forced() {
+        assert!(prefer_wtype_keyboard(false, false, false, true, true, true));
+        assert!(!prefer_wtype_keyboard(true, false, false, true, true, true));
+        assert!(!prefer_wtype_keyboard(false, true, false, true, true, true));
+        assert!(!prefer_wtype_keyboard(false, false, true, true, true, true));
+        assert!(!prefer_wtype_keyboard(
+            false, false, false, false, true, true
+        ));
+        assert!(!prefer_wtype_keyboard(
+            false, false, false, true, false, true
+        ));
+        assert!(!prefer_wtype_keyboard(
+            false, false, false, true, true, false
+        ));
+    }
+
+    #[tokio::test]
+    async fn wtype_receives_unicode_text_through_stdin() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-computer-use-linux-wtype-unicode-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).expect("create command test directory");
+        let wtype = dir.join("wtype");
+        let wtype_source = dir.join("wtype.source");
+        let captured = dir.join("captured");
+        std::fs::write(
+            &wtype_source,
+            format!("#!/bin/sh\ncat > '{}'\n", captured.display()),
+        )
+        .expect("write fake wtype");
+        std::fs::set_permissions(&wtype_source, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake wtype executable");
+        std::fs::rename(&wtype_source, &wtype).expect("publish fake wtype atomically");
+        let text = "Zwölf Yaks aßen Öl über München";
+
+        let result = run_wtype_type_text_or_fallback(&wtype, text, || async {
+            panic!("available wtype must not fall back")
+        })
+        .await
+        .expect("wtype should succeed");
+
+        assert_eq!(result.backend, KeyboardCommandBackend::Wtype);
+        assert_eq!(std::fs::read_to_string(&captured).unwrap(), text);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn unavailable_wtype_uses_ydotool_fallback() {
+        let result = run_wtype_type_text_or_fallback(
+            Path::new("/definitely/missing/wtype"),
+            "text",
+            || async {
+                TokioCommand::new("sh")
+                    .args(["-c", "exit 0"])
+                    .output()
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+        )
+        .await
+        .expect("missing wtype should use fallback");
+
+        assert_eq!(result.backend, KeyboardCommandBackend::Ydotool);
+    }
+
+    #[tokio::test]
+    async fn non_executable_wtype_uses_ydotool_fallback() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-computer-use-linux-wtype-nonexec-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).expect("create command test directory");
+        let wtype = dir.join("wtype");
+        std::fs::write(&wtype, "#!/bin/sh\nexit 0\n").expect("write fake wtype");
+
+        let result = run_wtype_type_text_or_fallback(&wtype, "text", || async {
+            TokioCommand::new("true")
+                .output()
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .expect("non-executable wtype should use fallback");
+
+        assert_eq!(result.backend, KeyboardCommandBackend::Ydotool);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn missing_wtype_interpreter_uses_ydotool_fallback() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-computer-use-linux-wtype-interpreter-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).expect("create command test directory");
+        let wtype = dir.join("wtype");
+        std::fs::write(&wtype, "#!/definitely/missing/interpreter\n").expect("write fake wtype");
+        std::fs::set_permissions(&wtype, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake wtype executable");
+
+        let result = run_wtype_type_text_or_fallback(&wtype, "text", || async {
+            TokioCommand::new("true")
+                .output()
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .expect("missing interpreter should use fallback");
+
+        assert_eq!(result.backend, KeyboardCommandBackend::Ydotool);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn launched_wtype_failure_does_not_replay_through_ydotool() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-computer-use-linux-wtype-fallback-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).expect("create command test directory");
+        let wtype = dir.join("wtype");
+        let wtype_source = dir.join("wtype.source");
+        let fallback_marker = dir.join("ydotool-ran");
+        std::fs::write(&wtype_source, "#!/bin/sh\nexit 9\n").expect("write fake wtype");
+        std::fs::set_permissions(&wtype_source, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake wtype executable");
+        std::fs::rename(&wtype_source, &wtype).expect("publish fake wtype atomically");
+
+        let result = run_wtype_type_text_or_fallback(&wtype, "text", || async {
+            std::fs::write(&fallback_marker, "ran").unwrap();
+            TokioCommand::new("true")
+                .output()
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            !fallback_marker.exists(),
+            "ydotool replayed input after wtype started"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
