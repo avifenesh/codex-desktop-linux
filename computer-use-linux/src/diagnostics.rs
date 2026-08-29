@@ -2455,7 +2455,8 @@ mod tests {
         assert!(readiness
             .blockers
             .iter()
-            .any(|blocker| blocker.contains("Development keyboard input is unavailable")));
+            .any(|blocker| blocker
+                .contains("Development keyboard input for press_key is unavailable")));
     }
 
     #[test]
