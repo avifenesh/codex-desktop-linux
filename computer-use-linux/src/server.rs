@@ -15,6 +15,7 @@ use crate::screenshot::{
     capture_screenshot_raw, prepare_screenshot_payload, RawScreenshotCapture, ScreenshotCapture,
     ScreenshotOutputFormat, ScreenshotPayloadOptions,
 };
+use crate::terminal::uses_terminal_paste_shortcut;
 use crate::windowing::registry;
 use crate::windows::{
     focus_window_target, focused_window, list_windows, resolve_window_target,
@@ -1555,7 +1556,8 @@ impl ComputerUseLinux {
         let received = Some(serde_json::json!(params.clone()));
         let input_guard =
             InputOperationGuard::new(Arc::clone(&self.input_operation_lock).lock_owned().await);
-        let focus = match self.focus_target_for_input(&params.window_target()).await {
+        let window_target = params.window_target();
+        let focus = match self.focus_target_for_input(&window_target).await {
             Ok(focus) => focus,
             Err(message) => {
                 return Json(ActionOutput {
@@ -1721,7 +1723,8 @@ impl ComputerUseLinux {
         let received = Some(serde_json::json!(params.clone()));
         let mut input_guard =
             InputOperationGuard::new(Arc::clone(&self.input_operation_lock).lock_owned().await);
-        let focus = match self.focus_target_for_input(&params.window_target()).await {
+        let window_target = params.window_target();
+        let focus = match self.focus_target_for_input(&window_target).await {
             Ok(focus) => focus,
             Err(message) => {
                 return Json(ActionOutput {
@@ -1736,6 +1739,24 @@ impl ComputerUseLinux {
         if self.should_prefer_kde_clipboard_text_backend() {
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
+                    let kde_focus = if window_target.has_target() {
+                        match self.focus_target_for_input(&window_target).await {
+                            Ok(focus) => focus,
+                            Err(message) => {
+                                return Json(ActionOutput {
+                                    ok: false,
+                                    implemented: true,
+                                    action: "type_text".to_string(),
+                                    message,
+                                    received,
+                                });
+                            }
+                        }
+                    } else {
+                        focus.clone()
+                    };
+                    let use_terminal_paste =
+                        kde_clipboard_uses_terminal_paste(&window_target, kde_focus.as_ref()).await;
                     let clipboard_guard = Arc::clone(&self.kde_clipboard_lock).lock_owned().await;
                     let session_for_input = session.clone();
                     let text = params.text.clone();
@@ -1745,6 +1766,7 @@ impl ComputerUseLinux {
                             run_kde_clipboard_paste_text(
                                 &session_for_input,
                                 &text,
+                                use_terminal_paste,
                                 portal_operation_guard,
                             )
                             .await
@@ -1757,7 +1779,7 @@ impl ComputerUseLinux {
                                 "type_text",
                                 Err(guarded_result.unwrap_err()),
                                 received,
-                                focus,
+                                kde_focus,
                             ));
                         }
                     };
@@ -1766,13 +1788,13 @@ impl ComputerUseLinux {
                     let result = guarded_result.expect("guarded task returned its guards");
                     match result {
                         Ok(message) => {
-                            let notes = self.input_landing_notes(focus.as_ref(), true).await;
+                            let notes = self.input_landing_notes(kde_focus.as_ref(), true).await;
                             return Json(with_notes(
                                 successful_action_with_focus(
                                     "type_text",
                                     &message,
                                     received,
-                                    focus,
+                                    kde_focus,
                                 ),
                                 notes,
                             ));
@@ -1786,7 +1808,7 @@ impl ComputerUseLinux {
                                     "type_text",
                                     Err(error.message),
                                     received,
-                                    focus,
+                                    kde_focus,
                                 ));
                             }
                         }
@@ -1994,7 +2016,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.4.10-linux-alpha2",
+    version = "0.4.10-linux-alpha3",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility. run_shell is absent unless CODEX_COMPUTER_USE_ENABLE_SHELL=1 or the standalone COMPUTER_USE_LINUX_ENABLE_SHELL=1 compatibility alias; when enabled it is same-user arbitrary host execution, not a sandbox, and hosts should require explicit approval."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -5078,6 +5100,7 @@ fn ydotool_type_timeout(text: &str) -> Duration {
 }
 
 const EVDEV_KEY_LEFTCTRL: i32 = 29;
+const EVDEV_KEY_LEFTSHIFT: i32 = 42;
 const EVDEV_KEY_V: i32 = 47;
 const KDE_CLIPBOARD_RESTORE_MIN_DELAY_MS: u64 = 1_500;
 const KDE_CLIPBOARD_RESTORE_MAX_DELAY_MS: u64 = 5_000;
@@ -5129,6 +5152,7 @@ impl KdeClipboardPasteError {
 async fn run_kde_clipboard_paste_text(
     session: &PortalKeyboardSession,
     text: &str,
+    use_terminal_paste: bool,
     operation_guard: InputOperationGuard,
 ) -> std::result::Result<String, KdeClipboardPasteError> {
     let previous = kde_clipboard_contents()
@@ -5149,7 +5173,7 @@ async fn run_kde_clipboard_paste_text(
 
     let paste_result = press_keycode_chord(
         session,
-        &[EVDEV_KEY_LEFTCTRL],
+        kde_clipboard_paste_modifiers(use_terminal_paste),
         EVDEV_KEY_V,
         Some(operation_guard),
     )
@@ -5168,6 +5192,38 @@ async fn run_kde_clipboard_paste_text(
         (Err(error), Err(restore_error)) => Err(KdeClipboardPasteError::after_portal_input(
             format!("{error}; previous KDE clipboard contents could not be restored: {restore_error}"),
         )),
+    }
+}
+
+async fn kde_clipboard_uses_terminal_paste(
+    target: &WindowTarget,
+    focus: Option<&WindowFocusResult>,
+) -> bool {
+    if let Some(focus) = focus {
+        let window = focus
+            .focused_window
+            .as_ref()
+            .unwrap_or(&focus.requested_window);
+        return kde_clipboard_target_is_terminal(target, Some(window));
+    }
+    if let Ok(Some(current)) = focused_window().await {
+        return kde_clipboard_target_is_terminal(target, Some(&current));
+    }
+    kde_clipboard_target_is_terminal(target, None)
+}
+
+fn kde_clipboard_target_is_terminal(target: &WindowTarget, window: Option<&WindowInfo>) -> bool {
+    match window {
+        Some(window) => uses_terminal_paste_shortcut(window),
+        None => target.has_terminal_target(),
+    }
+}
+
+fn kde_clipboard_paste_modifiers(use_terminal_paste: bool) -> &'static [i32] {
+    if use_terminal_paste {
+        &[EVDEV_KEY_LEFTCTRL, EVDEV_KEY_LEFTSHIFT]
+    } else {
+        &[EVDEV_KEY_LEFTCTRL]
     }
 }
 
@@ -6602,6 +6658,44 @@ mod tests {
 
         assert!(!error.can_fallback_to_ydotool);
         assert!(!error.clear_portal_keyboard_session);
+    }
+
+    #[test]
+    fn kde_clipboard_uses_terminal_paste_shortcut_for_terminals() {
+        assert_eq!(
+            kde_clipboard_paste_modifiers(true),
+            &[EVDEV_KEY_LEFTCTRL, EVDEV_KEY_LEFTSHIFT]
+        );
+    }
+
+    #[test]
+    fn kde_clipboard_keeps_standard_paste_shortcut_for_other_apps() {
+        assert_eq!(kde_clipboard_paste_modifiers(false), &[EVDEV_KEY_LEFTCTRL]);
+    }
+
+    #[test]
+    fn kde_clipboard_routes_explicit_tty_targets_to_terminal_paste() {
+        let target = WindowTarget {
+            tty: Some("/dev/pts/11".to_string()),
+            ..Default::default()
+        };
+        assert!(kde_clipboard_target_is_terminal(&target, None));
+    }
+
+    #[test]
+    fn kde_clipboard_prefers_resolved_window_over_stale_terminal_selector() {
+        let target = WindowTarget {
+            tty: Some("/dev/pts/11".to_string()),
+            ..Default::default()
+        };
+        let window = window_info(
+            1,
+            Some("Browser"),
+            Some("firefox"),
+            Some("firefox"),
+            Some(100),
+        );
+        assert!(!kde_clipboard_target_is_terminal(&target, Some(&window)));
     }
 
     #[tokio::test]
