@@ -23,6 +23,22 @@ readback fix. Setup verifies GNOME's saved toolkit-accessibility key even when
 runtime AT-SPI is ready, and warns when the saved key cannot be verified.
 Other accessibility tools can change the key later; setup does not hold it on.
 
+For an explicit foreground hold-open, run `codex-computer-use-linux guard-accessibility`.
+It holds a passive AT-SPI listener and watches/reasserts the saved toolkit setting
+for the current user. It is never started by MCP, setup, or observation. Stop
+with Ctrl-C or SIGTERM before disabling accessibility. Stop cancels pending
+work and releases the listener without disabling other clients or restoring
+an old setting. Applications launched during a reset/reassertion interval may
+still need restarting.
+
+Plain left element/selector clicks prefer a recognized native AT-SPI activation
+action, resolved by name against the live action list. This avoids guessing a
+GTK toolkit-to-pointer scale. Explicit coordinates, right clicks, and multiple
+clicks retain pointer semantics. Relative coordinates use the clipped screenshot
+crop origin in coordinate pixels: divide preview pixels by the returned scale.
+Raw GDK surface coordinates and widget-local coordinates are not that origin.
+This does not qualify every GNOME X11 EWMH move/resize or mixed-monitor mapping.
+
 Set `CODEX_COMPUTER_USE_NOTIFY_ON_COMPLETE=1` in the MCP server environment
 to expose `complete_interaction`, a parameter-free completion notification.
 The standalone `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE` alias is accepted only
