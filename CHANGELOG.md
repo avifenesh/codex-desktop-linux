@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Synchronize the embedded backend to the standalone v0.5.0 accessibility
+  setup readback behavior as `0.5.0-linux-alpha1`, retaining Codex identities,
+  DBus interfaces, Chrome integration, and existing compositor behavior.
+- Port the optional `complete_interaction` notification with Codex-first
+  environment-variable precedence and the standalone compatibility alias.
+
 - The embedded Computer Use backend is synchronized to standalone v0.4.10
   post-release input fixes as `0.4.10-linux-alpha2`. Compatible Wayland
   compositors now use the UTF-8-preserving `wtype` virtual-keyboard backend

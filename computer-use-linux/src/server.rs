@@ -67,6 +67,8 @@ const AVATAR_CURSOR_SOCKET_MAX_BYTES: usize = 100;
 const AVATAR_CURSOR_NOTIFY_TIMEOUT: Duration = Duration::from_millis(100);
 const SHELL_ENABLE_ENV: &str = "CODEX_COMPUTER_USE_ENABLE_SHELL";
 const SHELL_ENABLE_ENV_STANDALONE: &str = "COMPUTER_USE_LINUX_ENABLE_SHELL";
+const COMPLETION_ENABLE_ENV: &str = "CODEX_COMPUTER_USE_NOTIFY_ON_COMPLETE";
+const COMPLETION_ENABLE_ENV_STANDALONE: &str = "COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE";
 const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 30;
 const SHELL_MAX_TIMEOUT_SECS: u64 = 120;
 const SHELL_MAX_COMMAND_BYTES: usize = 64 * 1024;
@@ -118,7 +120,17 @@ fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
 
 impl ComputerUseLinux {
     fn mcp_tool_router(&self) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        self.router_with_completion(completion_notifications_enabled())
+    }
+
+    fn router_with_completion(
+        &self,
+        enabled: bool,
+    ) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         let mut router = Self::tool_router();
+        if !enabled {
+            router.map.remove("complete_interaction");
+        }
         if !shell_execution_enabled() {
             router.map.remove("run_shell");
         }
@@ -139,6 +151,26 @@ impl ComputerUseLinux {
 
 #[tool_router]
 impl ComputerUseLinux {
+    #[tool(
+        name = "complete_interaction",
+        description = "Send a desktop notification that this agent has finished its interaction. Available only with CODEX_COMPUTER_USE_NOTIFY_ON_COMPLETE=1 (or its standalone alias). This cue does not acquire or release an exclusive desktop lock. Delivery is best effort and bounded; it may be suppressed by desktop notification settings.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn complete_interaction(&self) -> Json<CompletionOutput> {
+        if !completion_notifications_enabled() {
+            return Json(CompletionOutput {
+                ok: true,
+                cue: "skipped".into(),
+                note: "Completion notifications are disabled.".into(),
+            });
+        }
+        Json(send_completion_notification(Path::new("notify-send"), Duration::from_secs(2)).await)
+    }
     #[tool(
         name = "doctor",
         description = "Report Linux Computer Use desktop integration readiness.",
@@ -2016,7 +2048,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.4.10-linux-alpha3",
+    version = "0.5.0-linux-alpha1",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility. run_shell is absent unless CODEX_COMPUTER_USE_ENABLE_SHELL=1 or the standalone COMPUTER_USE_LINUX_ENABLE_SHELL=1 compatibility alias; when enabled it is same-user arbitrary host execution, not a sandbox, and hosts should require explicit approval."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -2030,6 +2062,52 @@ fn shell_execution_enabled() -> bool {
 
 fn shell_execution_enabled_value(value: Option<&str>) -> bool {
     value == Some("1")
+}
+
+fn completion_notifications_enabled() -> bool {
+    completion_notifications_enabled_value(
+        env::var(COMPLETION_ENABLE_ENV).ok().as_deref(),
+        env::var(COMPLETION_ENABLE_ENV_STANDALONE).ok().as_deref(),
+    )
+}
+
+fn completion_notifications_enabled_value(primary: Option<&str>, standalone: Option<&str>) -> bool {
+    primary.or(standalone) == Some("1")
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct CompletionOutput {
+    ok: bool,
+    cue: String,
+    note: String,
+}
+
+async fn send_completion_notification(program: &Path, limit: Duration) -> CompletionOutput {
+    let mut command = TokioCommand::new(program);
+    command.args([
+        "--app-name=codex-computer-use-linux",
+        "--expire-time=3000",
+        "Desktop interaction finished",
+        "The agent has finished its desktop interaction.",
+    ]);
+    let sent =
+        crate::command_runner::output_with_timeout(command, "send completion notification", limit)
+            .await;
+    match sent {
+        Ok(output) if output.status.success() => CompletionOutput {
+            ok: true,
+            cue: "notification".into(),
+            note: "Notification submitted; desktop settings control whether it is displayed."
+                .into(),
+        },
+        _ => CompletionOutput {
+            ok: true,
+            cue: "skipped".into(),
+            note:
+                "Notification unavailable, failed, or timed out. The interaction is still complete."
+                    .into(),
+        },
+    }
 }
 
 fn valid_environment_name(name: &str) -> bool {
@@ -5840,6 +5918,64 @@ mod tests {
     use crate::atspi_tree::{AccessibilityAction, Bounds};
     use crate::windows::{WindowBounds, GNOME_SHELL_EXTENSION_BACKEND};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn completion_tool_is_explicitly_opt_in_and_has_side_effect_annotations() {
+        assert!(completion_notifications_enabled_value(Some("1"), None));
+        assert!(completion_notifications_enabled_value(None, Some("1")));
+        assert!(!completion_notifications_enabled_value(
+            Some("0"),
+            Some("1")
+        ));
+        assert!(!completion_notifications_enabled_value(None, None));
+        let server = ComputerUseLinux::default();
+        assert!(!server
+            .router_with_completion(false)
+            .list_all()
+            .iter()
+            .any(|t| t.name == "complete_interaction"));
+        let tools = server.router_with_completion(true).list_all();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "complete_interaction")
+            .unwrap();
+        let value = serde_json::to_value(tool).unwrap();
+        assert_eq!(value["annotations"]["readOnlyHint"], false);
+        assert_eq!(value["annotations"]["destructiveHint"], false);
+        assert_eq!(value["annotations"]["idempotentHint"], false);
+        assert_eq!(value["annotations"]["openWorldHint"], true);
+    }
+
+    #[tokio::test]
+    async fn completion_notification_handles_missing_and_failed_backends() {
+        for path in ["/nonexistent/computer-use-notify", "/bin/false"] {
+            let result =
+                send_completion_notification(Path::new(path), Duration::from_secs(2)).await;
+            assert!(result.ok);
+            assert_eq!(result.cue, "skipped");
+        }
+        let result =
+            send_completion_notification(Path::new("/bin/true"), Duration::from_secs(2)).await;
+        assert_eq!(result.cue, "notification");
+    }
+
+    #[tokio::test]
+    async fn completion_notification_timeout_is_bounded() {
+        let dir = std::env::temp_dir().join(format!(
+            "computer-use-notify-test-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("notify");
+        std::fs::write(&program, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let started = std::time::Instant::now();
+        let output = send_completion_notification(&program, Duration::from_millis(30)).await;
+        assert_eq!(output.cue, "skipped");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     use tokio::io::AsyncReadExt;
 
     struct EnvVarGuard {
