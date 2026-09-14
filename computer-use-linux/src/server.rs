@@ -1,7 +1,7 @@
 use crate::atspi_tree::{
     focused_element_summary, list_accessible_apps, perform_action as invoke_accessibility_action,
-    set_element_value, snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary,
-    Bounds, FocusedElementSummary, ValueSetInvocation,
+    perform_named_action, set_element_value, snapshot_tree, AccessibilityAction, AccessibilityNode,
+    AccessibleAppSummary, Bounds, FocusedElementSummary, ValueSetInvocation,
 };
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
@@ -634,7 +634,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "click",
-        description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata.",
+        description = "Click an element by index, semantic selector, or desktop coordinate pixels from screenshot metadata. Plain left activation prefers a native AT-SPI click/press/toggle action, avoiding toolkit coordinate scaling. Entry activate and slider jump actions are not substituted for pointer clicks. Explicit coordinates, right clicks, and multi-clicks retain pointer semantics.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -733,15 +733,22 @@ impl ComputerUseLinux {
             action_index,
         } = target
         {
-            let action_index = action_index.to_string();
-            return match invoke_accessibility_action(&object_ref, Some(&action_index)).await {
+            let invocation = if let Some(name) = action_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+            {
+                perform_named_action(&object_ref, name).await
+            } else {
+                invoke_accessibility_action(&object_ref, Some(&action_index.to_string())).await
+            };
+            return match invocation {
                 Ok(invocation) => Json(ActionOutput {
                     ok: invocation.ok,
                     implemented: true,
                     action: "click".to_string(),
                     message: if invocation.ok {
                         format!(
-                            "No clickable bounds were cached, so I invoked the primary AT-SPI action{}.",
+                            "Invoked the primary AT-SPI action{} without pointer-coordinate conversion.",
                             action_name
                                 .as_deref()
                                 .filter(|name| !name.is_empty())
@@ -2709,9 +2716,10 @@ struct ClickParams {
     wm_class: Option<String>,
     #[serde(default)]
     window_title: Option<String>,
-    /// Interpret `x`/`y` as relative to the targeted window's top-left corner
-    /// (the same coordinate space as a window-cropped `screenshot`). Requires a
-    /// window target; ignored otherwise.
+    /// Interpret `x`/`y` from the clipped window screenshot crop origin, in
+    /// coordinate pixels before preview resizing. Divide preview pixels by its
+    /// scale first. This is not a toolkit widget or raw GDK surface origin.
+    /// Requires a window target; missing targets are rejected.
     #[serde(default)]
     relative: Option<bool>,
 }
@@ -2830,9 +2838,10 @@ struct ScrollParams {
     wm_class: Option<String>,
     #[serde(default)]
     window_title: Option<String>,
-    /// Interpret `x`/`y` as relative to the targeted window's top-left corner
-    /// (the same coordinate space as a window-cropped `screenshot`). Requires a
-    /// window target; ignored otherwise.
+    /// Interpret `x`/`y` from the clipped window screenshot crop origin, in
+    /// coordinate pixels before preview resizing. Divide preview pixels by its
+    /// scale first. This is not a toolkit widget or raw GDK surface origin.
+    /// Requires a window target; missing targets are rejected.
     #[serde(default)]
     relative: Option<bool>,
 }
@@ -3739,6 +3748,21 @@ impl ComputerUseLinux {
             ElementResolvePurpose::Click,
         )?;
 
+        // Toolkit extents are not necessarily in the pointer backend's space
+        // (GTK3 X11 HiDPI, GTK4 zero-origin bounds). Ordinary activation does
+        // not need a guessed scale when the target exposes its native action.
+        if is_plain_left_click(params.button.as_deref(), params.click_count) {
+            if let Some(action) =
+                primary_action(&node.actions).filter(|action| click_equivalent_action(action))
+            {
+                return Ok(ClickTarget::PrimaryAction {
+                    object_ref: node.object_ref.clone(),
+                    action_name: Some(action.name.clone()),
+                    action_index: action.index,
+                });
+            }
+        }
+
         if let Some((x, y)) = node.bounds.as_ref().and_then(bounds_center) {
             return Ok(ClickTarget::Coordinates(x, y));
         }
@@ -3750,17 +3774,10 @@ impl ComputerUseLinux {
             ));
         }
 
-        let Some(action) = primary_action(node.actions.as_slice()) else {
-            return Err(format!(
-                "No clickable bounds cached for element_index {}, and the element exposes no primary AT-SPI action.",
-                node.index
-            ));
-        };
-        Ok(ClickTarget::PrimaryAction {
-            object_ref: node.object_ref.clone(),
-            action_name: Some(action.name.clone()),
-            action_index: action.index,
-        })
+        Err(format!(
+            "No clickable bounds or click-equivalent AT-SPI action for element_index {}. Use perform_action explicitly for other actions.",
+            node.index
+        ))
     }
 
     fn center_for_cached_node(&self, element_index: u32) -> Option<(i32, i32)> {
@@ -4094,6 +4111,13 @@ fn is_plain_left_click(button: Option<&str>, click_count: Option<u32>) -> bool {
     let button = button.unwrap_or("left");
     let click_count = click_count.unwrap_or(1);
     matches!(button.to_ascii_lowercase().as_str(), "left" | "primary") && click_count == 1
+}
+
+fn click_equivalent_action(action: &AccessibilityAction) -> bool {
+    matches!(
+        action.name.to_ascii_lowercase().as_str(),
+        "click" | "press" | "toggle"
+    )
 }
 
 fn requested_or_primary_action(action: Option<&str>) -> &str {
@@ -6492,6 +6516,22 @@ mod tests {
     }
 
     #[test]
+    fn relative_click_origin_is_screenshot_crop_not_raw_surface_buffer() {
+        // GNOME Wayland CSD probe: frame [760,406,400,300], buffer
+        // [746,394,428,329]. The screenshot's green target is at [850,543].
+        // Crop-local [90,137] and desktop [850,543] must denote the same point;
+        // substituting the buffer/shadow origin would miss by [14,12].
+        let mut params = ClickParams {
+            x: Some(90),
+            y: Some(137),
+            relative: Some(true),
+            ..Default::default()
+        };
+        apply_window_relative_click_coordinates(&mut params, (760, 406, 400, 300)).unwrap();
+        assert_eq!((params.x, params.y), (Some(850), Some(543)));
+    }
+
+    #[test]
     fn relative_click_coordinates_require_xy() {
         let mut params = ClickParams {
             x: Some(7),
@@ -6983,6 +7023,155 @@ mod tests {
             }
             ClickTarget::Coordinates(_, _) => {
                 panic!("expected AT-SPI primary-action fallback")
+            }
+        }
+    }
+
+    #[test]
+    fn element_activation_ignores_hidpi_and_zero_origin_bounds() {
+        for (x, y) in [(75, 144), (0, 0)] {
+            let backend = ComputerUseLinux::default();
+            backend.cache_nodes(&[node_with_actions(
+                7,
+                Some(Bounds {
+                    x,
+                    y,
+                    width: 320,
+                    height: 120,
+                }),
+                vec![AccessibilityAction {
+                    index: 0,
+                    name: "click".into(),
+                    description: String::new(),
+                    keybinding: String::new(),
+                }],
+            )]);
+            assert!(matches!(
+                backend
+                    .resolve_click_target(&ClickParams {
+                        element_index: Some(7),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                ClickTarget::PrimaryAction {
+                    action_index: 0,
+                    ..
+                }
+            ));
+            // Explicit coordinates and gestures retain pointer semantics.
+            for params in [
+                ClickParams {
+                    x: Some(470),
+                    y: Some(408),
+                    element_index: Some(7),
+                    ..Default::default()
+                },
+                ClickParams {
+                    button: Some("right".into()),
+                    element_index: Some(7),
+                    ..Default::default()
+                },
+                ClickParams {
+                    click_count: Some(2),
+                    element_index: Some(7),
+                    ..Default::default()
+                },
+            ] {
+                assert!(matches!(
+                    backend.resolve_click_target(&params).unwrap(),
+                    ClickTarget::Coordinates(_, _)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn element_click_does_not_replace_pointer_with_non_activation_action() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_nodes(&[node_with_actions(
+            7,
+            Some(Bounds {
+                x: 10,
+                y: 20,
+                width: 20,
+                height: 20,
+            }),
+            vec![AccessibilityAction {
+                index: 0,
+                name: "show-menu".into(),
+                description: String::new(),
+                keybinding: String::new(),
+            }],
+        )]);
+        assert!(matches!(
+            backend
+                .resolve_click_target(&ClickParams {
+                    element_index: Some(7),
+                    ..Default::default()
+                })
+                .unwrap(),
+            ClickTarget::Coordinates(20, 30)
+        ));
+    }
+
+    #[test]
+    fn entry_submit_and_slider_jump_are_not_pointer_clicks() {
+        for (role, action_name) in [
+            ("entry", "activate"),
+            ("spin button", "activate"),
+            ("slider", "jump"),
+        ] {
+            let backend = ComputerUseLinux::default();
+            let mut target = node_with_actions(
+                7,
+                Some(Bounds {
+                    x: 10,
+                    y: 20,
+                    width: 100,
+                    height: 40,
+                }),
+                vec![AccessibilityAction {
+                    index: 0,
+                    name: action_name.into(),
+                    description: String::new(),
+                    keybinding: String::new(),
+                }],
+            );
+            target.role = role.into();
+            backend.cache_nodes(&[target]);
+            assert!(matches!(
+                backend
+                    .resolve_click_target(&ClickParams {
+                        element_index: Some(7),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                ClickTarget::Coordinates(60, 40)
+            ));
+            let mut node = backend.last_nodes.lock().unwrap()[0].clone();
+            for bounds in [
+                None,
+                Some(Bounds {
+                    x: i32::MIN,
+                    y: i32::MIN,
+                    width: 1,
+                    height: 1,
+                }),
+                Some(Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                }),
+            ] {
+                node.bounds = bounds;
+                backend.cache_nodes(&[node.clone()]);
+                assert!(backend
+                    .resolve_click_target(&ClickParams {
+                        element_index: Some(7),
+                        ..Default::default()
+                    })
+                    .is_err());
             }
         }
     }
@@ -7857,7 +8046,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_click_selector_resolves_coordinates() {
+    fn semantic_click_selector_prefers_native_activation() {
         let backend = ComputerUseLinux::default();
         let mut button = node_with_actions(
             7,
@@ -7880,7 +8069,13 @@ mod tests {
             })
             .unwrap();
 
-        assert!(matches!(target, ClickTarget::Coordinates(60, 40)));
+        assert!(matches!(
+            target,
+            ClickTarget::PrimaryAction {
+                action_index: 0,
+                ..
+            }
+        ));
     }
 
     #[test]
