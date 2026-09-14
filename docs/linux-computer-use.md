@@ -31,8 +31,9 @@ work and releases the listener without disabling other clients or restoring
 an old setting. Applications launched during a reset/reassertion interval may
 still need restarting.
 
-Plain left element/selector clicks prefer a recognized native AT-SPI activation
-action, resolved by name against the live action list. This avoids guessing a
+Plain left element/selector clicks prefer a native AT-SPI `click`, `press`, or
+`toggle` action, resolved by name against the live action list. Entry `activate`
+and slider `jump` actions are not substituted for pointer clicks. This avoids guessing a
 GTK toolkit-to-pointer scale. Explicit coordinates, right clicks, and multiple
 clicks retain pointer semantics. Relative coordinates use the clipped screenshot
 crop origin in coordinate pixels: divide preview pixels by the returned scale.
