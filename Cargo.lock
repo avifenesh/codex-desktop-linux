@@ -490,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "codex-computer-use-linux"
-version = "0.4.10-linux-alpha3"
+version = "0.5.0-linux-alpha1"
 dependencies = [
  "anyhow",
  "atspi",

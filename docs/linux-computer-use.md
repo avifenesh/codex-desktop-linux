@@ -18,6 +18,19 @@ It supports:
 
 ## Runtime Dependencies
 
+The embedded backend includes the standalone v0.5.0 accessibility setup
+readback fix. Setup verifies GNOME's saved toolkit-accessibility key even when
+runtime AT-SPI is ready, and warns when the saved key cannot be verified.
+Other accessibility tools can change the key later; setup does not hold it on.
+
+Set `CODEX_COMPUTER_USE_NOTIFY_ON_COMPLETE=1` in the MCP server environment
+to expose `complete_interaction`, a parameter-free completion notification.
+The standalone `COMPUTER_USE_LINUX_NOTIFY_ON_COMPLETE` alias is accepted only
+when the Codex variable is unset; an explicit Codex value of `0` disables it.
+The tool uses `notify-send` with bounded execution and cleanup. Missing services,
+failures, and timeouts skip the cue without failing the task. It does not grant
+exclusive desktop ownership and is disabled by default.
+
 Install `ydotool` 1.0.3 or newer when you need the fallback input path. The
 backend probes the exact absolute move, wheel move, click, delayed key, and
 stdin typing command shapes it emits. Earlier or incompatible CLIs are rejected
