@@ -7,9 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- Synchronize the embedded backend to the standalone v0.5.0 accessibility
-  setup readback behavior as `0.5.0-linux-alpha1`, retaining Codex identities,
-  DBus interfaces, Chrome integration, and existing compositor behavior.
+- Synchronize the embedded backend enumeration to standalone v0.6.0 as
+  `0.6.0-linux-alpha1`, retaining Codex identities, DBus interfaces, Chrome
+  integration, and existing compositor behavior. The v0.6.0 implementation
+  changes were already carried by the preceding focused syncs.
 - Port the optional `complete_interaction` notification with Codex-first
   environment-variable precedence and the standalone compatibility alias.
 
