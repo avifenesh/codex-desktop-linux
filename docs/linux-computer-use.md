@@ -18,8 +18,9 @@ It supports:
 
 ## Runtime Dependencies
 
-The embedded backend includes the standalone v0.5.0 accessibility setup
-readback fix. Setup verifies GNOME's saved toolkit-accessibility key even when
+The embedded backend includes the standalone v0.6.0 accessibility setup,
+guard, native activation, coordinate-contract, and completion-notification
+changes. Setup verifies GNOME's saved toolkit-accessibility key even when
 runtime AT-SPI is ready, and warns when the saved key cannot be verified.
 Other accessibility tools can change the key later; setup does not hold it on.
 
