@@ -18,9 +18,9 @@ It supports:
 
 ## Runtime Dependencies
 
-The embedded backend includes the standalone v0.6.0 accessibility setup,
-guard, native activation, coordinate-contract, and completion-notification
-changes. Setup verifies GNOME's saved toolkit-accessibility key even when
+The embedded backend includes the standalone v0.7.0 accessibility setup,
+guard, native activation, coordinate-contract, completion-notification, and
+accessibility-tree scoping changes. Setup verifies GNOME's saved toolkit-accessibility key even when
 runtime AT-SPI is ready, and warns when the saved key cannot be verified.
 Other accessibility tools can change the key later; setup does not hold it on.
 
@@ -31,6 +31,14 @@ with Ctrl-C or SIGTERM before disabling accessibility. Stop cancels pending
 work and releases the listener without disabling other clients or restoring
 an old setting. Applications launched during a reset/reassertion interval may
 still need restarting.
+
+Scope `get_app_state` with `app_name_or_bundle_identifier` or a window target
+(`window_id`, `pid`, `app_id`, `wm_class`, `title`). Without one it returns the
+whole desktop AT-SPI tree, reports `tree_scoped=false`, and appends a warning to
+`message`, which can exhaust a small context window. `accessibility_tree_truncated=true`
+means the node, depth, or read budget stopped traversal with unread elements
+left; recover by scoping to a narrower target and raising `max_nodes` or
+`max_depth` (hard caps 2000 and 64), not by lowering `max_nodes`.
 
 Plain left element/selector clicks prefer a native AT-SPI `click`, `press`, or
 `toggle` action, resolved by name against the live action list. Entry `activate`
