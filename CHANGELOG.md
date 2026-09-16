@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Synchronize the embedded backend to standalone v0.7.0 as
+  `0.7.0-linux-alpha1`. `get_app_state` now reports `tree_scoped` and
+  `accessibility_tree_truncated`, appends a context-flood warning to `message`
+  when no app target narrowed the AT-SPI tree (with target-aware advice when a
+  passed `pid` or window target matched no AT-SPI root), derives truncation
+  from the traversal itself instead of a node-count heuristic, and documents
+  every scoping parameter in its schema, tool description, and server
+  instructions.
+  Codex identities, DBus interfaces, Chrome integration, and compositor
+  behavior are unchanged.
 - Synchronize the embedded backend enumeration to standalone v0.6.0 as
   `0.6.0-linux-alpha1`, retaining Codex identities, DBus interfaces, Chrome
   integration, and existing compositor behavior. The v0.6.0 implementation
