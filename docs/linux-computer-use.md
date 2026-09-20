@@ -18,11 +18,20 @@ It supports:
 
 ## Runtime Dependencies
 
-The embedded backend includes the standalone v0.7.0 accessibility setup,
+The embedded backend includes the standalone v0.7.1 accessibility setup,
 guard, native activation, coordinate-contract, completion-notification, and
 accessibility-tree scoping changes. Setup verifies GNOME's saved toolkit-accessibility key even when
 runtime AT-SPI is ready, and warns when the saved key cannot be verified.
 Other accessibility tools can change the key later; setup does not hold it on.
+
+`get_app_state` returns screenshots as a structured image content block followed
+by the JSON report. The JSON `screenshot` value contains dimensions, scale,
+format, and byte counts without an inline base64 `data_url`; callers should read
+the image block for pixels.
+
+On X11, `type_text` keeps xdotool's 12 ms per-character delay so XTEST events
+stay ordered. `CODEX_COMPUTER_USE_XDOTOOL_TYPE_DELAY_MS` overrides it; the
+standalone `COMPUTER_USE_LINUX_XDOTOOL_TYPE_DELAY_MS` name remains an alias.
 
 For an explicit foreground hold-open, run `codex-computer-use-linux guard-accessibility`.
 It holds a passive AT-SPI listener and watches/reasserts the saved toolkit setting

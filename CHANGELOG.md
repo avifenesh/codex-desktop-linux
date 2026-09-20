@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Synchronize the embedded backend to standalone v0.7.1 as
+  `0.7.1-linux-alpha1`. `get_app_state` now returns screenshot pixels as an
+  image content block instead of inline base64 JSON, X11 typing retains an
+  ordered per-character delay with Codex-first environment-variable naming,
+  and the embedded MCP dependency advances to rmcp 2.1. Codex identities,
+  DBus interfaces, Chrome integration, and compositor behavior are preserved.
 - Synchronize the embedded backend to standalone v0.7.0 as
   `0.7.0-linux-alpha1`. `get_app_state` now reports `tree_scoped` and
   `accessibility_tree_truncated`, appends a context-flood warning to `message`

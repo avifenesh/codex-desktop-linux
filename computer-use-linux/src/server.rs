@@ -26,7 +26,7 @@ use crate::ydotool;
 use anyhow::Result;
 use rmcp::{
     handler::server::wrapper::{Json, Parameters},
-    model::{CallToolResult, Content},
+    model::{CallToolResult, ContentBlock},
     schemars::JsonSchema,
     tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt,
 };
@@ -342,6 +342,8 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "get_app_state",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<GetAppStateOutput>()
+            .expect("get_app_state output schema"),
         description = "Start an app use session if needed, then get a size-bounded screenshot and accessibility state for a Linux app. Scope the accessibility tree with app_name_or_bundle_identifier or a window_id/pid/app_id/wm_class/title target; omitting a target returns the whole desktop tree and can flood context. Screenshot results include coordinate_width, coordinate_height, scale, format, and quality when the returned image is downscaled or compressed; callers can request jpeg/quality for compression before resizing.",
         annotations(
             read_only_hint = true,
@@ -353,7 +355,7 @@ impl ComputerUseLinux {
     async fn get_app_state(
         &self,
         Parameters(params): Parameters<GetAppStateParams>,
-    ) -> Json<GetAppStateOutput> {
+    ) -> Result<CallToolResult, ErrorData> {
         let verbose = params.verbose.unwrap_or(false);
         let diagnostics = tokio::task::spawn_blocking(doctor_report)
             .await
@@ -497,13 +499,13 @@ impl ComputerUseLinux {
         {
             message.push_str(" Pass verbose=true for full diagnostics.");
         }
-        Json(GetAppStateOutput {
+        let output = GetAppStateOutput {
             app_name_or_bundle_identifier: params.app_name_or_bundle_identifier,
             window_context,
             window_error,
             window_permissions_hint,
             backend: "linux-atspi".to_string(),
-            screenshot,
+            screenshot: screenshot.as_ref().map(ScreenshotSummary::from),
             screenshot_error,
             accessibility_tree,
             accessibility_tree_raw_count,
@@ -513,7 +515,8 @@ impl ComputerUseLinux {
             readiness,
             diagnostics: include_full.then_some(diagnostics),
             message,
-        })
+        };
+        app_state_result(output, screenshot)
     }
 
     #[tool(
@@ -621,8 +624,8 @@ impl ComputerUseLinux {
             caption["off_screen_note"] = serde_json::json!(note);
         }
         Ok(CallToolResult::success(vec![
-            Content::image(data_url_payload(&capture.data_url), capture.mime_type),
-            Content::text(caption.to_string()),
+            ContentBlock::image(data_url_payload(&capture.data_url), capture.mime_type),
+            ContentBlock::text(caption.to_string()),
         ]))
     }
 
@@ -1992,12 +1995,17 @@ impl ComputerUseLinux {
             return Json(output);
         }
         if self.should_prefer_xdotool_keyboard() {
-            let args = xdotool_type_args(&params.text);
+            let delay_ms = xdotool_type_delay_ms();
+            let args = xdotool_type_args_with_delay(&params.text, delay_ms);
+            let command_timeout = xdotool_type_timeout(&params.text, delay_ms);
             let text = params.text.clone();
             let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
-                run_xdotool_or_fallback(Path::new("xdotool"), &args, || {
-                    run_ydotool_type_text(&text)
-                })
+                run_xdotool_or_fallback_with_timeout(
+                    Path::new("xdotool"),
+                    &args,
+                    command_timeout,
+                    || run_ydotool_type_text(&text),
+                )
                 .await
             })
             .await;
@@ -2088,7 +2096,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.7.0-linux-alpha1",
+    version = "0.7.1-linux-alpha1",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility. run_shell is absent unless CODEX_COMPUTER_USE_ENABLE_SHELL=1 or the standalone COMPUTER_USE_LINUX_ENABLE_SHELL=1 compatibility alias; when enabled it is same-user arbitrary host execution, not a sandbox, and hosts should require explicit approval."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -2718,6 +2726,73 @@ impl ScreenshotParams {
     }
 }
 
+/// Screenshot metadata for `get_app_state`. The image bytes travel as a
+/// separate `image` content block, not inside this JSON.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct ScreenshotSummary {
+    mime_type: String,
+    source: String,
+    /// Width of the returned image payload.
+    width: u32,
+    /// Height of the returned image payload.
+    height: u32,
+    /// Coordinate-space width before payload downscaling.
+    coordinate_width: u32,
+    /// Coordinate-space height before payload downscaling.
+    coordinate_height: u32,
+    /// Returned pixels per coordinate-space pixel.
+    scale: f32,
+    resized: bool,
+    bytes: usize,
+    original_bytes: usize,
+    max_bytes: usize,
+    format: ScreenshotOutputFormat,
+    quality: Option<u8>,
+}
+
+impl From<&ScreenshotCapture> for ScreenshotSummary {
+    fn from(capture: &ScreenshotCapture) -> Self {
+        Self {
+            mime_type: capture.mime_type.clone(),
+            source: capture.source.clone(),
+            width: capture.width,
+            height: capture.height,
+            coordinate_width: capture.coordinate_width,
+            coordinate_height: capture.coordinate_height,
+            scale: capture.scale,
+            resized: capture.resized,
+            bytes: capture.bytes,
+            original_bytes: capture.original_bytes,
+            max_bytes: capture.max_bytes,
+            format: capture.format,
+            quality: capture.quality,
+        }
+    }
+}
+
+/// Assemble the `get_app_state` result: the screenshot (when present) as a
+/// structured image block first, then the JSON report as text and as
+/// `structured_content`. Inlining base64 made hosts treat the image as text.
+fn app_state_result(
+    output: GetAppStateOutput,
+    screenshot: Option<ScreenshotCapture>,
+) -> Result<CallToolResult, ErrorData> {
+    let value = serde_json::to_value(&output).map_err(|error| {
+        ErrorData::internal_error(
+            format!("failed to serialize get_app_state output: {error}"),
+            None,
+        )
+    })?;
+    let mut result = CallToolResult::structured(value);
+    if let Some(capture) = screenshot {
+        result.content.insert(
+            0,
+            ContentBlock::image(data_url_payload(&capture.data_url), capture.mime_type),
+        );
+    }
+    Ok(result)
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct GetAppStateOutput {
     app_name_or_bundle_identifier: Option<String>,
@@ -2725,7 +2800,8 @@ struct GetAppStateOutput {
     window_error: Option<String>,
     window_permissions_hint: Option<String>,
     backend: String,
-    screenshot: Option<ScreenshotCapture>,
+    /// Screenshot metadata; the image itself is the first `image` content block.
+    screenshot: Option<ScreenshotSummary>,
     screenshot_error: Option<String>,
     accessibility_tree: Vec<AccessibilityNode>,
     accessibility_tree_raw_count: usize,
@@ -5509,6 +5585,14 @@ enum XdotoolAttempt {
 }
 
 async fn run_xdotool(program: &Path, args: &[String]) -> XdotoolAttempt {
+    run_xdotool_with_timeout(program, args, INPUT_COMMAND_TIMEOUT).await
+}
+
+async fn run_xdotool_with_timeout(
+    program: &Path,
+    args: &[String],
+    command_timeout: Duration,
+) -> XdotoolAttempt {
     let mut command = TokioCommand::new(program);
     command.args(args);
     command.stdout(Stdio::piped());
@@ -5518,7 +5602,7 @@ async fn run_xdotool(program: &Path, args: &[String]) -> XdotoolAttempt {
 
     match command.spawn() {
         Ok(child) => XdotoolAttempt::Finished(
-            match crate::command_runner::output_child(child, "run xdotool", INPUT_COMMAND_TIMEOUT)
+            match crate::command_runner::output_child(child, "run xdotool", command_timeout)
                 .await
                 .map_err(|error| format!("{error:#}"))
             {
@@ -5540,7 +5624,20 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::result::Result<Output, String>>,
 {
-    match run_xdotool(program, args).await {
+    run_xdotool_or_fallback_with_timeout(program, args, INPUT_COMMAND_TIMEOUT, fallback).await
+}
+
+async fn run_xdotool_or_fallback_with_timeout<F, Fut>(
+    program: &Path,
+    args: &[String],
+    command_timeout: Duration,
+    fallback: F,
+) -> std::result::Result<KeyboardCommandResult, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::result::Result<Output, String>>,
+{
+    match run_xdotool_with_timeout(program, args, command_timeout).await {
         XdotoolAttempt::Unavailable => fallback().await.map(|output| KeyboardCommandResult {
             output,
             backend: KeyboardCommandBackend::Ydotool,
@@ -5651,15 +5748,38 @@ fn prefer_wtype_keyboard(
         && available
 }
 
-fn xdotool_type_args(text: &str) -> Vec<String> {
+const XDOTOOL_TYPE_DELAY_MS: u64 = 12;
+const XDOTOOL_TYPE_DELAY_ENV: &str = "CODEX_COMPUTER_USE_XDOTOOL_TYPE_DELAY_MS";
+const XDOTOOL_TYPE_DELAY_ENV_STANDALONE: &str = "COMPUTER_USE_LINUX_XDOTOOL_TYPE_DELAY_MS";
+
+fn xdotool_type_delay_ms() -> u64 {
+    xdotool_type_delay_ms_value(
+        env::var(XDOTOOL_TYPE_DELAY_ENV).ok().as_deref(),
+        env::var(XDOTOOL_TYPE_DELAY_ENV_STANDALONE).ok().as_deref(),
+    )
+}
+
+fn xdotool_type_delay_ms_value(primary: Option<&str>, standalone: Option<&str>) -> u64 {
+    primary
+        .or(standalone)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(XDOTOOL_TYPE_DELAY_MS)
+}
+
+fn xdotool_type_args_with_delay(text: &str, delay_ms: u64) -> Vec<String> {
     vec![
         "type".to_string(),
         "--clearmodifiers".to_string(),
         "--delay".to_string(),
-        "0".to_string(),
+        delay_ms.to_string(),
         "--".to_string(),
         text.to_string(),
     ]
+}
+
+fn xdotool_type_timeout(text: &str, delay_ms: u64) -> Duration {
+    let chars = text.chars().count() as u64;
+    INPUT_COMMAND_TIMEOUT.saturating_add(Duration::from_millis(chars.saturating_mul(delay_ms)))
 }
 
 fn which_in_path(binary: &str) -> bool {
@@ -6364,6 +6484,84 @@ mod tests {
         assert_eq!(
             (capture.coordinate_width, capture.coordinate_height),
             (50, 60)
+        );
+    }
+
+    fn sample_app_state_output(screenshot: Option<&ScreenshotCapture>) -> GetAppStateOutput {
+        GetAppStateOutput {
+            app_name_or_bundle_identifier: None,
+            window_context: None,
+            window_error: None,
+            window_permissions_hint: None,
+            backend: "linux-atspi".to_string(),
+            screenshot: screenshot.map(ScreenshotSummary::from),
+            screenshot_error: None,
+            accessibility_tree: Vec::new(),
+            accessibility_tree_raw_count: 0,
+            tree_scoped: true,
+            accessibility_tree_truncated: false,
+            accessibility_error: None,
+            readiness: crate::diagnostics::ReadinessReport {
+                can_register_mcp_tools: true,
+                can_build_accessibility_tree: true,
+                can_query_windows: true,
+                can_focus_apps: true,
+                can_focus_windows: true,
+                can_send_development_input: true,
+                recommended_next_step: String::new(),
+                blockers: Vec::new(),
+            },
+            diagnostics: None,
+            message: "ok".to_string(),
+        }
+    }
+
+    #[test]
+    fn app_state_result_emits_screenshot_as_image_block_not_inline_base64() {
+        let raw = RawScreenshotCapture {
+            mime_type: "image/png".to_string(),
+            bytes: solid_png(64, 32),
+            source: "test".to_string(),
+            width: 64,
+            height: 32,
+        };
+        let capture =
+            prepare_app_state_screenshot(raw, None, false, ScreenshotPayloadOptions::default())
+                .unwrap();
+        let payload = data_url_payload(&capture.data_url);
+        let output = sample_app_state_output(Some(&capture));
+
+        let result = app_state_result(output, Some(capture)).unwrap();
+
+        assert_eq!(result.content.len(), 2);
+        let image = result.content[0]
+            .as_image()
+            .expect("first block is an image");
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.data, payload);
+        let text = &result.content[1]
+            .as_text()
+            .expect("second block is text")
+            .text;
+        assert!(
+            !text.contains(&payload),
+            "base64 leaked into the text block"
+        );
+        assert!(!text.contains("data_url"));
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["screenshot"]["width"], 64);
+        assert_eq!(structured["screenshot"]["mime_type"], "image/png");
+        assert!(structured["screenshot"].get("data_url").is_none());
+    }
+
+    #[test]
+    fn app_state_result_without_screenshot_is_text_only() {
+        let result = app_state_result(sample_app_state_output(None), None).unwrap();
+        assert_eq!(result.content.len(), 1);
+        assert!(result.content[0].as_text().is_some());
+        assert_eq!(
+            result.structured_content.unwrap()["screenshot"],
+            serde_json::Value::Null
         );
     }
 
@@ -7499,15 +7697,38 @@ mod tests {
     }
 
     #[test]
-    fn xdotool_type_disables_per_character_delay_for_long_input() {
+    fn xdotool_type_keeps_a_per_character_delay_so_xtest_events_stay_ordered() {
+        const { assert!(XDOTOOL_TYPE_DELAY_MS > 0) };
         let text = "x".repeat(10_000);
-        let args = xdotool_type_args(&text);
+        let args = xdotool_type_args_with_delay(&text, XDOTOOL_TYPE_DELAY_MS);
 
         assert_eq!(
             &args[..5],
-            ["type", "--clearmodifiers", "--delay", "0", "--"]
+            ["type", "--clearmodifiers", "--delay", "12", "--"]
         );
+        assert_eq!(args[3], XDOTOOL_TYPE_DELAY_MS.to_string());
         assert_eq!(args[5], text);
+    }
+
+    #[test]
+    fn xdotool_type_timeout_grows_with_text_length() {
+        assert_eq!(xdotool_type_timeout("", 12), INPUT_COMMAND_TIMEOUT);
+        assert_eq!(
+            xdotool_type_timeout(&"x".repeat(1_000), 12),
+            INPUT_COMMAND_TIMEOUT + Duration::from_secs(12)
+        );
+        assert_eq!(
+            xdotool_type_timeout(&"x".repeat(1_000), 0),
+            INPUT_COMMAND_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn xdotool_delay_prefers_codex_env_and_accepts_standalone_alias() {
+        assert_eq!(xdotool_type_delay_ms_value(Some("7"), Some("9")), 7);
+        assert_eq!(xdotool_type_delay_ms_value(None, Some("9")), 9);
+        assert_eq!(xdotool_type_delay_ms_value(Some("bad"), Some("9")), 12);
+        assert_eq!(xdotool_type_delay_ms_value(None, None), 12);
     }
 
     #[test]
@@ -7705,7 +7926,7 @@ mod tests {
     async fn unavailable_xdotool_uses_ydotool_fallback() {
         let result = run_xdotool_or_fallback(
             Path::new("/definitely/missing/xdotool"),
-            &xdotool_type_args("text"),
+            &xdotool_type_args_with_delay("text", XDOTOOL_TYPE_DELAY_MS),
             || async {
                 TokioCommand::new("sh")
                     .args(["-c", "exit 0"])
