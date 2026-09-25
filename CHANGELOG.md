@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Carry the standalone post-v0.7.2 spawn fix as `0.7.2-linux-alpha2`. Helper
+  launches (ydotool, wtype, xdotool, gnome-screenshot, and every supervised
+  command) retry a transient `ETXTBSY` ("Text file busy") for up to 75 ms, so
+  a helper being replaced no longer reads as missing and xdotool input no
+  longer falls back to ydotool for that reason. This also removes the
+  intermittent fake-helper test failures under the parallel suite.
 - Synchronize the embedded backend to standalone v0.7.2 as
   `0.7.2-linux-alpha1`. `doctor` requires XDG portal methods before reporting
   Screenshot, ScreenCast, or InputCapture, and readiness gains
