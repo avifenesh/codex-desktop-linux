@@ -69,6 +69,12 @@ const REMOTE_DESKTOP_POINTER_METHODS: &[&str] = &[
     "NotifyPointerAxisDiscrete",
 ];
 const SCREENCAST_POINTER_METHODS: &[&str] = &["SelectSources"];
+// Methods each standalone portal entry must export before doctor reports it.
+// `busctl introspect` exits 0 and prints only its header for an interface the
+// portal does not export, so exit status alone proves nothing (issue #156).
+const SCREENSHOT_PORTAL_METHODS: &[&str] = &["Screenshot"];
+const SCREENCAST_PORTAL_METHODS: &[&str] = &["CreateSession", "SelectSources", "Start"];
+const INPUT_CAPTURE_PORTAL_METHODS: &[&str] = &["GetZones", "Enable", "ConnectToEIS"];
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DoctorReport {
@@ -121,6 +127,9 @@ pub struct PlatformReport {
     pub xdg_runtime_dir: Option<String>,
     pub gnome_shell_version: Check,
     pub gnome_screenshot: Check,
+    /// Native X11 display for the root-window screenshot route. Fails on
+    /// Wayland sessions, including XWayland, by design.
+    pub x11_display: Check,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -180,6 +189,10 @@ pub struct ReadinessReport {
     pub can_focus_apps: bool,
     pub can_focus_windows: bool,
     pub can_send_development_input: bool,
+    /// A screenshot route was detected (GNOME Shell, an XDG Screenshot portal
+    /// that exports its Screenshot method, or the gnome-screenshot fallback).
+    /// Detection only: no test capture is taken.
+    pub can_capture_screenshots: bool,
     pub recommended_next_step: String,
     pub blockers: Vec<String>,
 }
@@ -230,6 +243,7 @@ pub fn doctor_report() -> DoctorReport {
         &accessibility,
         &windowing,
         &input,
+        !screenshot_backends(&platform, &portals, &windowing).is_empty(),
     );
 
     let capabilities = capability_map_with_portal_keyboard(
@@ -322,20 +336,7 @@ fn capability_map_with_portal_keyboard(
         input_backends.push("portal".to_string());
     }
 
-    let mut screenshot_backends = Vec::new();
-    if platform.gnome_shell_version.ok {
-        screenshot_backends.push("gnome_shell".to_string());
-    }
-    if windowing.codex_gnome_shell_extension_screenshot.ok {
-        screenshot_backends.push("gnome_shell_extension".to_string());
-    }
-    if portals.screenshot.ok {
-        screenshot_backends.push("portal".to_string());
-    }
-    // Subprocess fallback for background/systemd contexts the DBus paths reject.
-    if platform.gnome_screenshot.ok {
-        screenshot_backends.push("gnome_screenshot".to_string());
-    }
+    let screenshot_backends = screenshot_backends(platform, portals, windowing);
 
     let mut window_backends = Vec::new();
     let x11_available = windowing
@@ -740,6 +741,25 @@ fn platform_report() -> PlatformReport {
         xdg_runtime_dir: xdg_runtime_dir().map(|path| path.display().to_string()),
         gnome_shell_version: command_check("gnome-shell", &["--version"]),
         gnome_screenshot: command_check("gnome-screenshot", &["--version"]),
+        x11_display: x11_display_check(),
+    }
+}
+
+fn x11_display_check() -> Check {
+    if !crate::x11_display::is_native_x11_session() {
+        return Check::fail("not a native X11 session");
+    }
+    // doctor runs on a blocking thread; connect directly with the same bound
+    // the async helper uses so a wedged server cannot stall the report.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = crate::x11_display::X11Display::connect().map(|display| display.describe());
+        let _ = sender.send(result);
+    });
+    match receiver.recv_timeout(crate::x11_display::X11_QUERY_TIMEOUT) {
+        Ok(Ok(detail)) => Check::ok(detail),
+        Ok(Err(error)) => Check::fail(format!("{error:#}")),
+        Err(_) => Check::fail("X server did not answer within 2s"),
     }
 }
 
@@ -750,8 +770,14 @@ fn portal_report() -> PortalReport {
         remote_desktop,
         remote_desktop_keyboard,
         screencast,
-        screenshot: portal_interface_check("org.freedesktop.portal.Screenshot"),
-        input_capture: portal_interface_check("org.freedesktop.portal.InputCapture"),
+        screenshot: portal_interface_methods_check(
+            "org.freedesktop.portal.Screenshot",
+            SCREENSHOT_PORTAL_METHODS,
+        ),
+        input_capture: portal_interface_methods_check(
+            "org.freedesktop.portal.InputCapture",
+            INPUT_CAPTURE_PORTAL_METHODS,
+        ),
         mutter_remote_desktop: bus_name_check("org.gnome.Mutter.RemoteDesktop"),
         mutter_screencast: bus_name_check("org.gnome.Mutter.ScreenCast"),
     }
@@ -871,7 +897,35 @@ fn readiness_report(
         accessibility,
         windowing,
         input,
+        !screenshot_backends(platform, portals, windowing).is_empty(),
     )
+}
+
+/// Screenshot routes in the order `capture_screenshot_raw` tries them. Both the
+/// capability map and readiness read this list so they cannot disagree.
+fn screenshot_backends(
+    platform: &PlatformReport,
+    portals: &PortalReport,
+    windowing: &WindowingReport,
+) -> Vec<String> {
+    let mut backends = Vec::new();
+    if platform.gnome_shell_version.ok {
+        backends.push("gnome_shell".to_string());
+    }
+    if windowing.codex_gnome_shell_extension_screenshot.ok {
+        backends.push("gnome_shell_extension".to_string());
+    }
+    if portals.screenshot.ok {
+        backends.push("portal".to_string());
+    }
+    if platform.x11_display.ok {
+        backends.push("x11".to_string());
+    }
+    // Subprocess fallback for background/systemd contexts the DBus paths reject.
+    if platform.gnome_screenshot.ok {
+        backends.push("gnome_screenshot".to_string());
+    }
+    backends
 }
 
 fn readiness_report_with_portal_keyboard(
@@ -880,6 +934,7 @@ fn readiness_report_with_portal_keyboard(
     accessibility: &AccessibilityReport,
     windowing: &WindowingReport,
     input: &InputReport,
+    can_capture_screenshots: bool,
 ) -> ReadinessReport {
     let mut blockers = Vec::new();
     let can_build_accessibility_tree = can_build_accessibility_tree(accessibility);
@@ -919,6 +974,13 @@ fn readiness_report_with_portal_keyboard(
         );
     }
 
+    if !can_capture_screenshots {
+        blockers.push(
+            "No screenshot route was detected: GNOME Shell and the Codex GNOME Shell extension screenshot are unavailable, the XDG portal does not export org.freedesktop.portal.Screenshot, this is not a native X11 session, and gnome-screenshot is not installed. get_app_state and screenshot return no image; element-aware actions from the accessibility tree still work."
+                .to_string(),
+        );
+    }
+
     let recommended_next_step = if !can_build_accessibility_tree {
         "Run setup_accessibility to enable AT-SPI accessibility before element-aware actions."
             .to_string()
@@ -936,6 +998,9 @@ fn readiness_report_with_portal_keyboard(
     } else if !can_send_development_input {
         "Enable a keyboard-capable input backend for press_key: enable the XDG RemoteDesktop portal, install xdotool for X11, or start ydotoold with a socket accessible to this desktop user. wtype alone supports literal type_text only."
             .to_string()
+    } else if !can_capture_screenshots {
+        "Enable a screenshot route: install an XDG desktop portal backend that implements Screenshot for this desktop, or install gnome-screenshot. Accessibility-tree actions work meanwhile."
+            .to_string()
     } else {
         "Computer Use is ready: AT-SPI tree support, window targeting, and a Linux input backend are available."
             .to_string()
@@ -948,6 +1013,7 @@ fn readiness_report_with_portal_keyboard(
         can_focus_apps,
         can_focus_windows,
         can_send_development_input,
+        can_capture_screenshots,
         recommended_next_step,
         blockers,
     }
@@ -1185,9 +1251,42 @@ fn portal_interface_check(interface: &str) -> Check {
     )
 }
 
+/// Introspect a portal interface and require it to export `methods`.
+fn portal_interface_methods_check(interface: &str, methods: &[&str]) -> Check {
+    require_busctl_methods(portal_interface_check(interface), interface, methods)
+}
+
+fn require_busctl_methods(introspection: Check, interface: &str, methods: &[&str]) -> Check {
+    if !introspection.ok {
+        return introspection;
+    }
+    let missing = missing_busctl_methods(&introspection, methods);
+    if missing.is_empty() {
+        return introspection;
+    }
+    if !busctl_introspection_has_members(&introspection.detail) {
+        return Check::fail(format!(
+            "{interface} is not exported by the portal (introspection listed no members)"
+        ));
+    }
+    Check::fail(format!(
+        "{interface} is missing required methods: {}",
+        missing.join(", ")
+    ))
+}
+
+fn busctl_introspection_has_members(detail: &str) -> bool {
+    detail
+        .lines()
+        .any(|line| line.trim_start().starts_with('.'))
+}
+
 fn remote_desktop_portal_checks() -> (Check, Check, Check) {
     let introspection = portal_interface_check("org.freedesktop.portal.RemoteDesktop");
-    let screencast = portal_interface_check("org.freedesktop.portal.ScreenCast");
+    let screencast = portal_interface_methods_check(
+        "org.freedesktop.portal.ScreenCast",
+        SCREENCAST_PORTAL_METHODS,
+    );
     if !introspection.ok {
         return (introspection.clone(), introspection, screencast);
     }
@@ -1642,6 +1741,7 @@ mod tests {
             xdg_runtime_dir: Some("/run/user/1000".to_string()),
             gnome_shell_version: Check::ok("GNOME Shell 46.0"),
             gnome_screenshot: Check::ok("gnome-screenshot 41.0"),
+            x11_display: Check::fail("not a native X11 session"),
         }
     }
 
@@ -2496,6 +2596,128 @@ mod tests {
         );
 
         assert!(!readiness.can_send_development_input);
+    }
+
+    #[test]
+    fn header_only_introspection_is_not_an_exported_interface() {
+        // busctl introspect of an interface the portal lacks: header line, exit 0.
+        let header_only = Check::ok("NAME TYPE SIGNATURE RESULT/VALUE FLAGS");
+
+        let check = require_busctl_methods(
+            header_only,
+            "org.freedesktop.portal.Screenshot",
+            SCREENSHOT_PORTAL_METHODS,
+        );
+
+        assert!(!check.ok);
+        assert!(check.detail.contains("is not exported by the portal"));
+    }
+
+    #[test]
+    fn portal_interface_must_export_every_required_method() {
+        let partial = Check::ok(
+            "NAME        TYPE     SIGNATURE RESULT/VALUE FLAGS\n.PickColor  method   sa{sv}    o            -\n.version    property u         2            emits-change",
+        );
+        let check = require_busctl_methods(
+            partial,
+            "org.freedesktop.portal.Screenshot",
+            SCREENSHOT_PORTAL_METHODS,
+        );
+        assert!(!check.ok);
+        assert!(check
+            .detail
+            .contains("missing required methods: Screenshot"));
+
+        let full = Check::ok(
+            "NAME        TYPE     SIGNATURE RESULT/VALUE FLAGS\n.PickColor  method   sa{sv}    o            -\n.Screenshot method   sa{sv}    o            -",
+        );
+        assert!(
+            require_busctl_methods(
+                full,
+                "org.freedesktop.portal.Screenshot",
+                SCREENSHOT_PORTAL_METHODS
+            )
+            .ok
+        );
+
+        let failed = Check::fail("busctl: No such interface");
+        let passthrough = require_busctl_methods(
+            failed,
+            "org.freedesktop.portal.Screenshot",
+            SCREENSHOT_PORTAL_METHODS,
+        );
+        assert!(!passthrough.ok);
+        assert_eq!(passthrough.detail, "busctl: No such interface");
+    }
+
+    #[test]
+    fn readiness_blocks_when_no_screenshot_route_is_detected() {
+        let mut platform = platform_report();
+        platform.gnome_shell_version = Check::fail("No such file or directory (os error 2)");
+        platform.gnome_screenshot = Check::fail("No such file or directory (os error 2)");
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let mut windowing = windowing_report(true, true);
+        // The embedded fixture enables the Codex extension screenshot route with
+        // window focus; switch it off so this test isolates the routes it names.
+        windowing.codex_gnome_shell_extension_screenshot = Check::fail("missing");
+        let input = input_report(true);
+        let portals = portal_report(Check::fail("missing"));
+
+        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert!(!readiness.can_capture_screenshots);
+        assert!(readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("No screenshot route was detected")));
+        assert!(readiness
+            .recommended_next_step
+            .contains("Enable a screenshot route"));
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        assert!(capabilities.screenshot.is_empty());
+        assert_eq!(capabilities.preferred.screenshot, None);
+    }
+
+    #[test]
+    fn native_x11_display_is_a_screenshot_route_ahead_of_gnome_screenshot() {
+        let mut platform = platform_report();
+        platform.gnome_shell_version = Check::fail("missing");
+        platform.x11_display = Check::ok("native X11 root window 2880x1920, depth 24");
+        let portals = portal_report(Check::fail("missing"));
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let mut windowing = windowing_report(true, true);
+        // The embedded fixture enables the Codex extension screenshot route with
+        // window focus; switch it off so this test isolates the routes it names.
+        windowing.codex_gnome_shell_extension_screenshot = Check::fail("missing");
+        let input = input_report(true);
+
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert_eq!(capabilities.screenshot, ["x11", "gnome_screenshot"]);
+        assert_eq!(capabilities.preferred.screenshot.as_deref(), Some("x11"));
+        assert!(readiness.can_capture_screenshots);
+    }
+
+    #[test]
+    fn readiness_and_capabilities_share_the_screenshot_route_list() {
+        let mut platform = platform_report();
+        platform.gnome_shell_version = Check::fail("missing");
+        platform.gnome_screenshot = Check::fail("missing");
+        let mut portals = portal_report(Check::fail("missing"));
+        portals.screenshot = Check::ok(".Screenshot method sa{sv} o -");
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let mut windowing = windowing_report(true, true);
+        // The embedded fixture enables the Codex extension screenshot route with
+        // window focus; switch it off so this test isolates the routes it names.
+        windowing.codex_gnome_shell_extension_screenshot = Check::fail("missing");
+        let input = input_report(true);
+
+        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert!(readiness.can_capture_screenshots);
+        assert_eq!(capabilities.screenshot, ["portal"]);
     }
 
     #[test]

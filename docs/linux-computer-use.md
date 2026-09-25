@@ -18,7 +18,7 @@ It supports:
 
 ## Runtime Dependencies
 
-The embedded backend includes the standalone v0.7.1 accessibility setup,
+The embedded backend includes the standalone v0.7.2 accessibility setup,
 guard, native activation, coordinate-contract, completion-notification, and
 accessibility-tree scoping changes. Setup verifies GNOME's saved toolkit-accessibility key even when
 runtime AT-SPI is ready, and warns when the saved key cannot be verified.
@@ -28,6 +28,23 @@ Other accessibility tools can change the key later; setup does not hold it on.
 by the JSON report. The JSON `screenshot` value contains dimensions, scale,
 format, and byte counts without an inline base64 `data_url`; callers should read
 the image block for pixels.
+
+`doctor` reports an XDG portal interface only when the portal exports its
+methods: Screenshot needs `Screenshot`, ScreenCast needs `CreateSession`,
+`SelectSources`, and `Start`, and InputCapture needs `GetZones`, `Enable`, and
+`ConnectToEIS`. `busctl introspect` exits 0 with only a header line for a
+missing interface, so exit status alone was a false positive. Readiness reports
+`can_capture_screenshots` and a blocker when no screenshot route is detected;
+that is detection, not a test capture.
+
+On a native X11 session (never XWayland), screenshots can use one root-window
+`GetImage` after GNOME Shell, the Codex GNOME Shell extension, and the portal,
+and before `gnome-screenshot`. Pixels are device pixels, the space xdotool input
+uses. `doctor` reports it as `platform.x11_display` and the `x11`
+screenshot capability; `CODEX_COMPUTER_USE_SCREENSHOT_BACKEND=x11` pins it.
+X11/EWMH window origins come from the X server instead of `wmctrl -lG`, which
+counts the frame offset twice, so window crops and relative clicks line up
+with the client area.
 
 On X11, `type_text` keeps xdotool's 12 ms per-character delay so XTEST events
 stay ordered. `CODEX_COMPUTER_USE_XDOTOOL_TYPE_DELAY_MS` overrides it; the
