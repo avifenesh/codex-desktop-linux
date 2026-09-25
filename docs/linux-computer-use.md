@@ -1,8 +1,18 @@
 # Linux Computer Use
 
 Linux Computer Use is an opt-in UI surface backed by a native Rust MCP backend,
-`codex-computer-use-linux`. The backend is bundled and registered by default;
-the in-app Computer Use controls are disabled until you opt in.
+`codex-computer-use-linux`. The official Linux package is the baseline, and the
+community integration is disabled until the `computer-use-linux` feature is
+explicitly enabled. Enabling it stages the Linux backend/plugin and the
+feature-owned UI descriptors; none of them are default core patches.
+
+In Settings → Computer use, **Any App**
+controls native access independently of browser access. Use that row to install
+or enable native access on a fresh profile.
+
+The backend's capabilities are listed below. The in-app API exposes a subset;
+see [supported operations](../linux-features/computer-use-linux/README.md#supported-operations)
+for its limitations.
 
 It supports:
 
@@ -15,6 +25,13 @@ It supports:
   RemoteDesktop portal, `xdotool` on X11, or `ydotool`
 - pointer-direction feedback for the built-in V2 pet after successful click,
   scroll, and drag actions
+
+The in-app adapter returns a compact accessibility projection and suppresses an
+unchanged compact projection on repeated reads. Use `disableDiffing: true` for a
+fresh compact tree, or `compact: false` for complete backend metadata.
+`maxNodes`/`maxDepth` bound accessibility traversal; screenshot calls accept
+`maxWidth`, `maxHeight`, `maxBytes`, `scale`, `format`, and `quality`. Screenshot
+methods already emit the image and should not be emitted a second time.
 
 ## Runtime Dependencies
 
@@ -154,43 +171,49 @@ session's `NIRI_SOCKET`. The Computer Use backend hydrates `NIRI_SOCKET` for GUI
 starts, but the socket must still belong to the active Niri session and be
 reachable by the desktop user.
 
-The optional `x11-ewmh-computer-use` Linux feature remains available as a
-separate, alternative namespaced tool surface. It is not required for the core
-backend's generic X11/EWMH support.
+The former `x11-ewmh-computer-use` alternative has been retired. The retained
+`computer-use-linux` backend owns generic X11/EWMH support on both official
+architectures, so the x86-only duplicate no longer belongs in package builds.
 
 ## Verify Readiness
 
-Once Computer Use is visible in the Codex UI, ask Codex:
+After enabling `computer-use-linux`, rebuilding, and reinstalling ChatGPT
+Community, ask Codex:
 
 > Check whether Linux Computer Use is ready
 
 You can also run the backend directly:
 
 ```bash
-./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux doctor
-./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux setup
-./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux apps
-./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux windows
-./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux screenshot
+./codex-app/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-linux doctor
+./codex-app/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-linux setup
+./codex-app/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-linux apps
+./codex-app/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-linux windows
+./codex-app/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-linux screenshot
 ```
 
 ## Enable The In-App UI
 
-Ad hoc, for one build:
+Use the optional-feature wizard and enable `computer-use-linux`:
 
 ```bash
-CODEX_LINUX_ENABLE_COMPUTER_USE_UI=1 make build-app
+make setup-native
+make install-native
 ```
 
-Persistent, including future auto-updater rebuilds:
+Or edit the gitignored feature configuration directly:
 
 ```bash
-mkdir -p ~/.config/codex-desktop
-echo '{"codex-linux-computer-use-ui-enabled": true}' > ~/.config/codex-desktop/settings.json
+cp -n linux-features/features.example.json linux-features/features.json
+# Add "computer-use-linux" to the enabled array, then:
+make install-native
 ```
 
-To opt back out, unset the env var and remove the settings flag or set it to
-`false`.
+`make install-native` builds the required `codex-computer-use-linux` and
+`codex-computer-use-cosmic` release helpers once before staging the app.
+Updater rebuilds consume those retained prebuilt helpers rather than compiling
+Rust for every OpenAI package update. To opt out, remove the feature ID and
+rebuild/reinstall.
 
 Nix:
 
@@ -201,15 +224,5 @@ nix run github:ilysenko/codex-desktop-linux#codex-desktop-computer-use-ui
 Combined with a Linux feature output:
 
 ```bash
-nix run github:ilysenko/codex-desktop-linux#computer-use-ui-remote-mobile-control
+nix run github:ilysenko/codex-desktop-linux#codex-desktop-computer-use-ui-remote-mobile-control
 ```
-
-## Side-By-Side Dev Variant
-
-```bash
-make build-dev-app
-make run-dev-app
-```
-
-Override the dev identity with `DEV_APP_ID`, `DEV_APP_NAME`, and
-`CODEX_WEBVIEW_PORT` if needed.

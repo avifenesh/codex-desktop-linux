@@ -57,6 +57,14 @@ flatpak override --user \
 
 If a `--proxy-server` flag is already present in the merged Electron argument
 list, this feature does not add another proxy server or authentication target.
-There is no special parser for `electron-flags.conf`; persistent launch flags,
-feature-provided Electron args, and command-line passthrough arguments are all
-loaded into the same Electron argument list before this feature hook runs.
+Persistent launch flags, feature-provided Electron args, and command-line
+passthrough arguments are loaded into the same Electron argument list before
+this feature hook runs.
+See the top-level troubleshooting guide for the supported
+`electron-flags.conf` locations and format.
+
+Validate the launcher and Electron bridge behavior with:
+
+```bash
+node --test linux-features/authenticated-proxy/test.js
+```

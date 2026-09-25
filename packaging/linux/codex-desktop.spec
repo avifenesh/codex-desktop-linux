@@ -1,36 +1,46 @@
 Name:           __PACKAGE_NAME__
 Version:        __RPM_VERSION__
 Release:        __RPM_RELEASE__%{?dist}
-Summary:        ChatGPT Desktop for Linux
+Summary:        ChatGPT Community for Linux
 License:        Proprietary
 ExclusiveArch:  __ARCH__
 %global __requires_exclude_from ^/opt/__PACKAGE_NAME__/.*$
 %global __provides_exclude_from ^/opt/__PACKAGE_NAME__/.*$
 %global codex_elf_suffix %{nil}
-%ifarch x86_64 aarch64 ppc64le s390x riscv64
+%ifarch x86_64 aarch64
 %global codex_elf_suffix ()(64bit)
 %endif
 
 %if __PACKAGE_WITH_UPDATER__
-Requires:       python3, /usr/bin/7z, polkit, curl, unzip, xdg-utils, gcc-c++, make
+Requires:       polkit, curl, dpkg, nodejs, xdg-utils
+%if 0%{?suse_version}
+Requires:       gpg2
 %else
-Requires:       python3, /usr/bin/7z, curl, unzip, xdg-utils, gcc-c++, make
+Requires:       gnupg2
+%endif
+%else
+Requires:       xdg-utils
 %endif
 Requires:       libasound.so.2%{codex_elf_suffix}, libatk-bridge-2.0.so.0%{codex_elf_suffix}
-Requires:       libatk-1.0.so.0%{codex_elf_suffix}, libglib-2.0.so.0%{codex_elf_suffix}, libgtk-3.so.0%{codex_elf_suffix}
+Requires:       libatk-1.0.so.0%{codex_elf_suffix}, libatspi.so.0%{codex_elf_suffix}, libcairo.so.2%{codex_elf_suffix}, libcups.so.2%{codex_elf_suffix}
+Requires:       libdbus-1.so.3%{codex_elf_suffix}, libexpat.so.1%{codex_elf_suffix}, libgdk_pixbuf-2.0.so.0%{codex_elf_suffix}
+Requires:       libglib-2.0.so.0%{codex_elf_suffix}, libgtk-3.so.0%{codex_elf_suffix}, libnotify.so.4%{codex_elf_suffix}
 Requires:       libdrm.so.2%{codex_elf_suffix}, libnspr4.so%{codex_elf_suffix}, libnss3.so%{codex_elf_suffix}
-Requires:       libpango-1.0.so.0%{codex_elf_suffix}, libstdc++.so.6%{codex_elf_suffix}, libX11.so.6%{codex_elf_suffix}
-Requires:       libxcb.so.1%{codex_elf_suffix}, libXcomposite.so.1%{codex_elf_suffix}, libXdamage.so.1%{codex_elf_suffix}
+Requires:       libpango-1.0.so.0%{codex_elf_suffix}, libssl.so.3%{codex_elf_suffix}, libstdc++.so.6%{codex_elf_suffix}
+Requires:       libtss2-esys.so.0%{codex_elf_suffix}, libtss2-mu.so.0%{codex_elf_suffix}, libtss2-tcti-device.so.0%{codex_elf_suffix}
+Requires:       libudev.so.1%{codex_elf_suffix}, libusb-1.0.so.0%{codex_elf_suffix}, libX11.so.6%{codex_elf_suffix}
+Requires:       libX11-xcb.so.1%{codex_elf_suffix}, libxcb.so.1%{codex_elf_suffix}, libxcb-dri3.so.0%{codex_elf_suffix}
+Requires:       libXcomposite.so.1%{codex_elf_suffix}, libXdamage.so.1%{codex_elf_suffix}
 Requires:       libXext.so.6%{codex_elf_suffix}, libXfixes.so.3%{codex_elf_suffix}, libxkbcommon.so.0%{codex_elf_suffix}
-Requires:       libXrandr.so.2%{codex_elf_suffix}, libgbm.so.1%{codex_elf_suffix}, __LINUX_FEATURE_DEPENDENCIES__
+Requires:       libXrandr.so.2%{codex_elf_suffix}, libgbm.so.1%{codex_elf_suffix}, libGL.so.1%{codex_elf_suffix}
+Requires:       libgraphite2.so.3%{codex_elf_suffix}, xz, __LINUX_FEATURE_DEPENDENCIES__
 Recommends:     zenity, kdialog
 
 %description
-Community-built Linux package for ChatGPT Desktop generated from the macOS DMG.
-Requires the Codex CLI to be available in PATH or CODEX_CLI_PATH.
+Custom codex-desktop distribution built from OpenAI's signed official Linux package.
+The complete official runtime, Codex CLI, rg, and code-mode host are bundled.
 %if __PACKAGE_WITH_UPDATER__
-Local auto-updates rebuild a Linux package from the upstream Codex.dmg and therefore
-use the bundled managed Node.js runtime plus the local packaging toolchain listed in Requires.
+Local updates verify OpenAI's signed APT metadata and rebuild from the indexed Linux package.
 %else
 This package was built without codex-update-manager. Update manually from a trusted checkout.
 %endif
@@ -43,6 +53,7 @@ cp -a "__RPM_STAGING_DIR__/." "%{buildroot}/"
 %files
 %defattr(-,root,root,-)
 /opt/__PACKAGE_NAME__/
+/etc/apparmor.d/__PACKAGE_NAME__
 /usr/bin/__PACKAGE_NAME__
 %if __PACKAGE_WITH_UPDATER__
 /usr/bin/codex-update-manager
@@ -58,6 +69,10 @@ __LINUX_FEATURE_FILES__
 %post
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+fi
+if command -v aa-enabled >/dev/null 2>&1 && command -v apparmor_parser >/dev/null 2>&1 &&
+   aa-enabled --quiet && [ -f /etc/apparmor.d/__PACKAGE_NAME__ ]; then
+    apparmor_parser -r -W -T /etc/apparmor.d/__PACKAGE_NAME__ >/dev/null 2>&1 || true
 fi
 DESKTOP_ENTRY_DOCTOR=/opt/__PACKAGE_NAME__/.codex-linux/codex-desktop-entry-doctor.sh
 if [ -f "$DESKTOP_ENTRY_DOCTOR" ]; then
@@ -110,5 +125,5 @@ fi
 %endif
 
 %changelog
-* Thu Jan 01 2026 ChatGPT Desktop for Linux Maintainers <maintainers@codex-desktop-linux>
+* Thu Jan 01 2026 ChatGPT Community for Linux Maintainers <maintainers@codex-desktop-linux>
 - Initial RPM package

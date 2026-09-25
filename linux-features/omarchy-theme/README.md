@@ -1,6 +1,6 @@
 # Omarchy Theme
 
-Optional integration that makes Codex Desktop follow the active
+Optional integration that makes ChatGPT Community follow the active
 [Omarchy](https://omarchy.org/) color palette. It is disabled by default.
 
 The feature:
@@ -9,8 +9,7 @@ The feature:
   launch without overwriting an existing customized template;
 - asks `omarchy theme refresh` to generate
   `~/.config/omarchy/current/theme/codex-desktop.css` when needed;
-- selects that generated file through the loopback-only Codex webview server's
-  generic user-stylesheet endpoint;
+- publishes the generated file URI through a launcher hook;
 - injects a guarded renderer stylesheet loader that refreshes the CSS every five
   seconds and when the window regains focus.
 
@@ -26,7 +25,7 @@ Add the feature to the gitignored `linux-features/features.json`:
 }
 ```
 
-Then rebuild Codex Desktop with `./install.sh`, `make install-native`, or the
+Then rebuild ChatGPT Community with `./install.sh`, `make install-native`, or the
 corresponding AppImage/Nix workflow. The generated app must be rebuilt after
 changing feature selection.
 
@@ -48,15 +47,14 @@ seconds.
 
 ## Configuration
 
-- `CODEX_LINUX_WEBVIEW_USER_STYLESHEET=/absolute/or/~/path.css` overrides the
-  generated CSS file served to Codex.
+- `CODEX_LINUX_OMARCHY_STYLESHEET=/absolute/path.css` overrides the generated
+  CSS file selected by the launcher.
 - `CODEX_OMARCHY_THEME_AUTO_REFRESH=0` prevents the first-launch hook from
   invoking `omarchy theme refresh`.
 - `CODEX_OMARCHY_THEME_REFRESH_TIMEOUT_SECONDS=15` changes the bounded wait for
   that refresh. Values must be whole seconds between 1 and 60.
 
-The generic stylesheet endpoint returns empty CSS when the configured file is
-missing, not a regular file, unreadable, or larger than 256 KiB.
+The renderer loads the local file directly. Only select trusted user-owned CSS.
 
 ## Disable and cleanup
 
@@ -84,6 +82,6 @@ Manual acceptance checks:
   releases; unsupported selectors simply stop affecting those elements.
 - User CSS can obscure controls or reduce contrast. Only load trusted,
   user-owned CSS.
-- Polling performs one small loopback stylesheet request every five seconds.
+- Polling refreshes the local stylesheet URI every five seconds.
 - Existing customized Omarchy templates are never overwritten automatically,
   so they may need manual updates when this feature's template changes.

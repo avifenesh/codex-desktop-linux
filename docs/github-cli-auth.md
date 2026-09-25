@@ -1,9 +1,9 @@
-# GitHub CLI auth in app-launched shells
+# GitHub CLI auth in ChatGPT Community shells
 
-ChatGPT Desktop can launch successfully while shell commands inside the app still
-see a different desktop session environment than a normal terminal. One common
-symptom is that `gh auth status` works in the user's terminal, but commands run
-from ChatGPT Desktop report one of:
+ChatGPT Community can launch successfully while shell commands inside the app
+still see a different desktop session environment than a normal terminal. One
+common symptom is that `gh auth status` works in the user's terminal, but
+commands run from Community report one of:
 
 - `You are not logged into any GitHub hosts`
 - `The token in .../hosts.yml is invalid`
@@ -22,8 +22,8 @@ Run this in a normal terminal:
 gh auth status
 ```
 
-Then ask ChatGPT Desktop to run the same command in a shell. If the terminal shows
-a valid login but the app shell does not, compare:
+Then ask ChatGPT Community to run the same command in a shell. If the terminal
+shows a valid login but the app shell does not, compare:
 
 ```bash
 env | grep -E '^(XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_STATE_HOME|XDG_CACHE_HOME|DBUS_SESSION_BUS_ADDRESS|GH_CONFIG_DIR)='
@@ -40,7 +40,7 @@ cat > ~/.local/bin/gh-normal <<'EOF'
 set -euo pipefail
 
 # Prefer the user's normal GitHub CLI config/keyring instead of any
-# Electron/app-scoped XDG paths inherited by ChatGPT Desktop.
+# Electron/app-scoped XDG paths inherited by ChatGPT Community.
 unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME
 export GH_CONFIG_DIR="${GH_CONFIG_DIR:-$HOME/.config/gh}"
 export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
@@ -56,7 +56,7 @@ Validate it from the app shell:
 ~/.local/bin/gh-normal auth status
 ```
 
-Then use the wrapper anywhere ChatGPT Desktop needs authenticated GitHub CLI
+Then use the wrapper anywhere ChatGPT Community needs authenticated GitHub CLI
 access:
 
 ```bash
@@ -71,4 +71,4 @@ normal desktop terminal:
 gh auth login -h github.com
 ```
 
-Then retry `~/.local/bin/gh-normal auth status` inside ChatGPT Desktop.
+Then retry `~/.local/bin/gh-normal auth status` inside ChatGPT Community.

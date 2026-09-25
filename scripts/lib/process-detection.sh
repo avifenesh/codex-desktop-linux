@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install-time detection of an already-running ChatGPT Desktop instance.
+# Install-time detection of an already-running ChatGPT Community instance.
 #
 # Sourced by install.sh. Do not run directly.
 # shellcheck shell=bash
@@ -49,20 +49,11 @@ pid_matches_install_target() {
 }
 
 find_running_install_target_pid() {
-    local electron_path="$INSTALL_DIR/electron"
-    local app_pid_file="${XDG_STATE_HOME:-$HOME/.local/state}/$CODEX_APP_ID/app.pid"
+    local electron_path="$INSTALL_DIR/ChatGPT"
     local pid
     local proc_exe
 
     [ -e "$electron_path" ] || return 1
-
-    if [ -f "$app_pid_file" ]; then
-        pid="$(cat "$app_pid_file" 2>/dev/null || true)"
-        if pid_matches_install_target "$pid" "$electron_path"; then
-            echo "$pid"
-            return 0
-        fi
-    fi
 
     for proc_exe in /proc/[0-9]*/exe; do
         [ -e "$proc_exe" ] || continue
@@ -79,7 +70,7 @@ find_running_install_target_pid() {
 
 assert_install_target_not_running() {
     if ! install_target_is_stopped; then
-        error "ChatGPT Desktop is currently running from $INSTALL_DIR (pid $RUNNING_INSTALL_TARGET_PID).
+        error "ChatGPT Community is currently running from $INSTALL_DIR (pid $RUNNING_INSTALL_TARGET_PID).
 Close that app before rebuilding this install directory, or build into a separate path:
   CODEX_INSTALL_DIR=/tmp/codex-app-build ./install.sh
 

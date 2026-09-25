@@ -1,39 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-find_cargo() {
-    if command -v cargo >/dev/null 2>&1; then
-        command -v cargo
-        return 0
-    fi
-    if [ -x "$HOME/.cargo/bin/cargo" ]; then
-        printf '%s\n' "$HOME/.cargo/bin/cargo"
-        return 0
-    fi
-    return 1
-}
-
-source_binary="${CODEX_GLOBAL_DICTATION_LINUX_SOURCE:-}"
-if [ -n "$source_binary" ]; then
-    [ -x "$source_binary" ] || {
-        echo "Global dictation helper is not executable: $source_binary" >&2
-        exit 1
-    }
-else
-    cargo_cmd="$(find_cargo)" || {
-        echo "cargo is required to build the global dictation helper" >&2
-        exit 1
-    }
-    (
-        cd "$SCRIPT_DIR"
-        "$cargo_cmd" build --release \
-            --manifest-path global-dictation-linux/Cargo.toml >&2
-    )
-    source_binary="$SCRIPT_DIR/global-dictation-linux/target/release/codex-global-dictation-linux"
-fi
+source_binary="${CODEX_GLOBAL_DICTATION_LINUX_SOURCE:-$SCRIPT_DIR/global-dictation-linux/target/release/codex-global-dictation-linux}"
 
 [ -x "$source_binary" ] || {
-    echo "Global dictation helper is missing after build: $source_binary" >&2
+    echo "Global dictation requires a prebuilt release helper: $source_binary" >&2
+    echo "Build native feature helpers once before packaging, or set CODEX_GLOBAL_DICTATION_LINUX_SOURCE." >&2
     exit 1
 }
 

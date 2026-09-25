@@ -1,15 +1,10 @@
 { self }:
-{
-  config,
-  lib,
-  pkgs,
-  ...
-}:
+{ config, lib, pkgs, ... }:
 let
   cfg = config.programs.codexDesktopLinux;
-  remoteCfg = cfg.remoteControl;
+  remote = cfg.remoteControl;
   remoteEnvironmentFilePath =
-    if remoteCfg.environmentFile == null then null else lib.removePrefix "-" remoteCfg.environmentFile;
+    if remote.environmentFile == null then null else lib.removePrefix "-" remote.environmentFile;
   remoteEnvironmentFileSegments =
     if remoteEnvironmentFilePath == null then [ ] else lib.drop 1 (lib.splitString "/" remoteEnvironmentFilePath);
   remoteEnvironmentFileIsCanonical =
@@ -17,31 +12,23 @@ let
     && lib.hasPrefix "/" remoteEnvironmentFilePath
     && lib.all (segment: segment != "" && segment != "." && segment != "..") remoteEnvironmentFileSegments;
   system = pkgs.stdenv.hostPlatform.system;
-  flakePackages = self.packages.${system};
-  linuxFeatures = import ./linux-features.nix { inherit lib; };
-  packageSelection = import ./package-selection.nix {
-    inherit cfg flakePackages lib;
+  selection = import ./package-selection.nix {
+    inherit cfg lib;
+    flakePackages = self.packages.${system};
   };
-  basePackage = packageSelection.package;
+  basePackage = selection.package;
+  bundledCodexCliPackage = import ./bundled-codex-cli.nix {
+    inherit pkgs;
+    desktopPackage = basePackage;
+  };
+  remoteCodexCliPackage =
+    if remote.package == null then bundledCodexCliPackage else remote.package;
   codexCliPackage =
-    if cfg.cliPackage != null then
-      cfg.cliPackage
-    else if remoteCfg.enable then
-      remoteCfg.package
-    else
-      null;
-  codexCliPath = if codexCliPackage != null then lib.getExe' codexCliPackage "codex" else null;
-  # Thin wrapper that bakes CODEX_CLI_PATH into the launcher. The `.desktop`
-  # entry shipped by the package launches `<pkg>/bin/codex-desktop` by absolute
-  # path, so wrapping that binary (and repointing the desktop entry at the
-  # wrapper) makes ChatGPT Desktop locate the CLI no matter how it is started --
-  # graphical autostart, application launcher, terminal, or a warm-start handoff
-  # to an already-running instance -- without depending on the session/login
-  # `PATH` and without requiring a re-login for a config change to take effect.
-  # `--set-default` leaves an explicit `CODEX_CLI_PATH` in the environment in
-  # control, so users can still override the launched CLI.
-  withCodexCliPath =
-    base:
+    if cfg.cliPackage != null then cfg.cliPackage
+    else if remote.enable then remoteCodexCliPackage
+    else null;
+  codexCliPath = if codexCliPackage == null then null else lib.getExe' codexCliPackage "codex";
+  withCodexCliPath = base:
     pkgs.symlinkJoin {
       name = "${base.name}-codex-cli-path";
       paths = [ base ];
@@ -62,191 +49,85 @@ let
       '';
       meta = base.meta or { };
     };
-  desktopPackage = if codexCliPath != null then withCodexCliPath basePackage else basePackage;
-  codexHome =
-    if remoteCfg.codexHome != null then remoteCfg.codexHome else "${config.home.homeDirectory}/.codex";
-  remoteControlListenIsUnixSocket =
-    remoteCfg.listen == "unix://"
-    || builtins.match "unix:///[^/].*" remoteCfg.listen != null;
-  remoteControlProxySocket =
-    if remoteCfg.listen == "unix://" then
-      "${codexHome}/app-server-control/app-server-control.sock"
-    else
-      lib.removePrefix "unix://" remoteCfg.listen;
-  remoteControlPath = lib.makeSearchPath "bin" (
-    [
-      config.home.profileDirectory
-    ]
-    ++ remoteCfg.extraPackages
-  );
-  remoteControlEnvironment = {
+  desktopPackage = if codexCliPath == null then basePackage else withCodexCliPath basePackage;
+  codexHome = if remote.codexHome == null then "${config.home.homeDirectory}/.codex" else remote.codexHome;
+  prepareCodexHome = lib.escapeShellArgs [ "${pkgs.coreutils}/bin/mkdir" "-p" codexHome ];
+  listenIsUnixSocket =
+    remote.listen == "unix://"
+    || builtins.match "unix:///[^/].*" remote.listen != null;
+  socket = if remote.listen == "unix://" then "${codexHome}/app-server-control/app-server-control.sock"
+    else lib.removePrefix "unix://" remote.listen;
+  remotePath = lib.makeSearchPath "bin" ([ config.home.profileDirectory ] ++ remote.extraPackages);
+  remoteEnvironment = {
     CODEX_HOME = codexHome;
-    PATH = remoteControlPath;
-  }
-  // remoteCfg.environment;
-  remoteControlEnvironmentList = lib.mapAttrsToList (
-    name: value: "${name}=${if lib.isBool value then lib.boolToString value else toString value}"
-  ) (lib.filterAttrs (_name: value: value != null) remoteControlEnvironment);
-in
-{
+    PATH = remotePath;
+  } // remote.environment;
+  remoteEnvironmentList = lib.mapAttrsToList
+    (name: value: "${name}=${if lib.isBool value then lib.boolToString value else toString value}")
+    (lib.filterAttrs (_name: value: value != null) remoteEnvironment);
+  sessionVariables = {
+    CODEX_REMOTE_CONTROL_APP_SERVER_MODE = "proxy";
+    CODEX_REMOTE_CONTROL_APP_SERVER_PROXY_SOCKET = socket;
+  } // lib.optionalAttrs remote.disableLauncherAutostart {
+    CODEX_REMOTE_CONTROL_DAEMON_AUTOSTART_DISABLED = "1";
+  };
+in {
   options.programs.codexDesktopLinux = {
-    enable = lib.mkEnableOption "ChatGPT Desktop for Linux";
-
-    package = lib.mkOption {
-      type = lib.types.nullOr lib.types.package;
-      default = null;
-      defaultText = lib.literalExpression ''
-        inputs.codex-desktop-linux.packages.''${pkgs.stdenv.hostPlatform.system}.codex-desktop
-      '';
-      description = ''
-        ChatGPT Desktop package to install. When unset, the module builds the
-        selected configuration from
-        {option}`programs.codexDesktopLinux.computerUseUi.enable` and
-        {option}`programs.codexDesktopLinux.linuxFeatures`. The
-        {option}`programs.codexDesktopLinux.remoteMobileControl.enable` option
-        remains a compatibility shorthand for the `remote-mobile-control`
-        feature.
-      '';
-    };
-
+    enable = lib.mkEnableOption "codex-desktop based on OpenAI's official Linux package";
+    package = lib.mkOption { type = lib.types.nullOr lib.types.package; default = null; };
     cliPackage = lib.mkOption {
       type = lib.types.nullOr lib.types.package;
       default = null;
-      defaultText = lib.literalExpression "pkgs.codex";
       example = lib.literalExpression "pkgs.codex";
       description = ''
-        Codex CLI package that ChatGPT Desktop should launch. When set, the
-        installed ChatGPT Desktop launcher (and its `.desktop` entry) is wrapped so
-        it always starts with {env}`CODEX_CLI_PATH` pointing at this package's
-        `codex` binary. This lets ChatGPT Desktop locate the CLI regardless of how
-        it is started — graphical autostart, application launcher, terminal, or a
-        warm-start handoff to an already-running instance — without depending on
-        the session/login {env}`PATH` and without requiring a re-login for the
-        setting to take effect. An explicit {env}`CODEX_CLI_PATH` already in the
-        environment still wins.
-
-        When unset, the module falls back to
-        {option}`programs.codexDesktopLinux.remoteControl.package` if
-        {option}`programs.codexDesktopLinux.remoteControl.enable` is set;
-        otherwise the launcher is left unwrapped and ChatGPT Desktop relies on
-        discovering `codex` on {env}`PATH`.
+        Optional Codex CLI package baked into the Desktop launcher as the
+        default CODEX_CLI_PATH. An explicit environment value still wins.
+        When unset, Desktop uses the CLI bundled in the official package,
+        except that an enabled remote-control service supplies its package.
       '';
     };
-
-    computerUseUi.enable = lib.mkEnableOption "the Linux Computer Use UI package variant";
-
-    remoteMobileControl.enable = lib.mkEnableOption "the experimental Linux mobile remote-control package variant";
-
+    computerUseUi.enable = lib.mkEnableOption "the computer-use-linux feature";
+    remoteMobileControl.enable = lib.mkEnableOption "the remote-mobile-control feature";
     linuxFeatures = lib.mkOption {
-      type = linuxFeatures.optionType;
+      type = (import ./linux-features.nix { inherit lib; }).optionType;
       default = [ ];
-      example = [
-        "appshots"
-        "open-target-discovery"
-      ];
-      description = ''
-        Nix-compatible optional Linux features to include in the package. IDs
-        are deduplicated and sorted before the package derivation is created.
-        Features not supported by the Nix packaging layer fail module
-        evaluation. This option does not affect an explicitly configured
-        {option}`programs.codexDesktopLinux.package`.
-      '';
+      description = "Disabled-by-default Linux features baked into the immutable package.";
     };
-
     remoteControl = {
-      enable = lib.mkEnableOption "a user systemd app-server with remote control enabled";
-
+      enable = lib.mkEnableOption "a declarative Codex remote-control app-server";
       package = lib.mkOption {
-        type = lib.types.package;
-        default = pkgs.codex;
-        defaultText = lib.literalExpression "pkgs.codex";
-        description = "Codex CLI package used by the remote-control app-server service.";
-      };
-
-      codexHome = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
+        type = lib.types.nullOr lib.types.package;
         default = null;
-        example = "\${config.home.homeDirectory}/.codex";
+        example = lib.literalExpression "pkgs.codex";
         description = ''
-          Value for {env}`CODEX_HOME` in the remote-control service. If unset,
-          this defaults to {file}`~/.codex`.
+          Optional Codex CLI package for the remote-control app-server.
+          When unset, the compatible CLI bundled in the selected official
+          Desktop package is used. An override must support the app-server
+          --remote-control and --listen arguments.
         '';
       };
-
-      listen = lib.mkOption {
-        type = lib.types.str;
-        default = "unix://";
-        description = ''
-          Unix-socket app-server endpoint passed to
-          {command}`codex app-server --listen`. Use {option}`unix://` for the
-          default socket under {env}`CODEX_HOME`, or an absolute
-          {option}`unix:///path` endpoint.
-        '';
-      };
-
-      target = lib.mkOption {
-        type = lib.types.str;
-        default = "default.target";
-        description = "Systemd user target that starts the remote-control service.";
-      };
-
+      codexHome = lib.mkOption { type = lib.types.nullOr lib.types.str; default = null; };
+      listen = lib.mkOption { type = lib.types.str; default = "unix://"; };
+      target = lib.mkOption { type = lib.types.str; default = "default.target"; };
       environment = lib.mkOption {
-        type = lib.types.attrsOf (
-          lib.types.nullOr (
-            lib.types.oneOf [
-              lib.types.bool
-              lib.types.int
-              lib.types.str
-            ]
-          )
-        );
+        type = lib.types.attrsOf (lib.types.nullOr (lib.types.oneOf [ lib.types.bool lib.types.int lib.types.str ]));
         default = { };
-        description = "Environment variables to set for the remote-control service.";
       };
-
       environmentFile = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
         example = "/run/secrets/codex-remote-control.env";
-        description = ''
-          Runtime path to an additional environment file as defined in
-          {manpage}`systemd.exec(5)`. Use a quoted runtime string. Nix path
-          literals or interpolations can copy contents into the Nix store
-          before module validation; store-backed values are rejected.
-        '';
+        description = "Absolute canonical runtime path outside the Nix store, optionally prefixed with `-`.";
       };
-
       extraPackages = lib.mkOption {
         type = lib.types.listOf lib.types.package;
-        default = with pkgs; [
-          bash
-          coreutils
-          findutils
-          git
-          gnugrep
-          gnused
-          openssh
-        ];
-        description = "Extra packages to add to {env}`PATH` for commands launched by Codex.";
+        default = with pkgs; [ bash coreutils findutils git gnugrep gnused openssh ];
       };
-
-      extraArgs = lib.mkOption {
-        type = lib.types.listOf lib.types.str;
-        default = [ ];
-        example = [
-          "--analytics-default-enabled"
-        ];
-        description = "Additional arguments passed to {command}`codex app-server`.";
-      };
-
+      extraArgs = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; };
       disableLauncherAutostart = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = ''
-          Set {env}`CODEX_REMOTE_CONTROL_DAEMON_AUTOSTART_DISABLED=1` in the
-          user session when this declarative service is enabled, so the Desktop
-          launcher does not also start the mutable standalone daemon hook.
-        '';
+        description = "Prevent the mutable launcher hook from starting a second remote-control daemon.";
       };
     };
   };
@@ -254,89 +135,49 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = !remoteCfg.enable || pkgs.stdenv.hostPlatform.isLinux;
-        message = "`programs.codexDesktopLinux.remoteControl.enable` is only supported on Linux";
+        assertion = !remote.enable || pkgs.stdenv.hostPlatform.isLinux;
+        message = "programs.codexDesktopLinux.remoteControl.enable is only supported on Linux";
       }
       {
-        assertion = !remoteCfg.enable || remoteControlListenIsUnixSocket;
-        message = "`programs.codexDesktopLinux.remoteControl.listen` must be `unix://` or an absolute `unix:///path` endpoint";
+        assertion = !remote.enable || listenIsUnixSocket;
+        message = "remoteControl.listen must be unix:// or an absolute unix:///path";
       }
       {
-        assertion =
-          remoteCfg.environmentFile == null
-          || (!builtins.hasContext remoteCfg.environmentFile && remoteEnvironmentFileIsCanonical);
-        message = ''
-          `programs.codexDesktopLinux.remoteControl.environmentFile` must be an
-          absolute canonical runtime path without Nix store context, optionally
-          prefixed with `-`
-        '';
+        assertion = remote.environmentFile == null
+          || (!builtins.hasContext remote.environmentFile && remoteEnvironmentFileIsCanonical);
+        message = "remoteControl.environmentFile must be an absolute canonical runtime path without Nix store context, optionally prefixed with -";
       }
       {
-        assertion =
-          remoteCfg.environmentFile == null
-          || (
-            remoteEnvironmentFilePath != builtins.storeDir
-            && !lib.hasPrefix "${builtins.storeDir}/" remoteEnvironmentFilePath
-          );
-        message = ''
-          `programs.codexDesktopLinux.remoteControl.environmentFile` must be a
-          runtime path outside the Nix store
-        '';
+        assertion = remote.environmentFile == null
+          || (remoteEnvironmentFilePath != builtins.storeDir
+            && !lib.hasPrefix "${builtins.storeDir}/" remoteEnvironmentFilePath);
+        message = "remoteControl.environmentFile must be a runtime path outside the Nix store";
       }
     ];
-
-    home.packages = [
-      desktopPackage
-    ];
-
-    home.sessionVariables = lib.mkIf remoteCfg.enable (
-      {
-        CODEX_REMOTE_CONTROL_APP_SERVER_MODE = "proxy";
-        CODEX_REMOTE_CONTROL_APP_SERVER_PROXY_SOCKET = remoteControlProxySocket;
-      }
-      // lib.optionalAttrs remoteCfg.disableLauncherAutostart {
-        CODEX_REMOTE_CONTROL_DAEMON_AUTOSTART_DISABLED = "1";
-      }
-    );
-
-    systemd.user.sessionVariables = lib.mkIf remoteCfg.enable (
-      {
-        CODEX_REMOTE_CONTROL_APP_SERVER_MODE = "proxy";
-        CODEX_REMOTE_CONTROL_APP_SERVER_PROXY_SOCKET = remoteControlProxySocket;
-      }
-      // lib.optionalAttrs remoteCfg.disableLauncherAutostart {
-        CODEX_REMOTE_CONTROL_DAEMON_AUTOSTART_DISABLED = "1";
-      }
-    );
-
-    systemd.user.services.codex-remote-control = lib.mkIf remoteCfg.enable {
+    home.packages = [ desktopPackage ];
+    home.sessionVariables = lib.mkIf remote.enable sessionVariables;
+    systemd.user.sessionVariables = lib.mkIf remote.enable sessionVariables;
+    systemd.user.services.codex-remote-control = lib.mkIf remote.enable {
       Unit = {
         Description = "Codex remote-control app-server";
         After = [ "network.target" ];
       };
-
       Service = {
-        Environment = remoteControlEnvironmentList;
-        ExecStart = lib.escapeShellArgs (
-          [
-            (lib.getExe remoteCfg.package)
-            "app-server"
-            "--remote-control"
-            "--listen"
-            remoteCfg.listen
-          ]
-          ++ remoteCfg.extraArgs
-        );
+        ExecStartPre = prepareCodexHome;
+        ExecStart = lib.escapeShellArgs ([
+          (lib.getExe' remoteCodexCliPackage "codex")
+          "app-server"
+          "--remote-control"
+          "--listen"
+          remote.listen
+        ] ++ remote.extraArgs);
         Restart = "on-failure";
         RestartSec = 5;
-      }
-      // lib.optionalAttrs (remoteCfg.environmentFile != null) {
-        EnvironmentFile = remoteCfg.environmentFile;
+        Environment = remoteEnvironmentList;
+      } // lib.optionalAttrs (remote.environmentFile != null) {
+        EnvironmentFile = remote.environmentFile;
       };
-
-      Install.WantedBy = [
-        remoteCfg.target
-      ];
+      Install.WantedBy = [ remote.target ];
     };
   };
 }

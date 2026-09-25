@@ -11,14 +11,15 @@ const vm = require("node:vm");
 const {
   loadLinuxFeaturePatchDescriptors,
 } = require("../../scripts/lib/linux-features.js");
-const { patchAssetFiles } = require("../../scripts/patches/lib/assets.js");
+const { patchUniqueAssetFile } = require("../../scripts/patches/lib/assets.js");
 const {
   applyProjectTaskSortPatch,
+  matchesProjectTaskSortContract,
   descriptors,
 } = require("./patch.js");
 
 const currentProjectSource =
-  "function xe(e,t){switch(e.kind){case`local`:return e.conversation==null?e.pendingWorktree.createdAt:t===`updated_at`?e.conversation.recencyAt??e.conversation.updatedAt:e.conversation.createdAt;case`remote`:return((t===`updated_at`?e.task.updated_at??e.task.created_at:e.task.created_at??e.task.updated_at)??0)*1e3}}";
+  "function CQr(e,t){switch(e.kind){case`local`:return e.conversation==null?e.at:t===`updated_at`?e.conversation.recencyAt??e.conversation.updatedAt:e.conversation.createdAt;case`remote`:return((t===`updated_at`?e.task.updated_at??e.task.created_at:e.task.created_at??e.task.updated_at)??0)*1e3}}";
 
 function captureWarns(fn) {
   const originalWarn = console.warn;
@@ -39,6 +40,14 @@ function applyPatchTwice(source) {
   assert.equal(secondPass, patched);
   assert.deepEqual(warnings, []);
   return patched;
+}
+
+function timestampFunction(source = currentProjectSource) {
+  const patched = applyPatchTwice(source);
+  const context = {};
+  const functionName = patched.match(/^function ([A-Za-z_$][\w$]*)/)?.[1];
+  vm.runInNewContext(`${patched};globalThis.timestamp=${functionName}`, context);
+  return context.timestamp;
 }
 
 function withFeatureConfig(enabled, fn) {
@@ -76,111 +85,120 @@ test("feature is disabled until selected", () => {
   });
 });
 
-test("patch recovers local UUIDv7 creation time", () => {
-  const patched = applyPatchTwice(currentProjectSource);
-
-  assert.ok(
-    patched.includes(
-      "e.conversation.createdAt??(/^local:[\\da-f]{8}-[\\da-f]{4}-7[\\da-f]{3}-[89ab][\\da-f]{3}-[\\da-f]{12}$/i.test(e.key)?Number.parseInt(e.key.slice(6).replaceAll(`-`,``).slice(0,12),16):e.conversation.recencyAt??e.conversation.updatedAt)",
-    ),
-  );
-
-  const context = {};
-  vm.runInNewContext(`${patched};globalThis.timestamp=xe`, context);
+test("populated local conversations recover Created time from UUIDv7 keys", () => {
+  const timestamp = timestampFunction();
   const older = {
     key: "local:019e0000-0000-7000-8000-000000000001",
     kind: "local",
+    at: 900,
     conversation: { recencyAt: 400 },
   };
   const newer = {
     key: "local:019f0000-0000-7000-8000-000000000002",
     kind: "local",
+    at: 1,
     conversation: { recencyAt: 100 },
   };
 
-  assert.ok(context.timestamp(newer, "created_at") > context.timestamp(older, "created_at"));
-  assert.equal(context.timestamp(older, "updated_at"), 400);
+  assert.ok(timestamp(newer, "created_at") > timestamp(older, "created_at"));
+  assert.equal(timestamp(older, "updated_at"), 400);
+});
+
+test("explicit, pending, legacy, invalid, and remote timestamps retain upstream behavior", () => {
+  const timestamp = timestampFunction();
+  const local = {
+    key: "local:019e0000-0000-7000-8000-000000000001",
+    kind: "local",
+    at: 900,
+    conversation: { recencyAt: 400, updatedAt: 300 },
+  };
+
+  assert.equal(timestamp({ ...local, conversation: { ...local.conversation, createdAt: 123 } }, "created_at"), 123);
+  assert.equal(timestamp({ ...local, conversation: null }, "created_at"), 900);
+  assert.equal(timestamp({ ...local, key: "local:legacy-id" }, "created_at"), 400);
   assert.equal(
-    context.timestamp({ ...older, conversation: { createdAt: 123, recencyAt: 400 } }, "created_at"),
-    123,
+    timestamp({ ...local, key: "local:019e0000-0000-7000-7000-000000000001" }, "created_at"),
+    400,
   );
   assert.equal(
-    context.timestamp(
-      { ...older, key: "local:legacy-id", conversation: { recencyAt: 500 } },
-      "created_at",
-    ),
-    500,
+    timestamp({ ...local, key: "local:019e0000-0000-7garbage" }, "created_at"),
+    400,
   );
-  assert.equal(
-    context.timestamp(
-      { ...older, key: "local:019e0000-0000-7garbage", conversation: { recencyAt: 600 } },
-      "created_at",
-    ),
-    600,
-  );
-  assert.equal(
-    context.timestamp(
-      {
-        ...older,
-        key: "local:019e0000-0000-7000-7000-000000000001",
-        conversation: { recencyAt: 700 },
-      },
-      "created_at",
-    ),
-    700,
-  );
+
   const remote = { kind: "remote", task: { created_at: 10, updated_at: 20 } };
-  assert.equal(context.timestamp(remote, "created_at"), 10_000);
-  assert.equal(context.timestamp(remote, "updated_at"), 20_000);
+  assert.equal(timestamp(remote, "created_at"), 10_000);
+  assert.equal(timestamp(remote, "updated_at"), 20_000);
 });
 
-test("drift leaves the asset byte-identical", () => {
-  const source = currentProjectSource.replace(
-    "e.pendingWorktree.createdAt",
-    "e.pendingWorktree.createdTimestamp",
+test("semantic comparator matching is independent of minified aliases", () => {
+  const renamed = currentProjectSource
+    .replace("CQr(e,t)", "createdComparator(task,mode)")
+    .replaceAll("e.", "task.")
+    .replaceAll("t===", "mode===");
+  const timestamp = timestampFunction(renamed);
+  assert.equal(
+    timestamp({
+      key: "local:019e0000-0000-7000-8000-000000000001",
+      kind: "local",
+      conversation: {},
+    }, "created_at"),
+    Number.parseInt("019e00000000", 16),
   );
-  const { value, warnings } = captureWarns(() => applyProjectTaskSortPatch(source));
-
-  assert.equal(value, source);
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /project task creation timestamp insertion point/);
 });
 
-test("mixed patched and clean helpers are rejected byte-identically", () => {
-  const mixed = `${applyProjectTaskSortPatch(currentProjectSource)}${currentProjectSource}`;
-  const { value, warnings } = captureWarns(() => applyProjectTaskSortPatch(mixed));
-
-  assert.equal(value, mixed);
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /project task creation timestamp insertion point/);
+test("drift and duplicate semantic comparators fail closed byte-identically", () => {
+  const drifted = currentProjectSource.replace("e.at", "e.pendingWorktree.createdAt");
+  for (const source of [
+    drifted,
+    `${currentProjectSource}${currentProjectSource}`,
+    `${currentProjectSource}${drifted}`,
+    `${applyProjectTaskSortPatch(currentProjectSource)}${currentProjectSource}`,
+  ]) {
+    const { value, warnings } = captureWarns(() => applyProjectTaskSortPatch(source));
+    assert.equal(value, source);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /one unique current project task timestamp comparator/);
+    assert.equal(matchesProjectTaskSortContract(source), false);
+  }
 });
 
-test("descriptor targets and patches the current project chunk", () => {
+test("descriptor locates one semantic asset and rejects missing or ambiguous assets", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "project-task-sort-assets-"));
   try {
     const assetsDir = path.join(tempDir, "webview", "assets");
-    const assetPath = path.join(
-      assetsDir,
-      "app-initial~app-main~onboarding-page~projects-index-page~quick-chat-window-page~codex-micro~iqsnin5k-Bxmd3ja1.js",
-    );
     fs.mkdirSync(assetsDir, { recursive: true });
-    fs.writeFileSync(assetPath, currentProjectSource);
+    fs.writeFileSync(path.join(assetsDir, "renamed-project-chunk.js"), currentProjectSource);
+    fs.writeFileSync(path.join(assetsDir, "unrelated.js"), "export const value=1;");
 
-    const result = patchAssetFiles(
+    const patch = () => patchUniqueAssetFile(
       tempDir,
       descriptors[0].pattern,
+      descriptors[0].assetMatch,
       descriptors[0].apply,
       "missing",
+      "ambiguous",
     );
+    assert.deepEqual(patch(), {
+      matched: 1,
+      changed: 1,
+      assetName: "renamed-project-chunk.js",
+    });
+    assert.equal(matchesProjectTaskSortContract(
+      fs.readFileSync(path.join(assetsDir, "renamed-project-chunk.js"), "utf8"),
+    ), true);
 
-    assert.deepEqual(result, { matched: 1, changed: 1 });
-    assert.notEqual(fs.readFileSync(assetPath, "utf8"), currentProjectSource);
-    assert.equal(
-      descriptors[0].pattern.test(
-        "app-initial~app-main~projects-index-page~remote-conversation-page-y7pwA1Hj.js",
-      ),
-      false,
-    );
+    fs.writeFileSync(path.join(assetsDir, "duplicate-project-chunk.js"), currentProjectSource);
+    const { value, warnings } = captureWarns(patch);
+    assert.deepEqual(value, { matched: 2, changed: 0, assetName: null });
+    assert.deepEqual(warnings, [
+      "ambiguous: duplicate-project-chunk.js, renamed-project-chunk.js",
+    ]);
+
+    fs.rmSync(path.join(assetsDir, "duplicate-project-chunk.js"));
+    fs.rmSync(path.join(assetsDir, "renamed-project-chunk.js"));
+    const missing = captureWarns(patch);
+    assert.deepEqual(missing.value, { matched: 0, changed: 0, assetName: null });
+    assert.deepEqual(missing.warnings, ["missing"]);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

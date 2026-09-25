@@ -1,546 +1,114 @@
 name: CI
 
 on:
-  pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
-  pull-requests: read
-
-env:
-  CARGO_TERM_COLOR: always
-  CI_PACKAGE_VERSION: 2026.04.28.000000+ci${{ github.run_number }}
 
 jobs:
-  rust-and-smoke:
-    name: Rust and Smoke Tests
+  source-and-node:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
-
-      - name: Install Rust components
-        run: rustup component add rustfmt clippy
-
-      - name: Check shell syntax
+      - name: Install smoke-test dependencies
         run: |
-          set -euo pipefail
-          bash -n install.sh
-          bash -n scripts/install-deps.sh
-          bash -n scripts/build-deb.sh
-          bash -n scripts/build-rpm.sh
-          bash -n scripts/build-pacman.sh
-          bash -n scripts/build-appimage.sh
-          bash -n scripts/ci/download-upstream-dmg.sh
-          bash -n scripts/ci/update-nix-hashes.sh
-          bash -n scripts/ci/validate-nix-pins.sh
-
-      - name: Check Node syntax and tests
-        timeout-minutes: 10
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ripgrep
+      - name: Shell syntax
         run: |
-          set -euo pipefail
-          bash scripts/ci/run-node-checks.sh
-
-      - name: Check Rust formatting
-        run: cargo fmt --check
-
-      - name: Run Rust clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Run Rust checks
-        run: cargo check --workspace --all-targets
-
-      - name: Run Rust tests
-        run: cargo test --workspace --all-targets
-
-      - name: Run script smoke tests
+          bash -n install.sh launcher/start.sh.template scripts/lib/*.sh
+          bash -n scripts/build-deb.sh scripts/build-rpm.sh scripts/build-pacman.sh scripts/build-appimage.sh
+      - name: Node tests
         run: |
-          set -euo pipefail
-          bash tests/scripts_smoke.sh
-          {
-            echo "## Rust and Smoke Tests"
-            echo ""
-            echo "- Shell syntax checks passed."
-            echo "- Node syntax and tests passed."
-            echo "- Rust formatting, clippy, check, and tests passed."
-            echo "- Script smoke tests passed."
-          } >> "$GITHUB_STEP_SUMMARY"
+          node --test scripts/ci/*.test.js
+          node --test scripts/lib/upstream-linux-package.test.js
+          node --test scripts/lib/package-common.test.js
+          node --check scripts/ci/verify-official-linux-features.js
+          node --test scripts/automation/upstream-linux-package-watchdog/test.js
+          node --test scripts/patch-linux-window-ui.test.js scripts/patches/descriptor.test.js \
+            scripts/patches/core/quit-confirmation-focus/test.js \
+            scripts/lib/linux-features.test.js linux-features/*/test.js
+      - name: Smoke tests
+        run: bash tests/scripts_smoke.sh
 
-  package-deb:
-    name: Build Debian Package
+  rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@56f84321dbccf38fb67ce29ab63e4754056677e0
+        with:
+          toolchain: stable
+          components: clippy
+      - run: cargo test -p codex-update-manager
+      - run: cargo clippy -p codex-update-manager -- -D warnings
+      - run: cargo test -p codex-record-replay-linux
+      - run: cargo clippy -p codex-record-replay-linux --all-targets -- -D warnings
 
-      - name: Create minimal packaged app fixture
-        run: |
-          set -euo pipefail
-          rm -rf codex-app dist
-          tests/fixtures/create-packaged-app-fixture.sh codex-app
+  nix-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+      - run: scripts/ci/validate-nix-pins.sh
+      - name: Evaluate NixOS and Home Manager module contracts
+        run: nix build ".#checks.${{ matrix.system }}.modules" --no-link
+      - name: Build audited default runtime
+        run: nix build ".#checks.${{ matrix.system }}.nix-runtime" --no-link
+      - name: Build audited Chronicle-only runtime
+        run: nix build ".#checks.${{ matrix.system }}.nix-runtime-chronicle-skysight" --no-link
+      - name: Build audited Computer Use runtime
+        run: nix build ".#checks.${{ matrix.system }}.nix-runtime-computer-use" --no-link
+      - name: Build audited directory-watch feature profile
+        run: nix build ".#checks.${{ matrix.system }}.nix-runtime-maximal-directory-watch" --no-link
+      - name: Build audited shallow-watch feature profile
+        run: nix build ".#checks.${{ matrix.system }}.nix-runtime-maximal-shallow-watch" --no-link
+      - name: Build and audit the public installer
+        run: nix build ".#checks.${{ matrix.system }}.nix-installer" --no-link
 
-      - name: Build Debian package
-        run: PACKAGE_VERSION="$CI_PACKAGE_VERSION" ./scripts/build-deb.sh
+  nix-vm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+      - name: Run the NixOS runtime VM
+        run: nix build .#checks.x86_64-linux.nixos-vm --no-link
 
-      - name: Inspect Debian package
-        run: |
-          set -euo pipefail
-          deb_file="$(find dist -maxdepth 1 -name 'codex-desktop_*.deb' -print -quit)"
-          test -n "$deb_file"
-          dpkg-deb -I "$deb_file"
-          dpkg-deb -c "$deb_file" | tee /tmp/deb-contents.txt >/dev/null
-          dpkg-deb -f "$deb_file" Depends | tee /tmp/deb-depends.txt >/dev/null
-          grep -q './usr/bin/codex-update-manager' /tmp/deb-contents.txt
-          grep -q './usr/lib/systemd/user/codex-update-manager.service' /tmp/deb-contents.txt
-          grep -q './opt/codex-desktop/update-builder/install.sh' /tmp/deb-contents.txt
-          grep -q './opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh' /tmp/deb-contents.txt
-          ! grep -q './usr/share/codex-package-framework/fixture.txt' /tmp/deb-contents.txt
-          ! grep -q 'codex-package-framework-runtime' /tmp/deb-depends.txt
-          {
-            echo "## Debian Package Validation"
-            echo ""
-            echo "- Built: \`$(basename "$deb_file")\`"
-            echo "- Verified updater binary, user service, update-builder bundle, and packaged runtime helper."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Create feature-enabled packaged app fixture
-        env:
-          CODEX_FIXTURE_LINUX_FEATURES_JSON: '["package-framework-fixture"]'
-        run: |
-          set -euo pipefail
-          rm -rf codex-app dist
-          tests/fixtures/create-packaged-app-fixture.sh codex-app
-
-      - name: Build feature-enabled Debian package
-        env:
-          CODEX_LINUX_FEATURES_ROOT: ${{ github.workspace }}/tests/fixtures/linux-features
-          CODEX_LINUX_FEATURES_CONFIG: ${{ github.workspace }}/tests/fixtures/linux-features/features-enabled.json
-        run: PACKAGE_VERSION="$CI_PACKAGE_VERSION" ./scripts/build-deb.sh
-
-      - name: Inspect feature-enabled Debian package
-        run: |
-          set -euo pipefail
-          deb_file="$(find dist -maxdepth 1 -name 'codex-desktop_*.deb' -print -quit)"
-          test -n "$deb_file"
-          dpkg-deb -I "$deb_file"
-          dpkg-deb -c "$deb_file" | tee /tmp/deb-feature-contents.txt >/dev/null
-          dpkg-deb -f "$deb_file" Depends | tee /tmp/deb-feature-depends.txt >/dev/null
-          grep -q './usr/share/codex-package-framework/fixture.txt' /tmp/deb-feature-contents.txt
-          grep -q 'codex-package-framework-runtime' /tmp/deb-feature-depends.txt
-          fixture_mode="$(
-            awk '$NF == "./usr/share/codex-package-framework/fixture.txt" { print $1 }' \
-              /tmp/deb-feature-contents.txt
-          )"
-          test "$fixture_mode" = '-rw-r-----'
-          {
-            echo "- Feature-enabled build: \`$(basename "$deb_file")\`"
-            echo "- Verified generic feature resource, 0640 mode, and runtime dependency."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Create Codex Micro packaged app fixture
-        env:
-          CODEX_FIXTURE_LINUX_FEATURES_JSON: '["codex-micro"]'
-        run: |
-          set -euo pipefail
-          rm -rf codex-app dist
-          tests/fixtures/create-packaged-app-fixture.sh codex-app
-          printf '%s\n' '{"enabled":["codex-micro"]}' > /tmp/codex-micro-features.json
-
-      - name: Build Codex Micro Debian package
-        env:
-          CODEX_LINUX_FEATURES_CONFIG: /tmp/codex-micro-features.json
-        run: PACKAGE_VERSION="$CI_PACKAGE_VERSION" ./scripts/build-deb.sh
-
-      - name: Inspect Codex Micro Debian package
-        run: |
-          set -euo pipefail
-          deb_file="$(find dist -maxdepth 1 -name 'codex-desktop_*.deb' -print -quit)"
-          test -n "$deb_file"
-          dpkg-deb -c "$deb_file" | tee /tmp/deb-micro-contents.txt >/dev/null
-          dpkg-deb -f "$deb_file" Depends | tee /tmp/deb-micro-depends.txt >/dev/null
-          grep -q './usr/lib/udev/rules.d/70-codex-micro.rules' /tmp/deb-micro-contents.txt
-          grep -q 'libudev1' /tmp/deb-micro-depends.txt
-          grep -q 'libusb-1.0-0' /tmp/deb-micro-depends.txt
-          rule_mode="$(
-            awk '$NF == "./usr/lib/udev/rules.d/70-codex-micro.rules" { print $1 }' \
-              /tmp/deb-micro-contents.txt
-          )"
-          test "$rule_mode" = '-rw-r--r--'
-          {
-            echo "- Codex Micro build: \`$(basename "$deb_file")\`"
-            echo "- Verified udev rule, 0644 mode, and libudev/libusb dependencies."
-          } >> "$GITHUB_STEP_SUMMARY"
-
+  # Keep this stable context: the main branch ruleset requires a job named
+  # "nix", while the architecture matrix above is free to grow.
   nix:
-    name: Nix Package Builds
+    if: ${{ always() }}
+    needs:
+      - nix-build
+      - nix-vm
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    env:
-      NIX_CONFIG: |
-        experimental-features = nix-command flakes
-        max-jobs = 1
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-
-      - uses: cachix/install-nix-action@v27
-
-      - name: Configure Cachix for Nix build substitutions
-        uses: cachix/cachix-action@v17
-        with:
-          name: codex-desktop-linux
-          skipPush: true
-
-      - name: Install validation dependencies
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y p7zip-full
-
-      - name: Detect Nix pin file changes
-        id: nix-pin-files
+      - name: Require every Nix validation job
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          NIX_BUILD_RESULT: ${{ needs.nix-build.result }}
+          NIX_VM_RESULT: ${{ needs.nix-vm.result }}
         run: |
-          set -euo pipefail
-          changed=false
-          changed_files="$(mktemp)"
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            gh api \
-              "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
-              --paginate \
-              --jq '.[].filename' | tee "$changed_files"
-            guarded_paths='^(flake\.lock|linux-features/directory-only-working-tree-watch/watchbound-artifacts\.json|nix/native-modules/package\.json|nix/native-modules/package-lock\.json|nix/watchbound-Cargo\.lock|scripts/ci/update-nix-hashes\.sh|scripts/ci/validate-nix-pins\.sh)$'
-            if grep -Eq "$guarded_paths" "$changed_files"; then
-              changed=true
-            elif grep -qx 'flake.nix' "$changed_files"; then
-              git fetch --no-tags --depth=1 origin "$PR_BASE_SHA" "$PR_HEAD_SHA"
-              if git diff --unified=0 "$PR_BASE_SHA" "$PR_HEAD_SHA" -- flake.nix \
-                  | grep -Eq '^[+-][[:space:]]*(codexVersion|electronVersion|hash) = '; then
-                changed=true
-              fi
-            fi
-
-            if [ "$changed" = "true" ]; then
-              {
-                echo "## Nix Pin File Changes"
-                echo ""
-                echo "- Rollout skip is disabled because this PR changes Nix pin source-of-truth content."
-                echo "- Changed guarded files:"
-                grep -E "$guarded_paths|^flake\.nix$" "$changed_files" | sed 's/^/  - `/' | sed 's/$/`/'
-              } >> "$GITHUB_STEP_SUMMARY"
-            fi
-          fi
-          echo "changed=$changed" >> "$GITHUB_OUTPUT"
-          rm -f "$changed_files"
-
-      - name: Validate Nix pins against upstream DMG
-        id: nix-pin-validation
-        env:
-          NIX_PIN_FILES_CHANGED: ${{ steps.nix-pin-files.outputs.changed }}
-        run: |
-          set -euo pipefail
-          validation_log="$(mktemp)"
-          set +e
-          scripts/ci/validate-nix-pins.sh 2>&1 | tee "$validation_log"
-          validation_status="${PIPESTATUS[0]}"
-          set -e
-          if [ "$validation_status" -ne 0 ]; then
-            if [ "$GITHUB_EVENT_NAME" = "pull_request" ] \
-                && [ "$NIX_PIN_FILES_CHANGED" != "true" ] \
-                && grep -Eq "Codex app version pin mismatch|Electron version pin mismatch|native-modules .* pin mismatch" "$validation_log"; then
-              {
-                echo "## Nix Pin Validation"
-                echo ""
-                echo "- Skipped package-output builds because upstream \`Codex.dmg\` metadata is ahead of the committed flake pins during rollout."
-                echo "- This is PR-only; main-branch validation still fails so the scheduled hash-refresh workflow can open a full pin-refresh PR from the current upstream DMG."
-              } >> "$GITHUB_STEP_SUMMARY"
-              echo "skip_package_outputs=true" >> "$GITHUB_OUTPUT"
-              rm -f "$validation_log"
-              exit 0
-            fi
-            exit "$validation_status"
-          fi
-          echo "skip_package_outputs=false" >> "$GITHUB_OUTPUT"
-          rm -f "$validation_log"
-
-      - name: Check flake evaluation
-        run: nix flake check --no-build
-
-      - name: Build Nix package outputs
-        if: steps.nix-pin-validation.outputs.skip_package_outputs != 'true'
-        env:
-          NIX_PIN_FILES_CHANGED: ${{ steps.nix-pin-files.outputs.changed }}
-        run: |
-          set -euo pipefail
-          outputs=(
-            .#installer
-            .#codex-desktop
-            .#codex-desktop-computer-use-ui
-            .#codex-desktop-remote-mobile-control
-            .#codex-desktop-computer-use-ui-remote-mobile-control
-            .#checks.x86_64-linux.parcel-watcher-staged-runtime
-            .#checks.x86_64-linux.nix-pipewire-alsa-wrapper
-            .#checks.x86_64-linux.nix-gsettings-schema-wrapper
-            .#checks.x86_64-linux.watchdog-linux-features
-          )
-          for output in "${outputs[@]}"; do
-            build_log="$(mktemp)"
-            if ! nix build "$output" --no-link --print-build-logs --max-jobs 1 2>&1 | tee "$build_log"; then
-              if [ "$GITHUB_EVENT_NAME" = "pull_request" ] \
-                  && [ "$NIX_PIN_FILES_CHANGED" != "true" ] \
-                  && grep -q "hash mismatch in fixed-output derivation" "$build_log" \
-                  && grep -q "Codex.dmg.drv" "$build_log"; then
-                {
-                  echo "## Nix Package Builds"
-                  echo ""
-                  echo "- Skipped package-output builds after \`$output\` because upstream \`Codex.dmg\` is rolling between fixed-output hashes."
-                  echo "- This does not mask non-DMG Nix failures; main-branch builds still fail on this condition."
-                  echo "- The scheduled hash-refresh workflow owns updating the committed DMG pin from the current upstream DMG."
-                } >> "$GITHUB_STEP_SUMMARY"
-                exit 0
-              fi
-              exit 1
-            fi
-            rm -f "$build_log"
-            store_usage="$(df -P /nix/store | awk 'NR == 2 { gsub("%", "", $5); print $5 }')"
-            if [ "${store_usage:-0}" -ge 85 ]; then
-              nix store gc || true
-            fi
-          done
-
-  package-rpm:
-    name: Build RPM Package
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install RPM tooling
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y rpm
-          rpmbuild --version
-
-      - name: Create minimal packaged app fixture
-        run: |
-          set -euo pipefail
-          rm -rf codex-app dist
-          tests/fixtures/create-packaged-app-fixture.sh codex-app
-
-      - name: Build RPM package
-        run: PACKAGE_VERSION="$CI_PACKAGE_VERSION" ./scripts/build-rpm.sh
-
-      - name: Inspect RPM package
-        run: |
-          set -euo pipefail
-          rpm_file="$(find dist -maxdepth 1 -name 'codex-desktop-*.rpm' -print -quit)"
-          test -n "$rpm_file"
-          rpm -qip "$rpm_file"
-          rpm -qlp "$rpm_file" | tee /tmp/rpm-contents.txt >/dev/null
-          rpm -qp --requires "$rpm_file" | tee /tmp/rpm-requires.txt >/dev/null
-          grep -q '/usr/bin/codex-update-manager' /tmp/rpm-contents.txt
-          grep -q '/usr/lib/systemd/user/codex-update-manager.service' /tmp/rpm-contents.txt
-          grep -q '/opt/codex-desktop/update-builder/install.sh' /tmp/rpm-contents.txt
-          grep -q '/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh' /tmp/rpm-contents.txt
-          ! grep -q '/usr/share/codex-package-framework/fixture.txt' /tmp/rpm-contents.txt
-          ! grep -q '^codex-package-framework-runtime$' /tmp/rpm-requires.txt
-          {
-            echo "## RPM Package Validation"
-            echo ""
-            echo "- Built: \`$(basename "$rpm_file")\`"
-            echo "- Verified updater binary, user service, update-builder bundle, and packaged runtime helper."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Create feature-enabled packaged app fixture
-        env:
-          CODEX_FIXTURE_LINUX_FEATURES_JSON: '["package-framework-fixture"]'
-        run: |
-          set -euo pipefail
-          rm -rf codex-app dist
-          tests/fixtures/create-packaged-app-fixture.sh codex-app
-
-      - name: Build feature-enabled RPM package
-        env:
-          CODEX_LINUX_FEATURES_ROOT: ${{ github.workspace }}/tests/fixtures/linux-features
-          CODEX_LINUX_FEATURES_CONFIG: ${{ github.workspace }}/tests/fixtures/linux-features/features-enabled.json
-        run: PACKAGE_VERSION="$CI_PACKAGE_VERSION" ./scripts/build-rpm.sh
-
-      - name: Inspect feature-enabled RPM package
-        run: |
-          set -euo pipefail
-          rpm_file="$(find dist -maxdepth 1 -name 'codex-desktop-*.rpm' -print -quit)"
-          test -n "$rpm_file"
-          rpm -qip "$rpm_file"
-          rpm -qlp "$rpm_file" | tee /tmp/rpm-feature-contents.txt >/dev/null
-          rpm -qlvp "$rpm_file" | tee /tmp/rpm-feature-long-contents.txt >/dev/null
-          rpm -qp --requires "$rpm_file" | tee /tmp/rpm-feature-requires.txt >/dev/null
-          grep -q '/usr/share/codex-package-framework/fixture.txt' /tmp/rpm-feature-contents.txt
-          grep -q '^codex-package-framework-runtime$' /tmp/rpm-feature-requires.txt
-          fixture_mode="$(
-            awk '$NF == "/usr/share/codex-package-framework/fixture.txt" { print $1 }' \
-              /tmp/rpm-feature-long-contents.txt
-          )"
-          test "$fixture_mode" = '-rw-r-----'
-          {
-            echo "- Feature-enabled build: \`$(basename "$rpm_file")\`"
-            echo "- Verified generic feature resource, 0640 mode, and runtime dependency."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Create Codex Micro packaged app fixture
-        env:
-          CODEX_FIXTURE_LINUX_FEATURES_JSON: '["codex-micro"]'
-        run: |
-          set -euo pipefail
-          rm -rf codex-app dist
-          tests/fixtures/create-packaged-app-fixture.sh codex-app
-          printf '%s\n' '{"enabled":["codex-micro"]}' > /tmp/codex-micro-features.json
-
-      - name: Build Codex Micro RPM package
-        env:
-          CODEX_LINUX_FEATURES_CONFIG: /tmp/codex-micro-features.json
-        run: PACKAGE_VERSION="$CI_PACKAGE_VERSION" ./scripts/build-rpm.sh
-
-      - name: Inspect Codex Micro RPM package
-        run: |
-          set -euo pipefail
-          rpm_file="$(find dist -maxdepth 1 -name 'codex-desktop-*.rpm' -print -quit)"
-          test -n "$rpm_file"
-          rpm -qlp "$rpm_file" | tee /tmp/rpm-micro-contents.txt >/dev/null
-          rpm -qlvp "$rpm_file" | tee /tmp/rpm-micro-long-contents.txt >/dev/null
-          rpm -qp --requires "$rpm_file" | tee /tmp/rpm-micro-requires.txt >/dev/null
-          grep -q '/usr/lib/udev/rules.d/70-codex-micro.rules' /tmp/rpm-micro-contents.txt
-          grep -q '^libudev\.so\.1' /tmp/rpm-micro-requires.txt
-          grep -q '^libusb-1\.0\.so\.0' /tmp/rpm-micro-requires.txt
-          rule_mode="$(
-            awk '$NF == "/usr/lib/udev/rules.d/70-codex-micro.rules" { print $1 }' \
-              /tmp/rpm-micro-long-contents.txt
-          )"
-          test "$rule_mode" = '-rw-r--r--'
-          {
-            echo "- Codex Micro build: \`$(basename "$rpm_file")\`"
-            echo "- Verified udev rule, 0644 mode, and libudev/libusb dependencies."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  package-pacman:
-    name: Build Pacman Package
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Build and inspect pacman package in Arch Linux
-        run: |
-          set -euo pipefail
-          docker run --rm \
-            -e CI_PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-            -v "$PWD:/work" \
-            -w /work \
-            archlinux:base-devel \
-            bash -lc '
-              set -euo pipefail
-              pacman -Syu --noconfirm --needed rust nodejs npm zstd sudo
-              useradd -m builder
-              chown -R builder:builder /work
-
-              runuser -u builder -- bash -lc '"'"'
-                set -euo pipefail
-                rm -rf codex-app dist
-                tests/fixtures/create-packaged-app-fixture.sh codex-app
-
-                cargo build --release -p codex-update-manager
-                PACKAGE_VERSION="$CI_PACKAGE_VERSION" ./scripts/build-pacman.sh
-
-                pkg_file="$(find dist -maxdepth 1 -name "codex-desktop-*.pkg.tar.*" -print -quit)"
-                test -n "$pkg_file"
-                pacman -Qip "$pkg_file"
-                pacman -Qlp "$pkg_file" | tee /tmp/pacman-contents.txt >/dev/null
-                tar -xOf "$pkg_file" .PKGINFO | tee /tmp/pacman-pkginfo.txt >/dev/null
-                grep -q "usr/bin/codex-update-manager" /tmp/pacman-contents.txt
-                grep -q "usr/lib/systemd/user/codex-update-manager.service" /tmp/pacman-contents.txt
-                grep -q "opt/codex-desktop/update-builder/install.sh" /tmp/pacman-contents.txt
-                grep -q "opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh" /tmp/pacman-contents.txt
-                ! grep -q "usr/share/codex-package-framework/fixture.txt" /tmp/pacman-contents.txt
-                ! grep -q "^depend = codex-package-framework-runtime$" /tmp/pacman-pkginfo.txt
-                printf "%s\n" "$(basename "$pkg_file")" > /tmp/pacman-package-name.txt
-
-                rm -rf codex-app dist
-                CODEX_FIXTURE_LINUX_FEATURES_JSON="[\"package-framework-fixture\"]" \
-                  tests/fixtures/create-packaged-app-fixture.sh codex-app
-
-                CODEX_LINUX_FEATURES_ROOT=/work/tests/fixtures/linux-features \
-                CODEX_LINUX_FEATURES_CONFIG=/work/tests/fixtures/linux-features/features-enabled.json \
-                PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-                  ./scripts/build-pacman.sh
-
-                feature_pkg_file="$(find dist -maxdepth 1 -name "codex-desktop-*.pkg.tar.*" -print -quit)"
-                test -n "$feature_pkg_file"
-                pacman -Qip "$feature_pkg_file"
-                pacman -Qlp "$feature_pkg_file" | tee /tmp/pacman-feature-contents.txt >/dev/null
-                tar -xOf "$feature_pkg_file" .PKGINFO | tee /tmp/pacman-feature-pkginfo.txt >/dev/null
-                tar -tvf "$feature_pkg_file" \
-                  usr/share/codex-package-framework/fixture.txt \
-                  | tee /tmp/pacman-feature-long-contents.txt >/dev/null
-                grep -q "usr/share/codex-package-framework/fixture.txt" /tmp/pacman-feature-contents.txt
-                grep -q "^depend = codex-package-framework-runtime$" /tmp/pacman-feature-pkginfo.txt
-                fixture_mode="$(sed -n "1s/ .*//p" /tmp/pacman-feature-long-contents.txt)"
-                test "$fixture_mode" = "-rw-r-----"
-                printf "%s\n" "$(basename "$feature_pkg_file")" > /tmp/pacman-feature-package-name.txt
-
-                rm -rf codex-app dist
-                CODEX_FIXTURE_LINUX_FEATURES_JSON="[\"codex-micro\"]" \
-                  tests/fixtures/create-packaged-app-fixture.sh codex-app
-                printf "%s\n" "{\"enabled\":[\"codex-micro\"]}" \
-                  > /tmp/codex-micro-features.json
-
-                CODEX_LINUX_FEATURES_CONFIG=/tmp/codex-micro-features.json \
-                PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-                  ./scripts/build-pacman.sh
-
-                micro_pkg_file="$(find dist -maxdepth 1 -name "codex-desktop-*.pkg.tar.*" -print -quit)"
-                test -n "$micro_pkg_file"
-                pacman -Qlp "$micro_pkg_file" | tee /tmp/pacman-micro-contents.txt >/dev/null
-                tar -xOf "$micro_pkg_file" .PKGINFO | tee /tmp/pacman-micro-pkginfo.txt >/dev/null
-                tar -tvf "$micro_pkg_file" \
-                  usr/lib/udev/rules.d/70-codex-micro.rules \
-                  | tee /tmp/pacman-micro-long-contents.txt >/dev/null
-                grep -q "usr/lib/udev/rules.d/70-codex-micro.rules" /tmp/pacman-micro-contents.txt
-                grep -q "^depend = libusb$" /tmp/pacman-micro-pkginfo.txt
-                grep -q "^depend = systemd-libs$" /tmp/pacman-micro-pkginfo.txt
-                micro_rule_mode="$(sed -n "1s/ .*//p" /tmp/pacman-micro-long-contents.txt)"
-                test "$micro_rule_mode" = "-rw-r--r--"
-                printf "%s\n" "$(basename "$micro_pkg_file")" > /tmp/pacman-micro-package-name.txt
-              '"'"'
-              cp /tmp/pacman-package-name.txt /work/.pacman-package-name.txt
-              cp /tmp/pacman-feature-package-name.txt /work/.pacman-feature-package-name.txt
-              cp /tmp/pacman-micro-package-name.txt /work/.pacman-micro-package-name.txt
-            '
-
-      - name: Write pacman validation summary
-        run: |
-          set -euo pipefail
-          pkg_file="$(cat .pacman-package-name.txt)"
-          feature_pkg_file="$(cat .pacman-feature-package-name.txt)"
-          micro_pkg_file="$(cat .pacman-micro-package-name.txt)"
-          {
-            echo "## Pacman Package Validation"
-            echo ""
-            echo "- Built: \`$pkg_file\`"
-            echo "- Verified updater binary, user service, update-builder bundle, and packaged runtime helper."
-            echo "- Feature-enabled build: \`$feature_pkg_file\`"
-            echo "- Verified generic feature resource, 0640 mode, and runtime dependency."
-            echo "- Codex Micro build: \`$micro_pkg_file\`"
-            echo "- Verified udev rule, 0644 mode, and systemd-libs/libusb dependencies."
-          } >> "$GITHUB_STEP_SUMMARY"
+          test "$NIX_BUILD_RESULT" = success
+          test "$NIX_VM_RESULT" = success

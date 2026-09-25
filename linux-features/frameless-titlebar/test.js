@@ -6,498 +6,206 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-
+const { loadLinuxFeaturePatchDescriptors } = require("../../scripts/lib/linux-features.js");
 const {
-  loadLinuxFeaturePatchDescriptors,
-} = require("../../scripts/lib/linux-features.js");
-const {
-  applyLinuxNativeTitlebarPatch,
-} = require("../../scripts/patches/impl/main-process/window.js");
-const {
-  applyLinuxWindowControlsSafeAreaPatch,
-} = require("../../scripts/patches/impl/webview/index.js");
-const {
-  applyFramelessTitlebarBranchPatch,
+  CHROME_MAPPING_ASSET_PATTERN,
   applyFramelessTitlebarMainPatch,
-  applyFramelessTitlebarOverlaySyncPatch,
   applyFramelessTitlebarWebviewPatch,
-  applyFramelessTitlebarWebviewTransforms,
+  descriptors,
+  framelessTitlebarMainContract,
+  framelessTitlebarWebviewContract,
 } = require("./patch.js");
-
-const CORE_CONTEXT = {
-  enabledFeatureIds: ["frameless-titlebar"],
-  patchCompositionDelegates: {
-    "linux-native-titlebar": ["frameless-titlebar"],
-    "linux-window-controls-safe-area": ["frameless-titlebar"],
-  },
-};
-const FEATURE_CONTEXT = {
-  enabledFeatureIds: ["frameless-titlebar"],
-  feature: { id: "frameless-titlebar" },
-};
-
-function applyPatchTwice(patchFn, source) {
-  const patched = patchFn(source);
-  assert.equal(patchFn(patched), patched);
-  return patched;
-}
 
 function captureWarnings(callback) {
   const warnings = [];
   const originalWarn = console.warn;
-  console.warn = (message) => warnings.push(String(message));
+  console.warn = (...args) => warnings.push(args.map(String).join(" "));
   try {
-    callback();
+    return { value: callback(), warnings };
   } finally {
     console.warn = originalWarn;
   }
-  return warnings;
 }
 
-function copyFeatureTo(featuresRoot) {
-  const featureDir = path.join(featuresRoot, "frameless-titlebar");
-  const helperDir = path.join(
-    featuresRoot,
-    "..",
-    "scripts",
-    "patches",
-    "lib",
-  );
-  fs.mkdirSync(featureDir, { recursive: true });
-  fs.mkdirSync(helperDir, { recursive: true });
-  for (const name of ["feature.json", "README.md", "patch.js"]) {
-    fs.copyFileSync(path.join(__dirname, name), path.join(featureDir, name));
-  }
-  fs.copyFileSync(
-    path.join(
-      __dirname,
-      "..",
-      "..",
-      "scripts",
-      "patches",
-      "lib",
-      "composition-delegation.js",
-    ),
-    path.join(helperDir, "composition-delegation.js"),
-  );
-}
-
-function nativeTitlebarCompositionFixture() {
+function officialMainFixture() {
   return [
-    "function A2(e){return e===`avatarOverlay`}",
-    "function I2({platform:e,appearance:t,opaqueWindowsEnabled:n,prefersDarkColors:r}){return n&&!A2(t)&&(e===`darwin`||e===`win32`)?{backgroundColor:r?a2:o2,backgroundMaterial:e===`win32`?`none`:null}:e===`linux`&&!A2(t)?{backgroundColor:r?a2:o2,backgroundMaterial:null}:{backgroundColor:i2,backgroundMaterial:null}}",
-    "function j9(e=1){return{color:i2,symbolColor:c.nativeTheme.shouldUseDarkColors?v2:_2,height:Math.round(g2*e)}}",
-    "case`quickChat`:case`primary`:return n===`darwin`?{titleBarStyle:`hiddenInset`,trafficLightPosition:A9(r),...e===`quickChat`?{hasShadow:!0,resizable:!0,transparent:!0}:{},...t?{}:{vibrancy:`menu`}}:n===`win32`||n===`linux`?{titleBarStyle:`hidden`,titleBarOverlay:j9(r),...e===`quickChat`?{resizable:!0}:{}}:{titleBarStyle:`default`,...e===`quickChat`?{resizable:!0}:{}};",
-    "setWindowZoom(e,t){let n=c.BrowserWindow.fromWebContents(e),r=n&&this.windowAppearances.get(n.id);n==null||r!==`primary`&&r!==`quickChat`||(process.platform===`darwin`?n.setWindowButtonPosition(A9(t)):(process.platform===`win32`||process.platform===`linux`)&&(this.windowZooms.set(n.id,t),n.setTitleBarOverlay(j9(t))))}",
-    "installApplicationMenuTitleBarOverlaySync(e,t){if(process.platform!==`win32`&&process.platform!==`linux`||t!==`primary`&&t!==`quickChat`)return;let n=()=>{e.isDestroyed()||e.setTitleBarOverlay(j9(this.windowZooms.get(e.id)))};return c.nativeTheme.on(`updated`,n),n(),()=>{c.nativeTheme.off(`updated`,n)}}",
+    "function A9(e=1){return{color:O9,symbolColor:l.nativeTheme.shouldUseDarkColors?LTe:ITe,height:Math.round(FTe*e)}}",
+    "setWindowZoom(e,t){let n=l.BrowserWindow.fromWebContents(e),r=n&&this.windowAppearances.get(n.id);",
+    "n==null||r!==`primary`&&r!==`quickChat`||(process.platform===`darwin`?n.setWindowButtonPosition(k9(t)):",
+    "(process.platform===`win32`||process.platform===`linux`)&&(this.windowZooms.set(n.id,t),n.setTitleBarOverlay(A9(t))))}",
+    "installApplicationMenuTitleBarOverlaySync(e,t){if(process.platform!==`win32`&&process.platform!==`linux`||t!==`primary`&&t!==`quickChat`&&t!==`detached`)return;",
+    "let n=()=>{e.isDestroyed()||e.setTitleBarOverlay(A9(this.windowZooms.get(e.id)))};return l.nativeTheme.on(`updated`,n),n(),()=>{l.nativeTheme.off(`updated`,n)}}",
+    "case`quickChat`:case`primary`:return n===`darwin`?{titleBarStyle:`hiddenInset`}:",
+    "n===`win32`||n===`linux`?{titleBarStyle:`hidden`,titleBarOverlay:A9(r),...e===`quickChat`?{resizable:!0}:{}}:{titleBarStyle:`default`}",
   ].join("");
 }
 
-test("frameless-titlebar stays disabled until listed in features.json", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "frameless-titlebar-feature-"));
+function aliasedMainFixture() {
+  return [
+    "setWindowZoom(contents,zoom){let window=l.BrowserWindow.fromWebContents(contents),appearance=window&&this.windowAppearances.get(window.id);",
+    "window==null||appearance!==`primary`&&appearance!==`quickChat`||(process.platform===`darwin`?window.setWindowButtonPosition(k9(zoom)):",
+    "(process.platform===`win32`||process.platform===`linux`)&&(this.windowZooms.set(window.id,zoom),window.setTitleBarOverlay(overlay(zoom))))}",
+    "installApplicationMenuTitleBarOverlaySync(window,windowType){if(process.platform!==`win32`&&process.platform!==`linux`||windowType!==`primary`&&windowType!==`quickChat`&&windowType!==`detached`)return;}",
+    "platform===`win32`||platform===`linux`?{titleBarStyle:`hidden`,titleBarOverlay:overlay(zoom),...windowType===`quickChat`?{resizable:!0}:{}}:{titleBarStyle:`default`}",
+  ].join("");
+}
+
+function officialWebviewFixture() {
+  return "function h3e(e,t){if(e!==`electron`)return`native`;switch(t){case`win32`:case`linux`:return`application-menu`;case`darwin`:case`unknown`:return`native`}}";
+}
+
+test("frameless-titlebar is disabled by default and exposes standalone descriptors", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "frameless-titlebar-"));
   try {
-    const featuresRoot = path.join(tempDir, "linux-features");
-    fs.mkdirSync(featuresRoot, { recursive: true });
-    copyFeatureTo(featuresRoot);
-    fs.writeFileSync(path.join(featuresRoot, "features.example.json"), '{"enabled":[]}\n');
-
-    assert.deepEqual(loadLinuxFeaturePatchDescriptors({ featuresRoot }), []);
-
-    fs.writeFileSync(path.join(featuresRoot, "features.json"), '{"enabled":["frameless-titlebar"]}\n');
-    const descriptors = loadLinuxFeaturePatchDescriptors({ featuresRoot });
+    const config = path.join(temp, "features.json");
+    fs.writeFileSync(config, '{"enabled":[]}\n');
+    assert.deepEqual(loadLinuxFeaturePatchDescriptors({ featuresRoot: path.join(__dirname, ".."), featuresConfigPath: config }), []);
+    fs.writeFileSync(config, '{"enabled":["frameless-titlebar"]}\n');
+    const loaded = loadLinuxFeaturePatchDescriptors({ featuresRoot: path.join(__dirname, ".."), featuresConfigPath: config });
     assert.deepEqual(
-      descriptors.map((descriptor) => descriptor.id).sort(),
+      loaded.map(({ id, phase, ciPolicy }) => [id, phase, ciPolicy]),
       [
-        "feature:frameless-titlebar:main-process",
-        "feature:frameless-titlebar:webview-window-controls-layout",
+        ["feature:frameless-titlebar:main-process", "main-bundle", "optional"],
+        ["feature:frameless-titlebar:webview-chrome-mapping", "webview-asset", "optional"],
       ],
     );
-    const webviewPatch = descriptors.find(
-      (descriptor) => descriptor.id === "feature:frameless-titlebar:webview-window-controls-layout",
+    assert.ok(loaded.every(({ composesPatches }) => composesPatches == null));
+    assert.deepEqual(
+      descriptors.map(({ id, phase }) => [id, phase]),
+      [
+        ["main-process", "main-bundle"],
+        ["webview-chrome-mapping", "webview-asset"],
+      ],
     );
-    assert.match("app-initial-BTphDPeq.js", webviewPatch.pattern);
-    assert.doesNotMatch(
-      "app-initial~app-main~hotkey-window-new-thread-page~hotkey-window-home-page~composer-utility-bar-D9zyQF1n.js",
-      webviewPatch.pattern,
-    );
-    assert.doesNotMatch(
-      "app-initial~app-main~onboarding-page-CIkoyvFz.js",
-      webviewPatch.pattern,
-    );
-    assert.doesNotMatch(
-      "app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~gwqc41kz-CnQKtQ6U.js",
-      webviewPatch.pattern,
-    );
-    assert.doesNotMatch(
-      "app-initial~artifact-tab-content.electron~app-main~appgen-settings-page~page~pull-request-r~napudbu0-BLPFEZVT.js",
-      webviewPatch.pattern,
-    );
-    assert.doesNotMatch(
-      "app-initial~app-main~quick-chat-window-page~work-home-page~chatgpt-conversation-page-BqLP6EDd.js",
-      webviewPatch.pattern,
-    );
-    assert.doesNotMatch(
-      "app-initial~artifact-tab-content.electron~app-main~new-thread-panel-page~onboarding-page~pr~el73lghr-qHKfocxV.js",
-      webviewPatch.pattern,
-    );
-    assert.doesNotMatch("use-window-controls-safe-area-abc.js", webviewPatch.pattern);
-    assert.doesNotMatch("app-initial~app-main~onboarding-page~debug-window-page-abc.js", webviewPatch.pattern);
-    assert.doesNotMatch("app-main-abc.js", webviewPatch.pattern);
   } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    fs.rmSync(temp, { recursive: true, force: true });
   }
 });
 
-test("frameless-titlebar removes current Linux overlay controls from primary and quick chat windows", () => {
-  const source = [
-    "case`quickChat`:case`primary`:return n===`darwin`?{titleBarStyle:`hiddenInset`,trafficLightPosition:A9(r),...e===`quickChat`?{hasShadow:!0,resizable:!0,transparent:!0}:{},...t?{}:{vibrancy:`menu`}}:n===`win32`||n===`linux`?{titleBarStyle:`hidden`,titleBarOverlay:n===`linux`?codexLinuxTitleBarOverlay(r):j9(r),...e===`quickChat`?{resizable:!0}:{}}:{titleBarStyle:`default`,...e===`quickChat`?{resizable:!0}:{}};",
-    "setWindowZoom(e,t){let n=c.BrowserWindow.fromWebContents(e),r=n&&this.windowAppearances.get(n.id);n==null||r!==`primary`&&r!==`quickChat`||(process.platform===`darwin`?n.setWindowButtonPosition(A9(t)):(process.platform===`win32`||process.platform===`linux`)&&(this.windowZooms.set(n.id,t),n.setTitleBarOverlay(process.platform===`linux`?codexLinuxTitleBarOverlay(t):j9(t))))}",
-    "installApplicationMenuTitleBarOverlaySync(e,t){if(process.platform!==`win32`&&process.platform!==`linux`||t!==`primary`&&t!==`quickChat`)return;let n=()=>{e.isDestroyed()||e.setTitleBarOverlay(process.platform===`linux`?codexLinuxTitleBarOverlay(this.windowZooms.get(e.id)):j9(this.windowZooms.get(e.id)))};return c.nativeTheme.on(`updated`,n),n(),()=>{c.nativeTheme.off(`updated`,n)}}",
-    "(process.platform===`win32`||process.platform===`linux`)&&k.removeMenu(),",
-  ].join("");
-  let patched;
-  const warnings = captureWarnings(() => {
-    patched = applyPatchTwice(
-      (currentSource) =>
-        applyFramelessTitlebarOverlaySyncPatch(
-          applyFramelessTitlebarBranchPatch(currentSource),
-        ),
-      source,
-    );
-  });
-
-  assert.deepEqual(warnings, []);
+test("main-process patch removes Linux titleBarOverlay and is idempotent", () => {
+  const source = officialMainFixture();
+  assert.equal(framelessTitlebarMainContract(source), "current");
+  const patched = applyFramelessTitlebarMainPatch(source);
+  assert.notEqual(patched, source);
+  assert.equal(framelessTitlebarMainContract(patched), "patched");
+  assert.equal(applyFramelessTitlebarMainPatch(patched), patched);
+  assert.match(patched, /n===`win32`\?\{titleBarStyle:`hidden`,titleBarOverlay:A9\(r\)/);
+  assert.match(patched, /n===`linux`\?\{titleBarStyle:`hidden`,\.\.\.e===`quickChat`\?\{resizable:!0\}:\{\}\}/);
+  assert.doesNotMatch(patched, /n===`win32`\|\|n===`linux`\?\{titleBarStyle:`hidden`,titleBarOverlay/);
+  assert.match(patched, /process\.platform===`win32`&&\(this\.windowZooms\.set\(n\.id,t\),n\.setTitleBarOverlay\(A9\(t\)\)\)/);
+  assert.doesNotMatch(patched, /process\.platform===`win32`\|\|process\.platform===`linux`\)&&\(this\.windowZooms\.set/);
   assert.match(
     patched,
-    /n===`win32`\?\{titleBarStyle:`hidden`,titleBarOverlay:j9\(r\),\.\.\.e===`quickChat`\?\{resizable:!0\}:\{\}\}/,
+    /installApplicationMenuTitleBarOverlaySync\(e,t\)\{if\(process\.platform!==`win32`\|\|t!==`primary`&&t!==`quickChat`&&t!==`detached`\)return;/,
   );
-  assert.match(
-    patched,
-    /n===`linux`\?\{titleBarStyle:`hidden`,\.\.\.e===`quickChat`\?\{resizable:!0\}:\{\}\}/,
-  );
-  assert.match(
-    patched,
-    /process\.platform===`win32`&&\(this\.windowZooms\.set\(n\.id,t\),n\.setTitleBarOverlay\(j9\(t\)\)\)/,
-  );
-  assert.match(
-    patched,
-    /if\(process\.platform!==`win32`\|\|t!==`primary`&&t!==`quickChat`\)return/,
-  );
-  assert.match(
-    patched,
-    /e\.setTitleBarOverlay\(j9\(this\.windowZooms\.get\(e\.id\)\)\)/,
-  );
-  assert.match(
-    patched,
-    /\(process\.platform===`win32`\|\|process\.platform===`linux`\)&&k\.removeMenu\(\),/,
-  );
-  assert.doesNotMatch(
-    patched,
-    /n===`linux`\?\{titleBarStyle:`hidden`,titleBarOverlay:codexLinuxTitleBarOverlay/,
-  );
-  assert.doesNotMatch(patched, /process\.platform===`linux`[^;]{0,300}setTitleBarOverlay/);
+  assert.match(patched, /titleBarStyle:`hiddenInset`/);
 });
 
-test("frameless-titlebar descriptors require their completed core owners", () => {
-  const mainSource =
-    "case`primary`:return n===`linux`?{titleBarStyle:`hidden`}:{};";
-  const webviewSource =
-    "applicationMenu:Object.freeze({left:0,right:138})";
-
-  assert.deepEqual(
-    captureWarnings(() => {
-      assert.equal(applyFramelessTitlebarMainPatch(mainSource), mainSource);
-    }),
-    [
-      "WARN: Could not find completed Linux native titlebar patch for frameless composition - leaving bundle unchanged",
-    ],
-  );
-  assert.deepEqual(
-    captureWarnings(() => {
-      assert.equal(
-        applyFramelessTitlebarWebviewPatch(webviewSource),
-        webviewSource,
-      );
-    }),
-    [
-      "WARN: Could not find completed Linux window-controls safe-area patch for frameless composition - leaving asset unchanged",
-    ],
-  );
-});
-
-test("frameless-titlebar composes with the current native-titlebar patch shape", () => {
-  const source =
-    "case`quickChat`:case`primary`:return n===`darwin`?{titleBarStyle:`hiddenInset`}:n===`win32`||n===`linux`?{titleBarStyle:`hidden`,titleBarOverlay:n===`linux`?codexLinuxTitleBarOverlay(r):j9(r),...e===`quickChat`?{resizable:!0}:{}}:{titleBarStyle:`default`,...e===`quickChat`?{resizable:!0}:{}};";
-  let patched;
-  const warnings = captureWarnings(() => {
-    patched = applyPatchTwice(applyFramelessTitlebarBranchPatch, source);
-  });
-
-  assert.deepEqual(warnings, []);
+test("main-process patch preserves current minified aliases", () => {
+  const source = aliasedMainFixture();
+  const patched = applyFramelessTitlebarMainPatch(source);
+  assert.notEqual(patched, source);
+  assert.match(patched, /platform===`win32`\?\{titleBarStyle:`hidden`,titleBarOverlay:overlay\(zoom\)/);
+  assert.match(patched, /platform===`linux`\?\{titleBarStyle:`hidden`,\.\.\.windowType===`quickChat`\?\{resizable:!0\}:\{\}\}/);
+  assert.match(patched, /this\.windowZooms\.set\(window\.id,zoom\),window\.setTitleBarOverlay\(overlay\(zoom\)\)/);
   assert.match(
     patched,
-    /n===`win32`\?\{titleBarStyle:`hidden`,titleBarOverlay:j9\(r\),\.\.\.e===`quickChat`\?\{resizable:!0\}:\{\}\}/,
+    /installApplicationMenuTitleBarOverlaySync\(window,windowType\)\{if\(process\.platform!==`win32`\|\|windowType!==`primary`&&windowType!==`quickChat`&&windowType!==`detached`\)return;/,
   );
-  assert.match(
-    patched,
-    /n===`linux`\?\{titleBarStyle:`hidden`,\.\.\.e===`quickChat`\?\{resizable:!0\}:\{\}\}/,
-  );
-  assert.doesNotMatch(patched, /titleBarOverlay:n===`linux`/);
+  assert.equal(applyFramelessTitlebarMainPatch(patched), patched);
 });
 
-test("native-titlebar remains complete after frameless-titlebar composition", () => {
-  const corePatched = applyLinuxNativeTitlebarPatch(
-    nativeTitlebarCompositionFixture(),
-  );
-  const composed = applyFramelessTitlebarMainPatch(corePatched);
-  let rerun;
-  const warnings = captureWarnings(() => {
-    rerun = applyLinuxNativeTitlebarPatch(composed, CORE_CONTEXT);
-  });
-
-  assert.equal(rerun, composed);
-  assert.deepEqual(warnings, []);
+test("already-patched main-process contracts do not warn", () => {
+  const patched = applyFramelessTitlebarMainPatch(officialMainFixture());
+  const result = captureWarnings(() => applyFramelessTitlebarMainPatch(patched));
+  assert.equal(result.value, patched);
+  assert.deepEqual(result.warnings, []);
 });
 
-test("frameless-titlebar owns validation after native-titlebar delegation", () => {
-  const corePatched = applyLinuxNativeTitlebarPatch(
-    nativeTitlebarCompositionFixture(),
-  );
-  const composed = applyFramelessTitlebarMainPatch(corePatched);
-  const incompleteCore = composed.replace(
-    "function codexLinuxTitleBarOverlay",
-    "function codexLinuxTitleBarOverlayMissing",
-  );
-  let rerun;
-  const coreWarnings = captureWarnings(() => {
-    rerun = applyLinuxNativeTitlebarPatch(incompleteCore, CORE_CONTEXT);
-  });
-  assert.equal(rerun, incompleteCore);
-  assert.deepEqual(coreWarnings, []);
-  const featureWarnings = captureWarnings(() => {
-    rerun = applyFramelessTitlebarMainPatch(
-      incompleteCore,
-      FEATURE_CONTEXT,
-    );
-  });
-  assert.equal(rerun, incompleteCore);
-  assert.deepEqual(featureWarnings, [
-    "WARN: Could not validate delegated frameless titlebar main-process composition - leaving bundle unchanged",
-  ]);
-
-  const featureVariants = [
-    composed.replace(
-      "process.platform===`win32`&&(this.windowZooms.set",
-      "(process.platform===`win32`||process.platform===`linux`)&&(this.windowZooms.set",
-    ),
-    composed.replace(
-      "if(process.platform!==`win32`||t!==`primary`",
-      "if(process.platform!==`win32`&&process.platform!==`linux`||t!==`primary`",
-    ),
-    composed.replace(
-      /setWindowZoom[\s\S]*?(?=installApplicationMenuTitleBarOverlaySync)/u,
-      "",
-    ),
-    composed.replace(
-      /installApplicationMenuTitleBarOverlaySync[\s\S]*$/u,
-      "",
+test("main-process patch rejects incomplete, duplicate, and mixed contracts byte-identically", () => {
+  const current = officialMainFixture();
+  const patched = applyFramelessTitlebarMainPatch(current);
+  const sources = [
+    current.replace("titleBarOverlay:A9(r),", ""),
+    current.replace("installApplicationMenuTitleBarOverlaySync", "installTitleBarOverlaySync"),
+    current.replace("(process.platform===`win32`||process.platform===`linux`)", "(process.platform===`win32`)"),
+    patched.replace("n===`linux`?{titleBarStyle:`hidden`", "n===`linux`?{titleBarStyle:`default`"),
+    patched.replace("process.platform===`win32`&&(this.windowZooms.set", "process.platform===`linux`&&(this.windowZooms.set"),
+    current + current,
+    patched + patched,
+    current + patched,
+    current.replace(
+      "n===`win32`||n===`linux`?{titleBarStyle:`hidden`,titleBarOverlay:A9(r),...e===`quickChat`?{resizable:!0}:{}}",
+      "n===`win32`?{titleBarStyle:`hidden`,titleBarOverlay:A9(r),...e===`quickChat`?{resizable:!0}:{}}:n===`linux`?{titleBarStyle:`hidden`,...e===`quickChat`?{resizable:!0}:{}}",
     ),
   ];
 
-  for (const source of featureVariants) {
-    const warnings = captureWarnings(() => {
-      rerun = applyFramelessTitlebarMainPatch(source, FEATURE_CONTEXT);
-    });
-    assert.equal(rerun, source);
-    assert.deepEqual(warnings, [
-      "WARN: Could not validate delegated frameless titlebar main-process composition - leaving bundle unchanged",
-    ]);
+  for (const source of sources) {
+    const result = captureWarnings(() => applyFramelessTitlebarMainPatch(source));
+    assert.equal(result.value, source);
+    assert.equal(result.warnings.length, 1);
+    assert.match(result.warnings[0], /current frameless-titlebar main-process contract/);
   }
 });
 
-test("frameless-titlebar reports current main-process drift", () => {
-  const titlebarSource =
-    "n===`linux`?{titleBarStyle:`hidden`,titleBarOverlay:codexLinuxTitleBarOverlay(r),...e===`quickChat`?{resizable:!1}:{}}:";
-  const overlaySource = [
-    "setWindowZoom(e,t){(process.platform===`win32`||process.platform===`linux`)&&(this.windowZooms.set(n.id,t),n.setTitleBarOverlay(process.platform===`linux`?linuxOverlayV2(t):j9(t)))}",
-    "installApplicationMenuTitleBarOverlaySync(e,t){if(process.platform!==`win32`&&process.platform!==`linux`||t!==`primary`&&t!==`quickChat`)return;let n=()=>{e.isDestroyed()||e.setTitleBarOverlay(process.platform===`linux`?linuxOverlayV2(this.windowZooms.get(e.id)):j9(this.windowZooms.get(e.id)))};return c.nativeTheme.on(`updated`,n),n(),()=>{c.nativeTheme.off(`updated`,n)}}",
-  ].join("");
-
-  assert.deepEqual(captureWarnings(() => applyFramelessTitlebarBranchPatch(titlebarSource)), [
-    "WARN: Could not find primary BrowserWindow titlebar snippet - skipping frameless titlebar branch patch",
-  ]);
-  assert.deepEqual(captureWarnings(() => applyFramelessTitlebarOverlaySyncPatch(overlaySource)), [
-    "WARN: Could not find setWindowZoom titlebar overlay snippet - skipping frameless zoom patch",
-    "WARN: Could not find application menu titlebar overlay sync snippet - skipping frameless sync patch",
-  ]);
+test("unrecognized main-process contracts warn instead of reporting false already-applied", () => {
+  const source = "function driftedMain(){return {titleBarStyle:`default`}}";
+  const result = captureWarnings(() => applyFramelessTitlebarMainPatch(source));
+  assert.equal(result.value, source);
+  assert.equal(framelessTitlebarMainContract(source), "drifted");
+  assert.match(result.warnings.join("\n"), /current frameless-titlebar main-process contract/);
 });
 
-test("frameless-titlebar maps Linux window controls chrome to native webview layout", () => {
-  const layoutSource = [
-    "var eV=Object.freeze({default:Object.freeze({left:0,right:0}),mac:Object.freeze({legacy:Object.freeze({left:66+hyt,right:0}),modern:Object.freeze({left:76+hyt,right:0})}),applicationMenu:Object.freeze({left:0,right:138})});",
-    "function Nvt(){return vKe()&&window.electronBridge?.showApplicationMenu!=null}",
-    "function menu(){if(!Nvt())return null;let i=window.electronBridge?.showApplicationMenu;return i}",
-    "let newer=i.includes(`win`)||r.includes(`windows`)||i.includes(`linux`)?t??eV.applicationMenu:eV.default;",
-  ].join("");
-  const chromeSource = [
-    "function chrome(e){switch(e){case`win32`:case`linux`:return`application-menu`;case`darwin`:case`unknown`:return`native`}}",
-    "function usesChrome(){return document.documentElement.dataset.codexWindowChrome===`application-menu`}",
-  ].join("");
-
-  const patchedLayout = applyPatchTwice(applyFramelessTitlebarWebviewTransforms, layoutSource);
-  const patchedChrome = applyPatchTwice(applyFramelessTitlebarWebviewTransforms, chromeSource);
-
-  assert.equal(
-    (patchedLayout.match(/applicationMenu:Object\.freeze\(\{left:0,right:0\}\)/g) ?? []).length,
-    1,
-  );
-  assert.match(patchedChrome, /case`win32`:return`application-menu`;case`linux`:return`native`/);
-  assert.match(patchedLayout, /i\.includes\(`win`\)\|\|r\.includes\(`windows`\)\?t\?\?eV\.applicationMenu:eV\.default/);
-  assert.doesNotMatch(patchedChrome, /case`win32`:case`linux`:return`application-menu`/);
-  assert.doesNotMatch(patchedLayout, /includes\(`linux`\)\?t\?\?eV\.applicationMenu/);
-  assert.doesNotMatch(patchedLayout, /right:138/);
+test("webview patch remaps Linux chrome and is idempotent", () => {
+  const source = officialWebviewFixture();
+  assert.equal(framelessTitlebarWebviewContract(source), "current");
+  const patched = applyFramelessTitlebarWebviewPatch(source);
+  assert.notEqual(patched, source);
+  assert.equal(framelessTitlebarWebviewContract(patched), "patched");
+  assert.equal(applyFramelessTitlebarWebviewPatch(patched), patched);
+  assert.match(patched, /case`linux`:return`native`/);
+  assert.doesNotMatch(patched, /case`win32`:case`linux`:return`application-menu`/);
 });
 
-test("frameless-titlebar retains standard end padding after the core safe-area patch", () => {
-  assert.equal(
-    applyPatchTwice(
-      applyFramelessTitlebarWebviewTransforms,
-      "jsx(slot,{codexLinuxUseWindowControlsSafeArea:!t,side:`end`})",
-    ),
-    "jsx(slot,{codexLinuxUseWindowControlsSafeArea:!1,side:`end`})",
-  );
+test("already-patched webview contracts do not warn", () => {
+  const patched = applyFramelessTitlebarWebviewPatch(officialWebviewFixture());
+  const result = captureWarnings(() => applyFramelessTitlebarWebviewPatch(patched));
+  assert.equal(result.value, patched);
+  assert.deepEqual(result.warnings, []);
 });
 
-test("frameless-titlebar composes idempotently with the core safe-area patch", () => {
-  const source = [
-    "var eV=Object.freeze({default:Object.freeze({left:0,right:0}),applicationMenu:Object.freeze({left:0,right:0})});",
-    "function ol({isHeaderEdgeScroll:e,isApplicationMenuBarEnabled:t}){return jsx(sl,{entries:h,fitWidth:r,slotWidth:u,side:`end`})}",
-    "function sl({entries:e,fitWidth:t,side:n,slotWidth:r}){let i=e.some(({align:e})=>e===`end`),o=a({\"pe-2\":n===`start`&&i||n===`end`});return jsx(o)}",
-    "let newer=i.includes(`win`)||r.includes(`windows`)||i.includes(`linux`)?t??eV.applicationMenu:eV.default;",
-    "function chrome(e){switch(e){case`win32`:case`linux`:return`application-menu`;default:return`native`}}",
-  ].join("");
-  const corePatched = applyLinuxWindowControlsSafeAreaPatch(source);
-  const composed = applyFramelessTitlebarWebviewPatch(corePatched);
-
-  assert.equal(
-    applyLinuxWindowControlsSafeAreaPatch(composed, CORE_CONTEXT),
-    composed,
-  );
-  assert.equal(
-    applyFramelessTitlebarWebviewPatch(composed, FEATURE_CONTEXT),
-    composed,
-  );
-  assert.deepEqual(
-    captureWarnings(() =>
-      applyLinuxWindowControlsSafeAreaPatch(composed, CORE_CONTEXT)),
-    [],
-  );
-});
-
-test("frameless-titlebar owns safe-area validation after core delegation", () => {
-  const stockSource = [
-    "var eV=Object.freeze({default:Object.freeze({left:0,right:0}),applicationMenu:Object.freeze({left:0,right:0})});",
-    "function ol({isHeaderEdgeScroll:e,isApplicationMenuBarEnabled:t}){return jsx(sl,{entries:h,fitWidth:r,slotWidth:u,side:`end`})}",
-    "function sl({entries:e,fitWidth:t,side:n,slotWidth:r}){let i=e.some(({align:e})=>e===`end`),o=a({\"pe-2\":n===`start`&&i||n===`end`});return jsx(o)}",
-    "let newer=i.includes(`win`)||r.includes(`windows`)||i.includes(`linux`)?t??eV.applicationMenu:eV.default;",
-    "function chrome(e){switch(e){case`win32`:case`linux`:return`application-menu`;default:return`native`}}",
-  ].join("");
-  const composed = applyFramelessTitlebarWebviewPatch(
-    applyLinuxWindowControlsSafeAreaPatch(stockSource),
-  );
-  const damagedVariants = [
-    composed.replace(
-      ",codexLinuxUseWindowControlsSafeArea}){",
-      "}){",
-    ),
-    composed.replace(
-      "i.includes(`win`)||r.includes(`windows`)?t??eV.applicationMenu:eV.default",
-      "i.includes(`win`)||r.includes(`windows`)||i.includes(`linux`)?t??eV.applicationMenu:eV.default",
-    ),
-    composed.replace(
-      "case`win32`:return`application-menu`;case`linux`:return`native`",
-      "case`win32`:case`linux`:return`application-menu`",
-    ),
+test("webview patch rejects incomplete, duplicate, and mixed contracts byte-identically", () => {
+  const current = officialWebviewFixture();
+  const patched = applyFramelessTitlebarWebviewPatch(current);
+  const sources = [
+    current.replace("case`win32`:case`linux`:return`application-menu`", "case`win32`:return`application-menu`"),
+    patched.replace("case`linux`:return`native`", "case`linux`:return`application-menu`"),
+    current + current,
+    patched + patched,
+    current + patched,
   ];
 
-  for (const source of damagedVariants) {
-    assert.notEqual(source, composed);
-    const coreWarnings = captureWarnings(() => {
-      assert.equal(
-        applyLinuxWindowControlsSafeAreaPatch(source, CORE_CONTEXT),
-        source,
-      );
-    });
-    assert.deepEqual(coreWarnings, []);
-
-    const featureWarnings = captureWarnings(() => {
-      assert.equal(
-        applyFramelessTitlebarWebviewPatch(source, FEATURE_CONTEXT),
-        source,
-      );
-    });
-    assert.deepEqual(featureWarnings, [
-      "WARN: Could not validate delegated frameless Linux window-controls safe-area composition - leaving asset unchanged",
-    ]);
+  for (const source of sources) {
+    const result = captureWarnings(() => applyFramelessTitlebarWebviewPatch(source));
+    assert.equal(result.value, source);
+    assert.equal(result.warnings.length, 1);
+    assert.match(result.warnings[0], /current frameless-titlebar webview contract/);
   }
 });
 
-test("frameless-titlebar rejects a non-numeric inset hidden beside a valid delegated owner", () => {
-  const stockSource = [
-    "var eV=Object.freeze({default:Object.freeze({left:0,right:0}),applicationMenu:Object.freeze({left:0,right:0})});",
-    "var fV=Object.freeze({applicationMenu:Object.freeze({left:0,right:0})});",
-    "function ol({isHeaderEdgeScroll:e,isApplicationMenuBarEnabled:t}){return jsx(sl,{entries:h,fitWidth:r,slotWidth:u,side:`end`})}",
-    "function sl({entries:e,fitWidth:t,side:n,slotWidth:r}){let i=e.some(({align:e})=>e===`end`),o=a({\"pe-2\":n===`start`&&i||n===`end`});return jsx(o)}",
-    "let newer=i.includes(`win`)||r.includes(`windows`)||i.includes(`linux`)?t??eV.applicationMenu:eV.default;",
-    "function chrome(e){switch(e){case`win32`:case`linux`:return`application-menu`;default:return`native`}}",
-  ].join("");
-  const composed = applyFramelessTitlebarWebviewPatch(
-    applyLinuxWindowControlsSafeAreaPatch(stockSource),
-  );
-  const damaged = composed.replace(
-    "applicationMenu:Object.freeze({left:0,right:0})",
-    "applicationMenu:Object.freeze({left:0,right:dynamicInset})",
-  );
-
-  const warnings = captureWarnings(() => {
-    assert.equal(
-      applyFramelessTitlebarWebviewPatch(damaged, FEATURE_CONTEXT),
-      damaged,
-    );
-  });
-  assert.deepEqual(warnings, [
-    "WARN: Could not validate delegated frameless Linux window-controls safe-area composition - leaving asset unchanged",
-  ]);
+test("unrecognized webview contracts warn instead of reporting false already-applied", () => {
+  const source = "function driftedWebview(){return `native`}";
+  const result = captureWarnings(() => applyFramelessTitlebarWebviewPatch(source));
+  assert.equal(result.value, source);
+  assert.equal(framelessTitlebarWebviewContract(source), "drifted");
+  assert.match(result.warnings.join("\n"), /current frameless-titlebar webview contract/);
 });
 
-test("frameless-titlebar reports each current webview sub-contract drift", () => {
-  const source = [
-    "var eV=Object.freeze({default:Object.freeze({left:0,right:0}),applicationMenu:Object.freeze({left:0,right:138})});",
-    "function unrelated(){return!1}",
-    "function Nvt(){return vKe()&&window.electronBridge?.showAppMenu!=null}",
-    "function chrome(e){switch(e){case`win32`:case`linux`:return`something-else`;default:return`native`}}",
-    "let newer=i.includes(`win`)||r.includes(`windows`)||i.includes(`linux`)?t??eV.appMenu:eV.default;",
-  ].join("");
-
-  const warnings = captureWarnings(() => applyFramelessTitlebarWebviewTransforms(source));
-
-  assert.deepEqual(warnings, [
-    "WARN: Could not find application menu browser gate - skipping frameless webview platform patch",
-  ]);
-
-  const chromeDrift = [
-    "function chrome(e){switch(e){case`win32`:return`application-menu`;case`linux`:return`overlay-v2`;default:return`native`}}",
-    "function usesChrome(){return document.documentElement.dataset.codexWindowChrome===`application-menu`}",
-  ].join("");
-  assert.deepEqual(captureWarnings(() => applyFramelessTitlebarWebviewTransforms(chromeDrift)), [
-    "WARN: Could not find Linux window controls chrome mapping - skipping frameless webview chrome patch",
-  ]);
-
-  assert.deepEqual(
-    captureWarnings(() =>
-      applyFramelessTitlebarWebviewTransforms(
-        "jsx(slot,{codexLinuxUseWindowControlsSafeArea:shouldReserveControls,side:`end`})",
-      )),
-    ["WARN: Could not disable the Linux window controls safe area - skipping frameless header padding patch"],
-  );
+test("webview descriptor selects the current shared chrome mapping across hash changes", () => {
+  const descriptor = descriptors.find(({ id }) => id === "webview-chrome-mapping");
+  assert.match("app-shared-HashNext1.js", CHROME_MAPPING_ASSET_PATTERN);
+  assert.doesNotMatch("connect-app-host-HashNext1.js", CHROME_MAPPING_ASSET_PATTERN);
+  assert.equal(descriptor.assetMatch(officialWebviewFixture()), true);
+  assert.equal(descriptor.assetMatch(applyFramelessTitlebarWebviewPatch(officialWebviewFixture())), true);
+  assert.equal(descriptor.assetMatch("export{chrome}"), false);
 });

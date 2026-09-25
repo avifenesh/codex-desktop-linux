@@ -1,30 +1,34 @@
-# Maintainer: ChatGPT Desktop for Linux Maintainers
+# Maintainer: ChatGPT Community for Linux Maintainers
 pkgname=__PACKAGE_NAME__
 pkgver=__PKGVER__
 pkgrel=__PKGREL__
-pkgdesc="ChatGPT Desktop for Linux — community-built from the macOS DMG"
+pkgdesc="Custom codex-desktop distribution built from OpenAI's official Linux package"
 arch=('__ARCH__')
 url="https://github.com/ilysenko/codex-desktop-linux"
 license=('MIT')
 depends=(
-    'python'
-    'p7zip'
     'polkit'
     'curl'
-    'unzip'
+    'dpkg'
+    'gnupg'
+    'nodejs'
     'xdg-utils'
-    'gcc'
-    'make'
     # Electron runtime libraries
     'alsa-lib'
     'at-spi2-core'
     'atk'
     'cairo'
     'dbus'
+    'expat'
+    'gdk-pixbuf2'
     'glib2'
+    'graphite'
     'gtk3'
     'libcups'
     'libdrm'
+    'libglvnd'
+    'libnotify'
+    'libusb'
     'libx11'
     'libxcb'
     'libxcomposite'
@@ -36,14 +40,16 @@ depends=(
     'mesa'
     'nspr'
     'nss'
+    'openssl'
     'pango'
+    'systemd-libs'
+    'tpm2-tss'
+    'xz'
 __LINUX_FEATURE_DEPENDENCIES__
 )
 optdepends=(
-    'nodejs>=22.22.0: optional override for the bundled managed Node.js runtime'
-    'npm: optional override for Codex CLI install/update flows'
-    'zenity: GTK dialog fallback when the Codex CLI is missing'
-    'kdialog: KDE dialog fallback when the Codex CLI is missing'
+    'git: project source control integration'
+    'pulseaudio: audio integration'
 )
 options=(!debug !strip)
 install=__PACKAGE_NAME__.install

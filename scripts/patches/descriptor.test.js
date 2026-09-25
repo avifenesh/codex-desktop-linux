@@ -1,5 +1,9 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const {
+  createPatchReport,
+  criticalFailuresFromReport,
+} = require("../lib/patch-report.js");
 
 const {
   CI_POLICY_OPTIONAL,
@@ -11,6 +15,10 @@ const {
   mainBundlePatch,
   webviewAssetPatch,
 } = require("./descriptor.js");
+const {
+  normalizePatchDescriptors,
+  recordUnavailablePhasePatchDescriptors,
+} = require("./engine.js");
 
 test("descriptor factories stamp explicit patch phases", () => {
   assert.equal(
@@ -57,6 +65,22 @@ test("descriptor factories validate the fresh descriptor contract", () => {
     }).ciPolicy,
     CI_POLICY_OPTIONAL,
   );
+  assert.equal(
+    mainBundlePatch({
+      id: "default-enforcement",
+      apply: (source) => source,
+    }).enforceWhenEnabled,
+    true,
+  );
+  assert.equal(
+    mainBundlePatch({
+      id: "best-effort",
+      ciPolicy: "optional",
+      enforceWhenEnabled: false,
+      apply: (source) => source,
+    }).enforceWhenEnabled,
+    false,
+  );
 
   assert.throws(
     () => webviewAssetPatch({ id: "missing-pattern", apply: (source) => source }),
@@ -81,18 +105,49 @@ test("descriptor factories validate the fresh descriptor contract", () => {
   );
   assert.throws(
     () => mainBundlePatch({ id: "bad-composition", composesPatches: "linux-owner", apply: (source) => source }),
-    /composesPatches must be a non-empty array/,
+    /removed composesPatches support/,
   );
   assert.throws(
-    () => mainBundlePatch({ id: "bad-owner", composesPatches: ["feature:owner"], apply: (source) => source }),
-    /composesPatches entries must match/,
+    () => mainBundlePatch({ id: "bad-enforcement", enforceWhenEnabled: "no", apply: (source) => source }),
+    /enforceWhenEnabled must be a boolean/,
   );
   assert.throws(
     () => mainBundlePatch({
-      id: "duplicate-owner",
-      composesPatches: ["linux-owner", "linux-owner"],
+      id: "required-bypass",
+      ciPolicy: "required-upstream",
+      enforceWhenEnabled: false,
       apply: (source) => source,
     }),
-    /composesPatches must not contain duplicates/,
+    /only with ciPolicy 'optional'/,
   );
+  assert.throws(
+    () => normalizePatchDescriptors([{
+      id: "raw-required-bypass",
+      ciPolicy: "required-upstream",
+      enforceWhenEnabled: false,
+      apply: (source) => source,
+    }]),
+    /only with ciPolicy 'optional'/,
+  );
+});
+
+test("missing required phase remains fail-closed", () => {
+  const [descriptor] = normalizePatchDescriptors([mainBundlePatch({
+    id: "required-main",
+    ciPolicy: "required-upstream",
+    apply: (source) => source,
+  })]);
+  const report = createPatchReport();
+
+  recordUnavailablePhasePatchDescriptors(
+    [descriptor],
+    PHASE_MAIN_BUNDLE,
+    {},
+    report,
+    "main bundle unavailable",
+  );
+
+  assert.equal(report.patches[0].status, "failed-required");
+  assert.equal(report.patches[0].unavailable, true);
+  assert.equal(criticalFailuresFromReport(report).length, 1);
 });

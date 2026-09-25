@@ -1,16 +1,26 @@
 {
   "id": "shared-app-server-socket",
   "title": "Shared App-Server Socket",
-  "description": "Opt-in protocol-transparent Unix socket shared by Codex Desktop and one or more ordinary app-server clients.",
+  "description": "Opt-in protocol-transparent Unix socket shared by ChatGPT Community and one or more ordinary app-server clients.",
   "defaultEnabled": false,
   "entrypoints": {
     "patchDescriptors": "./patch.js"
   },
   "resources": [
     {
+      "source": "socket-path.js",
+      "target": ".codex-linux/features/shared-app-server-socket/socket-path.js",
+      "mode": "0644"
+    },
+    {
       "source": "orphan-reaper.js",
       "target": ".codex-linux/features/shared-app-server-socket/orphan-reaper.js",
       "mode": "0644"
+    },
+    {
+      "source": "attached-cli.sh",
+      "target": ".codex-linux/features/shared-app-server-socket/attached-cli.sh",
+      "mode": "0755"
     }
   ],
   "runtimeHooks": {
@@ -24,5 +34,10 @@
       "name": "socket-cleanup.sh",
       "mode": "0755"
     }
+  },
+  "packageDependencies": {
+    "deb": ["nodejs"],
+    "rpm": ["nodejs"],
+    "pacman": ["nodejs"]
   }
 }

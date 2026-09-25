@@ -19,13 +19,10 @@ Run the helper to install them automatically:
   bash scripts/install-deps.sh
 
 Or install manually:
-  sudo apt install python3 p7zip-full curl unzip build-essential                   # Debian/Ubuntu
-  sudo dnf install python3 7zip curl unzip rpm-build make gcc-c++ @development-tools             # Fedora 41+ (dnf5)
-  sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip rpm-build make gcc-c++      # Fedora <41 (dnf)
-    && sudo dnf groupinstall 'Development Tools'
-  sudo pacman -S python p7zip curl unzip zstd base-devel                            # Arch
-  sudo zypper install python3 p7zip-full curl unzip                                 # openSUSE
-    && sudo zypper install -t pattern devel_basis
+  sudo apt install nodejs npm curl dpkg-dev gnupg                                    # Debian/Ubuntu
+  sudo dnf install nodejs npm curl dpkg-dev gnupg2                                   # Fedora
+  sudo pacman -S nodejs curl dpkg gnupg                                              # Arch
+  sudo zypper install nodejs npm curl dpkg gpg2                                      # openSUSE
 EOF
 }
 
@@ -44,25 +41,22 @@ cleanup() {
 trap cleanup EXIT
 trap 'error "Failed at line $LINENO (exit code $?)"' ERR
 
-CACHED_DMG_PATH="$SCRIPT_DIR/Codex.dmg"
-CACHED_DMG_METADATA_PATH="$CACHED_DMG_PATH.metadata"
 FRESH_INSTALL=0
-REUSE_CACHED_DMG=1
-PROVIDED_DMG_PATH=""
+PROVIDED_UPSTREAM_DEB_PATH="${UPSTREAM_DEB:-}"
 INSPECT_ONLY=0
 REPORT_DIR=""
 
 usage() {
     cat <<'HELP'
-Usage: ./install.sh [OPTIONS] [path/to/Codex.dmg]
+Usage: ./install.sh [OPTIONS] [path/to/chatgpt_*.deb]
 
-Converts the official macOS ChatGPT Desktop app to run on Linux.
+Builds the custom distribution from OpenAI's official Linux package. With no
+path, the package is resolved through signed stable APT metadata.
 
 Options:
   -h, --help     Show this help message and exit
-  --fresh        Remove existing install directory and cached DMG before building
-  --reuse-dmg    Reuse cached Codex.dmg when upstream metadata still matches (default)
-  --inspect      Inspect the DMG and write patch/rebuild reports without installing
+  --fresh        Remove the existing install directory before building
+  --inspect      Inspect the package and write reports without installing
   --report-dir DIR
                  Directory for --inspect reports (default: ./dist-next/rebuild)
 
@@ -72,16 +66,10 @@ Environment variables:
                       Allow overwriting INSTALL_DIR while Codex is running
   CODEX_APP_ID        Override Linux app id/bin identity (default: codex-desktop)
   CODEX_APP_DISPLAY_NAME
-                      Override display name (default: ChatGPT)
-  CODEX_WEBVIEW_PORT  Override webview HTTP port (default: 5175, or 5176 for non-default app ids)
-  CODEX_DMG_REFRESH_MODE=pinned
-                      Reuse an existing cached Codex.dmg verbatim and refuse
-                      network refresh/download when no explicit DMG path is passed
-  ELECTRON_HEADERS_URL
-                      Override the Electron headers URL used by @electron/rebuild
-                      (default: https://artifacts.electronjs.org/headers/dist)
-  ELECTRON_MIRROR     Override the Electron runtime download mirror root
-                      (example: https://npmmirror.com/mirrors/electron/)
+                      Override display name (default: ChatGPT Community)
+  UPSTREAM_DEB        Equivalent to the optional positional .deb path
+  CODEX_UPSTREAM_LINUX_REPOSITORY
+                      Override the official repository URL for fixture testing
   REBUILD_REPORT_DIR  Default report directory for --inspect and rebuild reports
   CODEX_ACCEPTANCE_OVERRIDE=1
                       Developer-only promotion override for a completely built
@@ -100,10 +88,6 @@ parse_args() {
         case "$1" in
             --fresh)
                 FRESH_INSTALL=1
-                REUSE_CACHED_DMG=0
-                ;;
-            --reuse-dmg)
-                REUSE_CACHED_DMG=1
                 ;;
             --inspect)
                 INSPECT_ONLY=1
@@ -121,8 +105,15 @@ parse_args() {
                 error "Unknown option: $1 (see --help)"
                 ;;
             *)
-                [ -z "$PROVIDED_DMG_PATH" ] || error "Only one DMG path may be provided"
-                PROVIDED_DMG_PATH="$1"
+                if [ -n "$PROVIDED_UPSTREAM_DEB_PATH" ] && [ "$1" != "$PROVIDED_UPSTREAM_DEB_PATH" ]; then
+                    error "Conflicting upstream .deb paths: $PROVIDED_UPSTREAM_DEB_PATH and $1"
+                fi
+                case "$1" in
+                    *.dmg|*.DMG) error "macOS DMG inputs are no longer supported; provide the official Linux chatgpt_*.deb" ;;
+                    *.deb) ;;
+                    *) error "Upstream input must be an official chatgpt_*.deb package: $1" ;;
+                esac
+                PROVIDED_UPSTREAM_DEB_PATH="$1"
                 ;;
         esac
         shift
@@ -138,39 +129,12 @@ validate_app_identity() {
 
     [ -n "$CODEX_APP_DISPLAY_NAME" ] || error "CODEX_APP_DISPLAY_NAME must not be empty"
 
-    case "$CODEX_WEBVIEW_PORT" in
-        ""|*[!0-9]*)
-            error "CODEX_WEBVIEW_PORT must be a TCP port number"
-            ;;
-    esac
-    local port_number
-    port_number="$CODEX_WEBVIEW_PORT"
-    while [ "${port_number#0}" != "$port_number" ]; do
-        port_number="${port_number#0}"
+    local retired_name
+    for retired_name in DMG CODEX_DMG_URL CODEX_DMG_REFRESH_MODE CODEX_DMG_SHA256 CODEX_DMG_ETAG; do
+        if [ -n "${!retired_name+x}" ]; then
+            error "$retired_name is no longer supported; use UPSTREAM_DEB or signed stable APT metadata"
+        fi
     done
-    [ -n "$port_number" ] || port_number=0
-    if [ "${#port_number}" -gt 5 ] || [ "$port_number" -lt 1 ] || [ "$port_number" -gt 65535 ]; then
-        error "CODEX_WEBVIEW_PORT must be between 1 and 65535"
-    fi
-    CODEX_WEBVIEW_PORT="$port_number"
-}
-
-shell_quote() {
-    printf '%q' "$1"
-}
-
-dmg_refresh_mode_is_pinned() {
-    case "${CODEX_DMG_REFRESH_MODE:-auto}" in
-        ""|auto)
-            return 1
-            ;;
-        pinned|pin|1|true|yes)
-            return 0
-            ;;
-        *)
-            error "CODEX_DMG_REFRESH_MODE must be 'auto' or 'pinned'"
-            ;;
-    esac
 }
 
 prepare_install() {
@@ -179,53 +143,26 @@ prepare_install() {
         rm -rf "$INSTALL_DIR"
     fi
 
-    if [ "$FRESH_INSTALL" -eq 1 ] && [ "$REUSE_CACHED_DMG" -ne 1 ] \
-            && ! dmg_refresh_mode_is_pinned \
-            && { [ -e "$CACHED_DMG_PATH" ] || [ -e "$CACHED_DMG_METADATA_PATH" ]; }; then
-        info "Removing cached DMG and metadata: $CACHED_DMG_PATH"
-        rm -f "$CACHED_DMG_PATH"
-        rm -f "$CACHED_DMG_METADATA_PATH"
-    fi
 }
 
 # ---- Check dependencies ----
 check_deps() {
     local missing=()
-    for cmd in python3 curl unzip tar flock; do
+    for cmd in node curl dpkg-deb gpg gpgv sha256sum flock; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
-    if ! command -v 7zz &>/dev/null && ! command -v 7z &>/dev/null; then
-        missing+=("7z or 7zz")
-    fi
     if [ ${#missing[@]} -ne 0 ]; then
         error "Missing dependencies: ${missing[*]}
 $(dependency_help)"
     fi
 
-    if ! command -v make &>/dev/null || ! command -v g++ &>/dev/null; then
-        error "Build tools (make, g++) required:
-$(dependency_help)"
+    # ASAR patching needs npx unless a packaged ASAR executable was supplied.
+    # Warn before downloading upstream; patch_asar() validates the tool again.
+    if [ -z "${CODEX_ASAR_BIN:-}" ] && ! command -v npx &>/dev/null; then
+        warn "npx not found on PATH: the required ASAR patch will fail." \
+            "Install npm (Debian/Ubuntu: sudo apt install npm) or ensure the version-manager" \
+            "Node bin directory is on PATH for this shell/service."
     fi
 
-    # Prefer modern 7-zip if available (required for APFS DMG)
-    if command -v 7zz &>/dev/null; then
-        SEVEN_ZIP_CMD="7zz"
-    else
-        SEVEN_ZIP_CMD="7z"
-    fi
-
-    local seven_zip_banner
-    seven_zip_banner="$("$SEVEN_ZIP_CMD" 2>&1 | head -n 3 || true)"
-    if [[ "$seven_zip_banner" == *"16.02"* || "$seven_zip_banner" == *"p7zip Version"* ]]; then
-        error "System 7-zip is too old for modern APFS DMGs or lacks APFS support.
-Install a newer 7zz first by running:
-  bash scripts/install-deps.sh
-
-That helper bootstraps a current 7zz into ~/.local/bin by default.
-If ~/.local/bin is not on your PATH, add it before re-running this script:
-  export PATH=\"$HOME/.local/bin:$PATH\"
-Set SEVENZIP_SYSTEM_INSTALL=1 to install into /usr/local/bin instead."
-    fi
-
-    info "All system dependencies found (using $SEVEN_ZIP_CMD)"
+    info "All system dependencies found"
 }

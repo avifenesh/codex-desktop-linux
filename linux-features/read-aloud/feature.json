@@ -2,6 +2,7 @@
   "id": "read-aloud",
   "name": "Read aloud",
   "description": "Opt-in Linux read-aloud button for assistant responses.",
+  "defaultEnabled": false,
   "entrypoints": {
     "patchDescriptors": "./patch.js",
     "stageHook": "./stage.sh"

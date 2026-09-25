@@ -103,8 +103,10 @@ const PARCEL_FALLBACK_SYMBOL_KEY =
   "codex-linux.directory-only-working-tree-watch.parcel-fallback";
 const QUALIFICATION_WARNINGS_SYMBOL_KEY =
   "codex-linux.directory-only-working-tree-watch.qualification-warnings";
+const ESTABLISHMENT_LOGGED_SYMBOL_KEY =
+  "codex-linux.directory-only-working-tree-watch.establishment-logged";
 const WATCHBOUND_RESULT_NAME = "codexLinuxWatchboundWatcher";
-const WATCHBOUND_VERSION = "2.1.1";
+const WATCHBOUND_VERSION = "2.1.2";
 const DEFAULT_MAX_WATCHES = 8192;
 const DEFAULT_IGNORED_DIRECTORY_NAMES = [];
 const IDENTIFIER_PATTERN = "[A-Za-z_$][\\w$]*";
@@ -119,12 +121,13 @@ const LOCAL_FILE_WATCH_METHOD =
   new RegExp(`${LOCAL_FILE_WATCH_METHOD_PREFIX}${LOCAL_FILE_WATCH_CURRENT_BODY}`, "gu");
 const CURRENT_LOCAL_HOST_CLASS = new RegExp(
   `var (?<localHostClass>${IDENTIFIER_PATTERN})=class\\{` +
-    "runsInsideWsl;hostConfig=\\{id:`local`,display_name:`Local`,kind:`local`\\};" +
+    `runsInsideWsl;workspaceRoot=new ${IDENTIFIER_PATTERN}\\(this\\);` +
+    "hostConfig=\\{id:`local`,display_name:`Local`,kind:`local`\\};" +
     "id=`local`;isLocal=!0;",
   "gu",
 );
 const PARCEL_WORKING_TREE_WATCH =
-  /process\.platform===`linux`\?[A-Za-z_$][\w$]*\((?<options>[A-Za-z_$][\w$]*),\{ignoredPaths:\[[A-Za-z_$][\w$]*\.posix\.join\(\k<options>\.path,`\.git`\)\]\}\):(?<host>[A-Za-z_$][\w$]*)\.startFileWatch\(\k<options>\)/gu;
+  /process\.platform===`linux`\?[A-Za-z_$][\w$]*\((?<options>[A-Za-z_$][\w$]*),\{ignoredPaths:\[[A-Za-z_$][\w$]*\.posix\.join\(\k<options>\.path,`\.git`\),\.\.\.[A-Za-z_$][\w$]*\]\}\):(?<host>[A-Za-z_$][\w$]*)\.startFileWatch\(\k<options>\)/gu;
 const CURRENT_PARCEL_HELPER = new RegExp(
   "async function " +
     `(?<helperName>${IDENTIFIER_PATTERN})\\(` +
@@ -138,33 +141,47 @@ const CURRENT_PARCEL_HELPER = new RegExp(
 const CURRENT_GIT_ROUTE_PREFIX_PATTERN =
   "case`git`:\\{let " +
   `(?<localHost>${IDENTIFIER_PATTERN})=new ` +
-  `(?<localHostClass>${IDENTIFIER_PATTERN});return\\{git:\\{createExecutionHost:` +
-  `(?<executionOptions>${IDENTIFIER_PATTERN})=>\\{if\\(` +
+  `(?<localHostClass>${IDENTIFIER_PATTERN});return\\{git:\\{` +
+  "watchIgnoreSources:process\\.platform===`linux`\\?\\{getEnvironment:async\\(\\)=>\\{if\\(" +
   `(?<mainConnection>${IDENTIFIER_PATTERN})==null\\)` +
+  "throw Error\\(`Git hosts require a main RPC connection`\\);return " +
+  "\\k<mainConnection>\\.getLocalGitIgnoreEnvironment\\(\\)\\}," +
+  `getWatchTargets:(?<getWatchTargets>${IDENTIFIER_PATTERN})\\}:void 0,createExecutionHost:` +
+  `(?<executionOptions>${IDENTIFIER_PATTERN})=>\\{if\\(` +
+  "\\k<mainConnection>==null\\)" +
   "throw Error\\(`Git hosts require a main RPC connection`\\);return new " +
   `(?<remoteHostClass>${IDENTIFIER_PATTERN})\\(` +
-  "\\k<mainConnection>,\\k<executionOptions>\\)\\},";
+  "\\k<mainConnection>,\\k<executionOptions>\\)\\}," +
+  "startMetadataWatch:\\(" +
+  `(?<metadataHost>${IDENTIFIER_PATTERN}),(?<metadataOptions>${IDENTIFIER_PATTERN})\\)=>` +
+  "\\k<metadataHost>\\.isLocal\\?process\\.platform===`linux`&&" +
+  "\\k<metadataOptions>\\.recursive!==!1\\?" +
+  `(?<metadataHelper>${IDENTIFIER_PATTERN})\\(\\k<metadataOptions>,\\{ignoredPaths:\\[\\]\\}\\):` +
+  "\\k<localHost>\\.startFileWatch\\(\\k<metadataOptions>\\):" +
+  "\\k<metadataHost>\\.startFileWatch\\(\\k<metadataOptions>\\),";
 const CURRENT_PARCEL_ROUTE_PATTERN =
   "startWorkingTreeWatch:\\(" +
   `(?<routeHost>${IDENTIFIER_PATTERN}),` +
-  `(?<routeOptions>${IDENTIFIER_PATTERN})\\)=>` +
+  `(?<routeOptions>${IDENTIFIER_PATTERN}),` +
+  `(?<ignoredPaths>${IDENTIFIER_PATTERN})\\)=>` +
   "\\k<routeHost>\\.isLocal\\?process\\.platform===`linux`\\?" +
   `(?<routeHelper>${IDENTIFIER_PATTERN})\\(\\k<routeOptions>,\\{ignoredPaths:\\[` +
   `(?<pathApi>${IDENTIFIER_PATTERN})\\.posix\\.join\\(` +
-  "\\k<routeOptions>\\.path,`\\.git`\\)\\]\\}\\):" +
+  "\\k<routeOptions>\\.path,`\\.git`\\),\\.\\.\\.\\k<ignoredPaths>\\]\\}\\):" +
   "\\k<localHost>\\.startFileWatch\\(\\k<routeOptions>\\):" +
   "\\k<routeHost>\\.startFileWatch\\(\\k<routeOptions>\\)";
 const CURRENT_WATCHBOUND_ROUTE_PATTERN =
   "startWorkingTreeWatch:\\(" +
   `(?<routeHost>${IDENTIFIER_PATTERN}),` +
-  `(?<routeOptions>${IDENTIFIER_PATTERN})\\)=>` +
+  `(?<routeOptions>${IDENTIFIER_PATTERN}),` +
+  `(?<ignoredPaths>${IDENTIFIER_PATTERN})\\)=>` +
   "\\k<routeHost>\\.isLocal\\?process\\.platform===`linux`\\?" +
   `/\\*${PARCEL_WATCH_MARKER}\\*/` +
   "\\k<localHost>\\.startFileWatch\\(\\{\\.\\.\\.\\k<routeOptions>," +
   "\\[Symbol\\.for\\(`codex-linux\\.directory-only-working-tree-watch\\.parcel-fallback`\\)\\]:" +
   `\\(\\)=>(?<routeHelper>${IDENTIFIER_PATTERN})\\(\\k<routeOptions>,\\{ignoredPaths:\\[` +
   `(?<pathApi>${IDENTIFIER_PATTERN})\\.posix\\.join\\(` +
-  "\\k<routeOptions>\\.path,`\\.git`\\)\\]\\}\\)\\}\\):" +
+  "\\k<routeOptions>\\.path,`\\.git`\\),\\.\\.\\.\\k<ignoredPaths>\\]\\}\\)\\}\\):" +
   "\\k<localHost>\\.startFileWatch\\(\\k<routeOptions>\\):" +
   "\\k<routeHost>\\.startFileWatch\\(\\k<routeOptions>\\)";
 const CURRENT_PARCEL_ROUTE_CONTRACT = new RegExp(
@@ -192,12 +209,47 @@ function codexLinuxStartDirectoryOnlyWorkingTreeWatch(
     const RETRY_MAX_MS = 30_000;
     const QUALIFICATION_WARNINGS_SYMBOL_KEY =
       "codex-linux.directory-only-working-tree-watch.qualification-warnings";
-    const WATCHBOUND_VERSION = "2.1.1";
+    const ESTABLISHMENT_LOGGED_SYMBOL_KEY =
+      "codex-linux.directory-only-working-tree-watch.establishment-logged";
+    const WATCHBOUND_VERSION = "2.1.2";
     const moduleOverrideKey = Symbol.for(
       "codex-linux.directory-only-working-tree-watch.test-module",
     );
     const moduleOverride = globalThis[moduleOverrideKey];
-    const watchbound = moduleOverride ?? await import("watchbound");
+    let watchbound = moduleOverride;
+    if (watchbound == null) {
+      try {
+        watchbound = await import("watchbound");
+      } catch (error) {
+        const runtimeRefusalCodes = new Set([
+          "WATCHBOUND_UNSUPPORTED_PLATFORM",
+          "WATCHBOUND_UNSUPPORTED_LIBC",
+          "WATCHBOUND_UNSUPPORTED_KERNEL",
+          "WATCHBOUND_UNSUPPORTED_NODE",
+          "WATCHBOUND_UNSUPPORTED_NODE_API",
+        ]);
+        if (!runtimeRefusalCodes.has(error?.code)) throw error;
+        // A supported loader refusal preserves the upstream route. Missing,
+        // corrupt, or API-incompatible enabled packages are packaging defects
+        // and must remain visible instead of silently selecting Parcel.
+        const warningStateKey = Symbol.for(QUALIFICATION_WARNINGS_SYMBOL_KEY);
+        const warningState = globalThis[warningStateKey] ??= new Set();
+        const fallbackName = typeof fallback === "function"
+          ? "upstream Parcel watcher"
+          : "upstream file watcher";
+        const message = error?.message ?? String(error);
+        const signature = `runtime\0${error.code}\0${message}\0${fallbackName}`;
+        if (!warningState.has(signature)) {
+          if (warningState.size >= 256) warningState.clear();
+          warningState.add(signature);
+          console.warn(
+            `WARN: directory-only working-tree watch runtime rejected Watchbound ` +
+              `${WATCHBOUND_VERSION} (${error.code}: ${message}); using the ${fallbackName}.`,
+          );
+        }
+        return typeof fallback === "function" ? fallback() : null;
+      }
+    }
     if (
       watchbound.capabilities?.schemaVersion !== 9 ||
       watchbound.capabilities?.versions?.wrapper !== WATCHBOUND_VERSION ||
@@ -1346,6 +1398,25 @@ function codexLinuxStartDirectoryOnlyWorkingTreeWatch(
       scheduleRootRecovery();
     }
 
+    const establishmentLoggedKey = Symbol.for(ESTABLISHMENT_LOGGED_SYMBOL_KEY);
+    let establishmentLoggedRoots = globalThis[establishmentLoggedKey];
+    if (!(establishmentLoggedRoots instanceof Set)) {
+      establishmentLoggedRoots = new Set();
+      globalThis[establishmentLoggedKey] = establishmentLoggedRoots;
+    }
+    if (!establishmentLoggedRoots.has(root)) {
+      establishmentLoggedRoots.add(root);
+      const runtime = engine.runtimeStats();
+      const target = typeof qualification?.target?.packagedTargetId === "string"
+        ? qualification.target.packagedTargetId
+        : "unknown";
+      console.info(
+        `INFO: directory-only working-tree watch established with Watchbound ` +
+          `${WATCHBOUND_VERSION} for ${root} ` +
+          `(target=${target}, native=${runtime.nativeWatches}, limit=${requestedLimit}).`,
+      );
+    }
+
     return {
       // Watchbound is recursive for included paths. Reporting partial recursive
       // coverage deliberately preserves Codex's existing focus recovery.
@@ -1517,12 +1588,14 @@ function classifyCurrentBundle(bundlePath, source, settings = normalizedSettings
   const correlatedPristineRouteCount = pristineRouteMatches.filter((route) =>
     parcelHelperMatches.some((helper) =>
       helper.groups?.helperName === route.groups?.routeHelper &&
+      route.groups?.metadataHelper === route.groups?.routeHelper &&
       route.groups?.localHostClass === localHostClass
     )
   ).length;
   const correlatedCompletedRouteCount = completedRouteMatches.filter(
     (route) =>
       route.groups?.localHostClass === localHostClass &&
+      route.groups?.metadataHelper === route.groups?.routeHelper &&
       parcelHelperMatches.some(
         (helper) => helper.groups?.helperName === route.groups?.routeHelper,
       ),
@@ -1642,7 +1715,7 @@ function currentContractReason(records, bundleCount) {
   );
   const branches = relevant.reduce((count, record) => count + record.branchCallCount, 0);
   return (
-    "Current 26.803.41515 working-tree contract rejected: " +
+    "Current working-tree contract rejected: " +
     `Found ${relevant.length} current local startFileWatch bundles ` +
     `(${targetNames.join(", ") || "none"}), ${parcelContractCount} Parcel route contracts, ` +
     `and ${workerParcelContractCount} in worker.js across ${bundleCount} build bundles; ` +
@@ -1654,12 +1727,12 @@ function currentContractReason(records, bundleCount) {
 
 function watchboundWorkingTreeRoute(groups) {
   return (
-    `startWorkingTreeWatch:(${groups.routeHost},${groups.routeOptions})=>` +
+    `startWorkingTreeWatch:(${groups.routeHost},${groups.routeOptions},${groups.ignoredPaths})=>` +
     `${groups.routeHost}.isLocal?process.platform===\`linux\`?` +
     `/*${PARCEL_WATCH_MARKER}*/${groups.localHost}.startFileWatch({` +
     `...${groups.routeOptions},[Symbol.for(\`${PARCEL_FALLBACK_SYMBOL_KEY}\`)]:()=>` +
     `${groups.routeHelper}(${groups.routeOptions},{ignoredPaths:[` +
-    `${groups.pathApi}.posix.join(${groups.routeOptions}.path,\`.git\`)]})}):` +
+    `${groups.pathApi}.posix.join(${groups.routeOptions}.path,\`.git\`),...${groups.ignoredPaths}]})}):` +
     `${groups.localHost}.startFileWatch(${groups.routeOptions}):` +
     `${groups.routeHost}.startFileWatch(${groups.routeOptions})`
   );
@@ -1898,6 +1971,7 @@ const descriptors = [
 module.exports = {
   DEFAULT_IGNORED_DIRECTORY_NAMES,
   DEFAULT_MAX_WATCHES,
+  ESTABLISHMENT_LOGGED_SYMBOL_KEY,
   HELPER_NAME,
   LOCAL_FILE_WATCH_METHOD,
   PARCEL_FALLBACK_SYMBOL_KEY,

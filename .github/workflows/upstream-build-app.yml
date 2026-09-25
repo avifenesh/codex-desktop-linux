@@ -1,291 +1,471 @@
-name: Upstream Build App
+name: Official Linux package build
+run-name: ${{ inputs.release_id && format('Official Linux campaign {0}', inputs.release_id) || format('Official Linux {0}', github.event_name) }}
 
 on:
-  schedule:
-    - cron: '30 * * * *'
-  pull_request:
-    paths:
-      - install.sh
-      - Makefile
-      - scripts/patch-linux-window-ui.js
-      - scripts/patch-linux-window-ui.test.js
-      - scripts/patches/**
-      - scripts/ci/download-upstream-dmg.sh
-      - scripts/ci/validate-patch-report.js
-      - scripts/ci/upstream-dmg-*.js
-      - scripts/validate-upstream-dmg.js
-      - scripts/lib/candidate-install.sh
-      - scripts/lib/bundled-plugins.sh
-      - scripts/lib/browser-client-node-repl-runtime.test.js
-      - scripts/lib/build-info.js
-      - scripts/lib/build-info.sh
-      - scripts/lib/build-info.test.js
-      - scripts/lib/patch-browser-client-iab-socket-scope.js
-      - scripts/lib/patch-validation.js
-      - scripts/lib/upstream-dmg-acceptance.js
-      - scripts/lib/upstream-dmg-release-profile.js
-      - scripts/lib/linux-features.js
-      - computer-use-linux/src/bin/codex-chrome-extension-host.rs
-      - linux-features/**
-      - .github/workflows/upstream-build-app.yml
-  push:
-    branches:
-      - main
-    paths:
-      - install.sh
-      - Makefile
-      - scripts/patch-linux-window-ui.js
-      - scripts/patch-linux-window-ui.test.js
-      - scripts/patches/**
-      - scripts/ci/download-upstream-dmg.sh
-      - scripts/ci/validate-patch-report.js
-      - scripts/ci/upstream-dmg-*.js
-      - scripts/validate-upstream-dmg.js
-      - scripts/lib/candidate-install.sh
-      - scripts/lib/bundled-plugins.sh
-      - scripts/lib/browser-client-node-repl-runtime.test.js
-      - scripts/lib/build-info.js
-      - scripts/lib/build-info.sh
-      - scripts/lib/build-info.test.js
-      - scripts/lib/patch-browser-client-iab-socket-scope.js
-      - scripts/lib/patch-validation.js
-      - scripts/lib/upstream-dmg-acceptance.js
-      - scripts/lib/upstream-dmg-release-profile.js
-      - scripts/lib/linux-features.js
-      - computer-use-linux/src/bin/codex-chrome-extension-host.rs
-      - linux-features/**
-      - .github/workflows/upstream-build-app.yml
   workflow_dispatch:
+    inputs:
+      release_id:
+        description: Exact signed release identity selected by watchdog
+        required: true
+        type: string
+      version:
+        description: Expected signed package version
+        required: true
+        type: string
+      amd64_repository_path:
+        description: Expected signed amd64 repository path
+        required: true
+        type: string
+      amd64_sha256:
+        description: Expected signed amd64 SHA-256
+        required: true
+        type: string
+      arm64_repository_path:
+        description: Expected signed arm64 repository path
+        required: true
+        type: string
+      arm64_sha256:
+        description: Expected signed arm64 SHA-256
+        required: true
+        type: string
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - install.sh
+      - Makefile
+      - assets/openai-codex-linux-repository-key.gpg.base64
+      - launcher/**
+      - scripts/build-*.sh
+      - scripts/lib/package-common.sh
+      - scripts/lib/upstream-linux-package.*
+      - scripts/automation/upstream-linux-package-watchdog/**
+      - scripts/patches/**
+      - linux-features/**
+      - packaging/**
+      - updater/**
+      - flake.nix
+      - nix/**
+      - .github/workflows/upstream-build-app.yml
 
 permissions:
   contents: read
 
 concurrency:
-  group: upstream-dmg-acceptance-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: official-linux-package-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
 
-env:
-  UPSTREAM_DMG_URL: https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg
-  UPSTREAM_DMG_PATH: /tmp/codex-upstream-ci/Codex.dmg
-  DMG_CACHE_SCHEMA_VERSION: v1
-
 jobs:
-  build-app-upstream-dmg:
-    name: Build App Against Upstream DMG
+  signed-baseline:
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [amd64, arm64]
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
-
       - name: Install build dependencies
         run: |
-          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y p7zip-full make g++ python3 curl unzip
-
-      - name: Capture upstream DMG metadata
-        id: upstream-metadata
+          sudo apt-get install -y dpkg-dev gnupg patchelf
+      - name: Resolve signed package
+        id: upstream
         run: |
           set -euo pipefail
-
-          headers_file="$(mktemp)"
-          trap 'rm -f "$headers_file"' EXIT
-
-          curl -fsSLI "$UPSTREAM_DMG_URL" > "$headers_file"
-
-          # Match header names case-insensitively without gawk's IGNORECASE,
-          # which is a no-op under mawk (the default awk on ubuntu runners).
-          last_modified="$(awk 'tolower($0) ~ /^last-modified:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
-          etag="$(awk 'tolower($0) ~ /^etag:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); gsub(/"/,""); print; exit}' "$headers_file")"
-          content_length="$(awk 'tolower($0) ~ /^content-length:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
-
-          if [ -z "$last_modified" ]; then
-            last_modified="unknown"
+          mkdir -p upstream
+          package="$(node scripts/lib/upstream-linux-package.js \
+            --output-dir upstream/${{ matrix.architecture }} \
+            --metadata upstream/${{ matrix.architecture }}.json \
+            --key-base64 assets/openai-codex-linux-repository-key.gpg.base64 \
+            --arch ${{ matrix.architecture }})"
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+      - name: Require the dispatched signed campaign
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          EXPECTED_RELEASE_ID: ${{ inputs.release_id }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+          EXPECTED_REPOSITORY_PATH: ${{ matrix.architecture == 'amd64' && inputs.amd64_repository_path || inputs.arm64_repository_path }}
+          EXPECTED_SHA256: ${{ matrix.architecture == 'amd64' && inputs.amd64_sha256 || inputs.arm64_sha256 }}
+        run: |
+          node - "upstream/${{ matrix.architecture }}.json" <<'NODE'
+          const fs = require("node:fs");
+          const metadata = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          if (metadata.version !== process.env.EXPECTED_VERSION
+              || metadata.repositoryPath !== process.env.EXPECTED_REPOSITORY_PATH
+              || metadata.sha256 !== process.env.EXPECTED_SHA256) {
+            throw new Error("resolved signed package does not match the dispatched campaign");
+          }
+          if (!/^[0-9a-f]{64}$/.test(process.env.EXPECTED_RELEASE_ID)) {
+            throw new Error("invalid dispatched release identity");
+          }
+          NODE
+      - name: Build required default baseline
+        env:
+          CODEX_TARGET_ARCH: ${{ matrix.architecture }}
+          CODEX_LINUX_FEATURES_CONFIG: ${{ github.workspace }}/linux-features/features.example.json
+          CODEX_INSTALL_DIR: ${{ github.workspace }}/codex-app-${{ matrix.architecture }}
+        run: |
+          ./install.sh "${{ steps.upstream.outputs.package }}"
+          upstream_root="$(mktemp -d)"
+          dpkg-deb -x "${{ steps.upstream.outputs.package }}" "$upstream_root"
+          node - "$upstream_root/usr/lib/chatgpt/resources/app.asar" \
+            "$CODEX_INSTALL_DIR/resources/app.asar" \
+            "$CODEX_INSTALL_DIR/.codex-linux/patch-report.json" <<'NODE'
+          const crypto = require("node:crypto");
+          const fs = require("node:fs");
+          const { requiredPatchNamesForProfile } = require("./scripts/patches/runner.js");
+          const sha256 = (file) => crypto.createHash("sha256")
+            .update(fs.readFileSync(file)).digest("hex");
+          const upstreamSha256 = sha256(process.argv[2]);
+          const outputSha256 = sha256(process.argv[3]);
+          const report = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
+          const requiredNames = requiredPatchNamesForProfile("upstream-build");
+          const required = new Set(requiredNames);
+          const reportedNames = new Set(report.patches.map(({ name }) => name));
+          if (report.enabledFeatures.length !== 0
+              || report.patches.length !== required.size
+              || reportedNames.size !== report.patches.length
+              || report.patches.some((patch) => !required.has(patch.name)
+                || patch.ciPolicy !== "required-upstream"
+                || patch.sourceKind !== "core"
+                || patch.status !== "applied")
+              || report.upstreamAppAsar?.preservedByteForByte !== (required.size === 0)
+              || report.upstreamAppAsar?.sha256 !== upstreamSha256
+              || report.outputAppAsar?.sha256 !== outputSha256
+              || (required.size === 0
+                ? upstreamSha256 !== outputSha256
+                : upstreamSha256 === outputSha256)) {
+            throw new Error(`unexpected required default patch report: ${JSON.stringify(report)}`);
+          }
+          NODE
+          node scripts/ci/validate-patch-report.js \
+            "$CODEX_INSTALL_DIR/.codex-linux/patch-report.json" \
+            --profile upstream-build
+          test -x "$CODEX_INSTALL_DIR/ChatGPT"
+          test -x "$CODEX_INSTALL_DIR/resources/codex"
+      - name: Test required core patches against the signed bundle
+        run: |
+          set -euo pipefail
+          upstream_root="$(mktemp -d)"
+          extracted_asar="$(mktemp -d)"
+          dpkg-deb -x "${{ steps.upstream.outputs.package }}" "$upstream_root"
+          npx --yes @electron/asar extract \
+            "$upstream_root/usr/lib/chatgpt/resources/app.asar" \
+            "$extracted_asar"
+          CODEX_SIGNED_EXTRACTED_APP="$extracted_asar" node - <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const childProcess = require("node:child_process");
+          const { corePatchDescriptors } = require("./scripts/patches/runner.js");
+          const tests = corePatchDescriptors()
+            .filter(({ ciPolicy }) => ciPolicy === "required-upstream")
+            .map(({ sourcePath }) => path.join(path.dirname(sourcePath), "test.js"));
+          if (tests.some((testPath) => !fs.existsSync(testPath))) {
+            throw new Error(`required core patch regression test missing: ${tests.join(", ")}`);
+          }
+          if (tests.length > 0) {
+            const result = childProcess.spawnSync(process.execPath, ["--test", ...tests], {
+              env: process.env,
+              stdio: "inherit",
+            });
+            if (result.error) throw result.error;
+            if (result.status !== 0) process.exit(result.status ?? 1);
+          }
+          NODE
+      - name: Require signed renderer dependency regression
+        env:
+          EXPECTED_SIGNED_VERSION: ${{ inputs.version }}
+          EXPECTED_SIGNED_REPOSITORY_PATH: ${{ matrix.architecture == 'amd64' && inputs.amd64_repository_path || inputs.arm64_repository_path }}
+          EXPECTED_SIGNED_SHA256: ${{ matrix.architecture == 'amd64' && inputs.amd64_sha256 || inputs.arm64_sha256 }}
+        run: |
+          set -euo pipefail
+          node - "upstream/${{ matrix.architecture }}.json" <<'NODE'
+          const fs = require("node:fs");
+          const metadata = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          if (process.env.GITHUB_EVENT_NAME === "workflow_dispatch"
+              && (metadata.version !== process.env.EXPECTED_SIGNED_VERSION
+                || metadata.repositoryPath !== process.env.EXPECTED_SIGNED_REPOSITORY_PATH
+                || metadata.sha256 !== process.env.EXPECTED_SIGNED_SHA256)) {
+            throw new Error("signed renderer regression is not bound to the expected campaign");
+          }
+          NODE
+          upstream_root="$(mktemp -d)"
+          extracted_asar="$(mktemp -d)"
+          dpkg-deb -x "${{ steps.upstream.outputs.package }}" "$upstream_root"
+          npx --yes @electron/asar extract \
+            "$upstream_root/usr/lib/chatgpt/resources/app.asar" \
+            "$extracted_asar"
+          node - "$extracted_asar/webview/assets" <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const assets = process.argv[2];
+          function requireUniqueAsset(pattern, description) {
+            const matches = fs.readdirSync(assets, { withFileTypes: true })
+              .filter((entry) => entry.isFile() && pattern.test(entry.name))
+              .map((entry) => entry.name);
+            if (matches.length !== 1) {
+              throw new Error(`expected exactly one ${description} asset, found ${matches.length}: ${matches.join(", ")}`);
+            }
+            return matches[0];
+          }
+          const authedName = requireUniqueAsset(/^authed-route-[A-Za-z0-9_-]+\.js$/, "authenticated route");
+          const primaryName = requireUniqueAsset(/^app-primary-[A-Za-z0-9_-]+\.js$/, "primary application");
+          const authed = fs.readFileSync(path.join(assets, authedName), "utf8");
+          const primary = fs.readFileSync(path.join(assets, primaryName), "utf8");
+          if (!authed.includes(`./${primaryName}`)) {
+            throw new Error(`${authedName} no longer imports ${primaryName}`);
+          }
+          const authedFingerprint = authedName.slice("authed-route-".length, -".js".length);
+          for (const reverseMarker of [authedName, "authed-route", authedFingerprint]) {
+            if (primary.includes(reverseMarker)) {
+              throw new Error(`${primaryName} restored the retired reverse dependency via ${reverseMarker}`);
+            }
+          }
+          NODE
+      - name: Validate the Nix ELF contract against the official payload
+        env:
+          CODEX_INSTALL_DIR: ${{ github.workspace }}/codex-app-${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          node nix/elf-runtime.cjs validate-upstream \
+            --root "$CODEX_INSTALL_DIR" \
+            --arch "${{ matrix.architecture }}"
+          fix_root="$(mktemp -d)"
+          cp -a "$CODEX_INSTALL_DIR/." "$fix_root/"
+          chmod -R u+w "$fix_root"
+          if [ "${{ matrix.architecture }}" = amd64 ]; then
+            dynamic_linker=/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-glibc/lib/ld-linux-x86-64.so.2
+          else
+            dynamic_linker=/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-glibc/lib/ld-linux-aarch64.so.1
           fi
-          if [ -z "$etag" ]; then
-            etag="no-etag"
-          fi
-          if [ -z "$content_length" ]; then
-            content_length="unknown"
-          fi
-
-          cache_segment="$(printf '%s|%s|%s\n' "$last_modified" "$etag" "$content_length" | sha256sum | cut -d' ' -f1)"
-
-          {
-            echo "last_modified=$last_modified"
-            echo "etag=$etag"
-            echo "content_length=$content_length"
-            echo "cache_segment=$cache_segment"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Restore cached upstream DMG
-        id: dmg-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+          runtime_path=/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-runtime/lib
+          node nix/elf-runtime.cjs fix \
+            --root "$fix_root" \
+            --arch "${{ matrix.architecture }}" \
+            --dynamic-linker "$dynamic_linker" \
+            --runtime-library-path "$runtime_path" \
+            --patchelf "$(command -v patchelf)" \
+            --chatgpt-relocator nix/relocate-elf-interpreter.cjs
+          node nix/elf-runtime.cjs audit \
+            --root "$fix_root" \
+            --arch "${{ matrix.architecture }}" \
+            --dynamic-linker "$dynamic_linker" \
+            --runtime-library-path "$runtime_path" \
+            --check-dependencies false \
+            --check-shebangs false
+      - name: Audit every ASAR feature against the official bundle
+        if: matrix.architecture == 'amd64'
+        run: |
+          set -euo pipefail
+          upstream_root="$(mktemp -d)"
+          extracted_asar="$(mktemp -d)"
+          dpkg-deb -x "${{ steps.upstream.outputs.package }}" "$upstream_root"
+          npx --yes @electron/asar extract \
+            "$upstream_root/usr/lib/chatgpt/resources/app.asar" \
+            "$extracted_asar"
+          node scripts/ci/verify-official-linux-features.js "$extracted_asar"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          path: /tmp/codex-upstream-ci/Codex.dmg
-          key: upstream-dmg-${{ env.DMG_CACHE_SCHEMA_VERSION }}-${{ steps.upstream-metadata.outputs.cache_segment }}
+          name: official-linux-${{ matrix.architecture }}-metadata
+          path: upstream/${{ matrix.architecture }}.json
+          retention-days: 7
 
-      - name: Download upstream DMG
+  package-matrix:
+    needs: signed-baseline
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-latest
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev gnupg rpm
+      - name: Resolve exact package matrix input
+        id: upstream
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+          EXPECTED_REPOSITORY_PATH: ${{ matrix.architecture == 'amd64' && inputs.amd64_repository_path || inputs.arm64_repository_path }}
+          EXPECTED_SHA256: ${{ matrix.architecture == 'amd64' && inputs.amd64_sha256 || inputs.arm64_sha256 }}
         run: |
           set -euo pipefail
-          scripts/ci/download-upstream-dmg.sh \
-            "$UPSTREAM_DMG_URL" \
-            "$UPSTREAM_DMG_PATH" \
-            --reuse-existing
+          mkdir -p upstream
+          package="$(node scripts/lib/upstream-linux-package.js \
+            --output-dir upstream/${{ matrix.architecture }} \
+            --metadata upstream/${{ matrix.architecture }}.json \
+            --key-base64 assets/openai-codex-linux-repository-key.gpg.base64 \
+            --arch ${{ matrix.architecture }})"
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+          node - "upstream/${{ matrix.architecture }}.json" <<'NODE'
+          const fs = require("node:fs");
+          const metadata = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          if (process.env.GITHUB_EVENT_NAME === "workflow_dispatch"
+              && (metadata.version !== process.env.EXPECTED_VERSION
+                || metadata.repositoryPath !== process.env.EXPECTED_REPOSITORY_PATH
+                || metadata.sha256 !== process.env.EXPECTED_SHA256)) {
+            throw new Error("package matrix input does not match the dispatched campaign");
+          }
+          NODE
+      - name: Build baseline and package formats
+        env:
+          CODEX_LINUX_FEATURES_CONFIG: ${{ github.workspace }}/linux-features/features.example.json
+          CODEX_TARGET_ARCH: ${{ matrix.architecture }}
+          PACKAGE_WITH_UPDATER: '0'
+        run: |
+          ./install.sh "${{ steps.upstream.outputs.package }}"
+          ./scripts/build-deb.sh
+          ./scripts/build-rpm.sh
+          PACMAN_STAGE_ONLY=1 ./scripts/build-pacman.sh
+          APPIMAGE_STAGE_ONLY=1 ./scripts/build-appimage.sh
 
-      - name: Record local DMG fingerprint
-        id: local-dmg
+  dock-icon-feature-alone:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev gnupg
+      - name: Build Dock icon feature alone from the signed package
+        env:
+          CODEX_LINUX_FEATURES_CONFIG: ${{ github.workspace }}/dock-icon-features.json
+          CODEX_INSTALL_DIR: ${{ github.workspace }}/codex-app-dock-icon
+          CODEX_PATCH_REPORT_JSON: ${{ github.workspace }}/dock-icon-report/patch-report.json
+          CODEX_TARGET_ARCH: amd64
         run: |
           set -euo pipefail
-
-          test -s "$UPSTREAM_DMG_PATH"
-
-          dmg_sha256="$(sha256sum "$UPSTREAM_DMG_PATH" | cut -d' ' -f1)"
-          dmg_size_bytes="$(stat -c '%s' "$UPSTREAM_DMG_PATH")"
-          tested_at_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-
+          cat > "$CODEX_LINUX_FEATURES_CONFIG" <<'JSON'
           {
-            echo "sha256=$dmg_sha256"
-            echo "size_bytes=$dmg_size_bytes"
-            echo "tested_at_utc=$tested_at_utc"
-          } >> "$GITHUB_OUTPUT"
-
-          cat > upstream-dmg-metadata.json <<JSON
-          {
-            "url": "$UPSTREAM_DMG_URL",
-            "path": "$UPSTREAM_DMG_PATH",
-            "last_modified": "${{ steps.upstream-metadata.outputs.last_modified }}",
-            "etag": "${{ steps.upstream-metadata.outputs.etag }}",
-            "content_length": "${{ steps.upstream-metadata.outputs.content_length }}",
-            "sha256": "$dmg_sha256",
-            "size_bytes": "$dmg_size_bytes",
-            "tested_at_utc": "$tested_at_utc",
-            "cache_schema_version": "${{ env.DMG_CACHE_SCHEMA_VERSION }}"
+            "enabled": ["ui-tweaks"],
+            "settings": {
+              "ui-tweaks": {
+                "tweaks": {
+                  "appearance": {
+                    "dockIcon": { "enabled": true }
+                  }
+                }
+              }
+            }
           }
           JSON
+          mkdir -p upstream
+          package="$(node scripts/lib/upstream-linux-package.js \
+            --output-dir upstream/amd64 \
+            --metadata upstream/amd64.json \
+            --key-base64 assets/openai-codex-linux-repository-key.gpg.base64 \
+            --arch amd64)"
+          ./install.sh "$package"
+          node scripts/ci/validate-patch-report.js "$CODEX_PATCH_REPORT_JSON" \
+            --require-enabled-feature ui-tweaks \
+            --require-applied feature:ui-tweaks:appearance-dock-icon-main-process \
+            --require-applied feature:ui-tweaks:appearance-dock-icon-settings-row
+          node - "$CODEX_PATCH_REPORT_JSON" <<'NODE'
+          const fs = require("node:fs");
+          const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          const dock = report.patches.filter(({ name }) => name.includes(":appearance-dock-icon-"));
+          if (dock.length !== 2 || dock.some(({ status }) => status !== "applied")) {
+            throw new Error(`Expected Dock descriptors 2/2 applied, got ${JSON.stringify(dock)}`);
+          }
+          NODE
+          payload="$CODEX_INSTALL_DIR/resources/dock-icon"
+          diff -u <(printf '%s\n' \
+            icon-chatgpt.png \
+            icon-codex-dark-color.png \
+            icon-codex-light.png \
+            sync-desktop-icon.sh | sort) \
+            <(find "$payload" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+          for resource in \
+            icon-chatgpt.png \
+            icon-codex-dark-color.png \
+            icon-codex-light.png \
+            sync-desktop-icon.sh; do
+            test -f "$payload/$resource"
+            test ! -L "$payload/$resource"
+          done
+          upstream_root="$(mktemp -d)"
+          dpkg-deb -x "$package" "$upstream_root"
+          cmp "$upstream_root/usr/lib/chatgpt/resources/icon-chatgpt.png" "$payload/icon-chatgpt.png"
+          cmp assets/codex-linux.png "$payload/icon-codex-dark-color.png"
+          cmp assets/codex-linux.png "$payload/icon-codex-light.png"
+          cmp linux-features/ui-tweaks/sync-desktop-icon.sh "$payload/sync-desktop-icon.sh"
+          test -x "$payload/sync-desktop-icon.sh"
+          hook="$CODEX_INSTALL_DIR/.codex-linux/prelaunch.d/ui-tweaks-dock-icon-cleanup.sh"
+          cmp linux-features/ui-tweaks/sync-desktop-icon.sh "$hook"
+          test -x "$hook"
 
-      - name: Build app from upstream DMG
-        id: acceptance-build
-        continue-on-error: true
-        env:
-          CODEX_ACCEPTANCE_DECISION_JSON: ${{ github.workspace }}/upstream-dmg-decision.json
-          CODEX_ACCEPTANCE_OVERRIDE: '0'
-          CODEX_ACCEPTANCE_SOURCE: github-actions
-          CODEX_UPSTREAM_DMG_METADATA_JSON: ${{ github.workspace }}/upstream-dmg-metadata.json
-          REBUILD_REPORT_DIR: ${{ github.workspace }}/upstream-acceptance
-        run: make build-app DMG=/tmp/codex-upstream-ci/Codex.dmg
-
-      - name: Import staged Browser clients through node_repl
-        if: steps.acceptance-build.outcome == 'success'
-        env:
-          CODEX_NODE_REPL_PATH: ${{ github.workspace }}/codex-app/resources/node_repl
-          CODEX_STAGED_BUNDLED_PLUGINS_ROOT: ${{ github.workspace }}/codex-app/resources/plugins/openai-bundled/plugins
-        run: node --test scripts/lib/browser-client-node-repl-runtime.test.js
-
-      - name: Upload upstream DMG metadata artifact
-        # The transactional installer records a decision before returning a
-        # rejected status, so diagnostics remain available on failed runs.
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: upstream-dmg-metadata
-          path: |
-            upstream-dmg-metadata.json
-            upstream-dmg-decision.json
-            upstream-acceptance/**/*.json
-          if-no-files-found: ignore
-
-      - name: Record missing decision in the summary
-        if: always()
-        run: |
-          if [ ! -f upstream-dmg-decision.json ]; then
-            {
-              echo "## Upstream DMG acceptance"
-              echo
-              echo "No decision artifact was produced; the run is inconclusive."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Enforce shared acceptance decision
-        if: always()
-        run: |
-          test -f upstream-dmg-decision.json
-          verdict="$(node -e 'console.log(require("./upstream-dmg-decision.json").verdict)')"
-          case "$verdict" in
-            accepted|accepted_with_warnings) exit 0 ;;
-            *) echo "Upstream DMG verdict: $verdict" >&2; exit 1 ;;
-          esac
-
-  reconcile-upstream-dmg-issue:
-    name: Reconcile Upstream DMG Drift Issue
-    needs: build-app-upstream-dmg
-    if: always() && github.event_name == 'schedule'
+  watchdog:
     runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-      issues: write
-
     steps:
-      - name: Check out trusted reconciliation code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-
-      - name: Download acceptance artifact
-        id: download
-        continue-on-error: true
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          name: upstream-dmg-metadata
-          path: acceptance-artifact
-
-      - name: Capture current upstream identity
-        id: current-identity
-        if: steps.download.outcome == 'success' && hashFiles('acceptance-artifact/upstream-dmg-decision.json') != ''
-        continue-on-error: true
+          node-version: 24
+      - name: Resolve and bind the two-architecture campaign
+        env:
+          EXPECTED_RELEASE_ID: ${{ inputs.release_id }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+          EXPECTED_AMD64_PATH: ${{ inputs.amd64_repository_path }}
+          EXPECTED_AMD64_SHA256: ${{ inputs.amd64_sha256 }}
+          EXPECTED_ARM64_PATH: ${{ inputs.arm64_repository_path }}
+          EXPECTED_ARM64_SHA256: ${{ inputs.arm64_sha256 }}
         run: |
           set -euo pipefail
-          headers_file="$(mktemp)"
-          trap 'rm -f "$headers_file"' EXIT
-          curl -fsSLI "$UPSTREAM_DMG_URL" > "$headers_file"
-          node - "$headers_file" > current-upstream-identity.json <<'NODE'
+          result="$RUNNER_TEMP/official-linux-release.json"
+          node scripts/automation/upstream-linux-package-watchdog/watchdog.js --json > "$result"
+          cat "$result"
+          node - "$result" <<'NODE'
           const fs = require("node:fs");
-          const headers = fs.readFileSync(process.argv[2], "utf8").split(/\r?\n/);
-          const metadata = {};
-          for (const line of headers) {
-            const match = line.match(/^([^:]+):\s*(.*)$/);
-            if (!match) continue;
-            const key = match[1].toLowerCase();
-            if (key === "etag") metadata.etag = match[2].replace(/^"|"$/g, "");
-            if (key === "last-modified") metadata.last_modified = match[2];
-            if (key === "content-length") metadata.content_length = match[2];
+          const actual = JSON.parse(fs.readFileSync(process.argv[2], "utf8")).release;
+          const expected = process.env;
+          if (process.env.GITHUB_EVENT_NAME === "workflow_dispatch"
+              && (!actual || actual.releaseId !== expected.EXPECTED_RELEASE_ID
+                || actual.version !== expected.EXPECTED_VERSION
+                || actual.packages?.amd64?.repositoryPath !== expected.EXPECTED_AMD64_PATH
+                || actual.packages?.amd64?.sha256 !== expected.EXPECTED_AMD64_SHA256
+                || actual.packages?.arm64?.repositoryPath !== expected.EXPECTED_ARM64_PATH
+                || actual.packages?.arm64?.sha256 !== expected.EXPECTED_ARM64_SHA256)) {
+            throw new Error("two-architecture signed release does not match dispatched campaign");
           }
-          process.stdout.write(`${JSON.stringify(metadata, null, 2)}\n`);
           NODE
 
-      - name: Create, update, or close the drift issue
-        if: steps.current-identity.outcome == 'success'
-        uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71 # v9.0.0
-        with:
-          script: |
-            const fs = require('fs');
-            const { httpIdentity } = require('./scripts/lib/upstream-dmg-acceptance.js');
-            const { reconcileUpstreamDmgIssue } = require('./scripts/ci/upstream-dmg-issue.js');
-            const decision = JSON.parse(fs.readFileSync('acceptance-artifact/upstream-dmg-decision.json', 'utf8'));
-            const currentMetadata = JSON.parse(fs.readFileSync('current-upstream-identity.json', 'utf8'));
-            const result = await reconcileUpstreamDmgIssue({
-              github,
-              repo: context.repo,
-              decision,
-              currentHttpIdentityKey: httpIdentity(currentMetadata)?.key ?? null,
-              scanAll: true,
-            });
-            core.info(`Upstream DMG issue reconciliation: ${JSON.stringify(result)}`);
+  official-linux-gate:
+    if: ${{ always() }}
+    needs:
+      - signed-baseline
+      - package-matrix
+      - dock-icon-feature-alone
+      - watchdog
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every official Linux validation job
+        env:
+          SIGNED_BASELINE_RESULT: ${{ needs.signed-baseline.result }}
+          PACKAGE_MATRIX_RESULT: ${{ needs.package-matrix.result }}
+          DOCK_ICON_FEATURE_ALONE_RESULT: ${{ needs.dock-icon-feature-alone.result }}
+          WATCHDOG_RESULT: ${{ needs.watchdog.result }}
+        run: |
+          test "$SIGNED_BASELINE_RESULT" = success
+          test "$PACKAGE_MATRIX_RESULT" = success
+          test "$DOCK_ICON_FEATURE_ALONE_RESULT" = success
+          test "$WATCHDOG_RESULT" = success

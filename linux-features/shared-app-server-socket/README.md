@@ -17,6 +17,24 @@ PATH` byte tunnel and its existing WebSocket transport. Other local clients use
 the same stock proxy command to attach to the Unix socket and receive the normal
 WebSocket `/rpc` byte stream. Closing Desktop stops the authority.
 
+The bundled CLI may publish the requested socket as a symlink to a private
+socket directory. Startup, attached CLI verification, and orphan cleanup
+validate the alias and its target, including ownership, directory permissions,
+and listener identity. Cleanup removes only the owned alias; the CLI owns the
+target socket. Unsafe targets and replaced aliases fail closed.
+
+The feature preserves the configuration overrides supplied by the official
+local transport. It forwards each opaque override as an ordered `-c` argument
+before the `app-server` subcommand when it starts the shared authority. It does
+not inspect or reconstruct bundled MCP server configuration. Desktop is the
+only authority owner. Other clients attach through the stock proxy and use the
+configuration of that Desktop-owned authority; they do not supply a second
+override list.
+
+The launcher uses the official CLI bundled in `resources/codex` by default.
+An explicit `CODEX_CLI_PATH` remains supported and is preserved by the feature
+hook.
+
 The default socket is scoped by Linux app id under `XDG_RUNTIME_DIR`, preventing
 side-by-side Desktop instances from sharing an authority accidentally. Override
 it with `CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET` when a stable path is required.
@@ -46,6 +64,33 @@ and process start identities are rechecked before signaling it. Unknown
 listeners, live Desktop owners, changed identities, and pathnames with multiple
 live listener inodes remain untouched. The same cleanup runs after Electron exits
 and before a later cold start.
+
+## Attached CLI
+
+Enable `shared-app-server-socket` with `make setup-native`, preserving the other
+feature IDs in `linux-features/features.json`, then run `make install-native`.
+Start Desktop and keep it running while using:
+
+```bash
+codex-desktop --cli [Codex CLI arguments]
+```
+
+Only an exact leading `--cli` selects attached mode. The launcher removes that
+selector and passes the remaining arguments through. Before the first literal
+`--`, caller endpoint, socket, authentication, authority, and discovery overrides
+are not accepted; arguments after `--` pass through literally. The socket is
+discovered from Desktop's verified authority record.
+
+With the feature enabled, exact `--cli -h`, `--cli --help`, `--cli -V`,
+`--cli --version` (without additional arguments), and `--cli help [args]` use the
+stock CLI without requiring Desktop; the same argument restrictions still apply.
+Other accepted commands fail closed if Desktop's authority is absent or unsafe.
+Attached mode does not start Desktop or recover an authority. If the feature is
+disabled, every leading `--cli` invocation fails before Desktop launches.
+
+To remove attached mode, remove only `shared-app-server-socket` from the existing
+`enabled` array in `linux-features/features.json` and run `make install-native`
+again. The SSH setup below uses the underlying socket and stock proxy separately.
 
 ## SSH setup
 
@@ -125,5 +170,7 @@ CODEX_CLI_PATH="/absolute/path/to/real/codex" node --test linux-features/shared-
 ```
 
 The feature depends on upstream's current local transport factory, WebSocket
-adapter, and `app-server proxy` command. Bundle drift causes the optional patch
-to warn and skip instead of modifying an unknown surface.
+adapter, configuration-override callback, and `app-server proxy` command. The
+descriptor leaves an unknown bundle byte-identical and reports a warning. When
+the feature is enabled, candidate acceptance treats that warning as a failure
+and rejects the build instead of installing a partial patch.

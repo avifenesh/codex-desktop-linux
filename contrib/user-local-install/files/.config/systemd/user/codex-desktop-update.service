@@ -1,6 +1,0 @@
-[Unit]
-Description=Update ChatGPT Desktop for Linux wrapper
-
-[Service]
-Type=oneshot
-ExecStart=%h/.local/bin/codex-desktop-update --quiet

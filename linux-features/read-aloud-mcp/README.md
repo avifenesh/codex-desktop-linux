@@ -27,6 +27,12 @@ launcher also syncs the bundled `Read Aloud` plugin into Codex's local plugin
 cache. The Linux Feature flag is the opt-in that makes the agent-facing tool
 available.
 
+`make install-native` builds `codex-read-aloud-linux` once before staging the
+package. Direct `./install.sh` builds must provide
+`target/release/codex-read-aloud-linux` or set
+`CODEX_LINUX_READ_ALOUD_MCP_SOURCE`. Updater rebuilds reuse the packaged
+artifact and never invoke Cargo.
+
 If you also want the response-level speaker button and settings UI, enable both
 features:
 

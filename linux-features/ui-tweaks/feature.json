@@ -1,12 +1,11 @@
 {
   "id": "ui-tweaks",
   "title": "UI Tweaks",
-  "description": "Optional UI customization patches for ChatGPT Desktop for Linux.",
+  "description": "Optional UI customization patches for ChatGPT Community.",
   "defaultEnabled": false,
   "entrypoints": {
     "patchDescriptors": "./patch.js",
-    "stageHook": "./stage.sh",
-    "cleanupHook": "./cleanup.sh"
+    "stageHook": "./stage.sh"
   },
   "runtimeHooks": {
     "prelaunch": {
@@ -15,10 +14,28 @@
       "mode": "0755"
     }
   },
+  "officialBundleAuditScenarios": [
+    {
+      "name": "extended-ui-font-size",
+      "settings": {
+        "tweaks": {
+          "appearance": {
+            "uiFontSize": {
+              "enabled": true
+            }
+          }
+        }
+      }
+    }
+  ],
   "tweaks": {
     "appearance": {
       "dockIcon": {
         "enabled": false
+      },
+      "uiFontSize": {
+        "enabled": false,
+        "max": 24
       }
     },
     "home": {

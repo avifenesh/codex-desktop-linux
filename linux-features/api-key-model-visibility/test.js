@@ -27,23 +27,29 @@ function applyPatchTwice(patchFn, source) {
 }
 
 function modelVisibilityHelperFixture() {
-  return "function q$r({additionalAvailableModels:e,authMethod:t,availableModels:n,model:r,useHiddenModels:i}){return e?.has(r.model)===!0||(i&&t!==`amazonBedrock`?n.has(r.model):!r.hidden)}";
+  return "function ati({additionalAvailableModels:e,authMethod:t,availableModels:n,isCustomModelProvider:r,model:i,useHiddenModels:a}){return e?.has(i.model)===!0||i.model!==`codex-auto-review`&&(a&&!r&&t!==`amazonBedrock`?n.has(i.model):!i.hidden)}";
 }
 
 function modelCatalogFixture() {
   // Current upstream shape (refactored): catalog filter delegates per-model
   // visibility to a q$r-style helper that owns the allowlist gate.
-  return "function vbe({additionalAvailableModels:e,authMethod:t,availableModels:n,defaultModel:r,enabledReasoningEfforts:i,includeUltraReasoningEffort:a,models:o,useHiddenModels:s}){let c=[],l=null;return o.forEach(r=>{if(q$r({additionalAvailableModels:e,authMethod:t,availableModels:n,model:r,useHiddenModels:s})){c.push(r),r.isDefault&&(l=r)}}),l??=c.find(e=>e.model===r)??null,{models:c,defaultModel:l}}" + modelVisibilityHelperFixture();
+  return "function iti({additionalAvailableModels:e,authMethod:t,availableModels:n,defaultModel:r,enabledReasoningEfforts:i,includeUltraReasoningEffort:a,isCustomModelProvider:o=!1,models:s,useHiddenModels:c}){let l=[],u=null;return s.forEach(r=>{if(ati({additionalAvailableModels:e,authMethod:t,availableModels:n,isCustomModelProvider:o,model:r,useHiddenModels:c})){l.push(r),r.isDefault&&(u=r)}}),u??=l.find(e=>e.model===r)??null,{models:l,defaultModel:u}}" + modelVisibilityHelperFixture();
 }
 
-function evaluateCatalog(source, authMethod, useHiddenModels = true) {
-  const catalog = Function(`${source};return vbe;`)();
+function evaluateCatalog(
+  source,
+  authMethod,
+  useHiddenModels = true,
+  isCustomModelProvider = false,
+) {
+  const catalog = Function(`${source};return iti;`)();
   return catalog({
     authMethod,
     availableModels: new Set(["gpt-5.5"]),
     defaultModel: "gpt-5.5",
     enabledReasoningEfforts: new Set(),
     includeUltraReasoningEffort: true,
+    isCustomModelProvider,
     models: [
       { model: "gpt-5.6-sol", hidden: false, isDefault: true },
       { model: "gpt-5.6-terra", hidden: false, isDefault: false },
@@ -130,6 +136,20 @@ test("API-key hosts still exclude models marked hidden by the CLI", () => {
   assert.equal(modelNames(evaluateCatalog(patched, "apikey")).includes("codex-auto-review"), false);
 });
 
+test("visible custom-provider models preserve upstream visibility", () => {
+  const source = modelCatalogFixture();
+  const patched = applyApiKeyModelVisibilityPatch(source);
+  const expected = modelNames(evaluateCatalog(source, "chatgpt", true, true));
+
+  assert.deepEqual(modelNames(evaluateCatalog(patched, "chatgpt", true, true)), expected);
+  assert.deepEqual(expected, [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+  ]);
+});
+
 test("ChatGPT and existing no-allowlist paths keep their upstream behavior", () => {
   const patched = applyApiKeyModelVisibilityPatch(modelCatalogFixture());
 
@@ -152,15 +172,15 @@ test("ChatGPT and existing no-allowlist paths keep their upstream behavior", () 
 test("drifted model visibility helpers fail soft and stay byte-identical", () => {
   const helper = modelVisibilityHelperFixture();
   const driftedHelpers = [
-    "function q$r({additionalAvailableModels:e,authMethod:t,availableModels:n,model:r,useHiddenModels:i}){return i&&t!==`amazonBedrock`;}",
-    "function q$r({additionalAvailableModels:e,authMethod:t,availableModels:n,model:r,useHiddenModels:i}){return i&&t!==`amazonBedrock`,n.has(r.model)}",
+    "function ati({additionalAvailableModels:e,authMethod:t,availableModels:n,isCustomModelProvider:r,model:i,useHiddenModels:a}){return a&&t!==`amazonBedrock`;}",
+    "function ati({additionalAvailableModels:e,authMethod:t,availableModels:n,isCustomModelProvider:r,model:i,useHiddenModels:a}){return a&&t!==`amazonBedrock`,n.has(i.model)}",
     helper.replace(
-      "?n.has(r.model):!r.hidden",
-      "?featureGate&&n.has(r.model):!r.hidden",
+      "?n.has(i.model):!i.hidden",
+      "?featureGate&&n.has(i.model):!i.hidden",
     ),
     helper.replace(
-      "?n.has(r.model):!r.hidden",
-      "?n.has(r.model):featureGate&&!r.hidden",
+      "?n.has(i.model):!i.hidden",
+      "?n.has(i.model):featureGate&&!i.hidden",
     ),
   ];
 

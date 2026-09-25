@@ -1,11 +1,14 @@
-# Native Setup
+# Native setup
 
-This project has two native install entrypoints:
+This guide covers a native `codex-desktop` installation built from OpenAI's
+official signed Linux package. The installed desktop entry is **ChatGPT
+Community**; the package, command, and installation directory remain
+`codex-desktop` and `/opt/codex-desktop`.
 
-- `make bootstrap-native` for the fastest non-interactive first install.
-- `make setup-native` for a guided checklist and optional Linux feature picker.
+## Fast native install
 
-## Fast Native Install
+On a supported Debian/Ubuntu, Fedora, openSUSE, Arch-derived, or compatible
+distribution:
 
 ```bash
 git clone https://github.com/ilysenko/codex-desktop-linux.git
@@ -13,97 +16,111 @@ cd codex-desktop-linux
 make bootstrap-native
 ```
 
-`make bootstrap-native` installs build dependencies, regenerates `codex-app/`,
-validates the cached upstream `Codex.dmg` and downloads it only when missing or
-stale, builds the matching native package, and installs the newest artifact
-from `dist/`.
+`bootstrap-native` runs the dependency installer, builds any release helpers
+needed by enabled features, verifies and stages the official application,
+builds the package format detected for the distribution, and installs the
+newest artifact from `dist/`.
 
-If dependencies are already installed:
+If dependencies are already present:
 
 ```bash
 make install-native
 ```
 
-To play a best-effort sound immediately before an interactive `sudo` password
-prompt, opt in with `CODEX_SUDO_ALERT=1`:
+`install-native` does not open the feature wizard. With no local feature file,
+it uses the committed empty configuration and preserves the official ASAR.
 
-```bash
-CODEX_SUDO_ALERT=1 make install-native
-CODEX_SUDO_ALERT=1 make bootstrap-native
-CODEX_SUDO_ALERT=1 make update-native
-```
+## Guided feature setup
 
-The alert is skipped while the existing `sudo` credential timestamp is valid.
-It tries the desktop sound system first and falls back to the terminal bell.
-Missing audio tools, sound files, or audio services never block installation.
-
-## Guided Setup
+Run the wizard before installation when you want optional features:
 
 ```bash
 make setup-native
+make install-native
 ```
 
-The wizard detects your distro, package manager, native package format, desktop
-session, GUI prompt helpers, `pkexec`, portal status, installed package state,
-updater state, and optional Linux feature manifests.
+The wizard:
 
-It can write the git-ignored `linux-features/features.json` file for the next
-build. You can choose features by id, number, or range in the prompt.
+1. checks the supported architecture and available tools;
+2. lists repository and user-local feature manifests;
+3. shows feature requirements, conflicts, and warnings;
+4. writes the gitignored `linux-features/features.json`;
+5. selects whether native packages include the updater;
+6. optionally previews narrowly scoped feature-data cleanup.
 
-The wizard is intentionally separate from `make bootstrap-native`,
-`make install-native`, `make package`, and `make install`, which stay
-non-interactive for scripts and CI.
+It never enables a feature implicitly, and setup alone does not build or
+install anything. Read the README inside each selected feature directory.
 
-## Non-Interactive Feature Selection
+## Non-interactive setup
+
+CI, repeatable local installs, and scripted test machines can configure the
+wizard through environment variables:
 
 ```bash
-CODEX_LINUX_FEATURES=remote-mobile-control,read-aloud \
-CODEX_LINUX_DISABLE_FEATURES=conversation-mode \
-PACKAGE_WITH_UPDATER=0 \
 CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
+CODEX_LINUX_FEATURES=read-aloud,ui-tweaks \
+CODEX_LINUX_DISABLE_FEATURES=pet-overlay \
+PACKAGE_WITH_UPDATER=1 \
 make setup-native
-```
 
-To have the wizard orchestrate existing install commands, opt in explicitly:
-
-```bash
-CODEX_BOOTSTRAP_DRY_RUN=1 \
-CODEX_BOOTSTRAP_INSTALL_DEPS=1 \
-CODEX_BOOTSTRAP_INSTALL_NATIVE=1 \
-make setup-native
-```
-
-```bash
-CODEX_BOOTSTRAP_INSTALL_DEPS=1 \
-CODEX_BOOTSTRAP_INSTALL_NATIVE=1 \
-make setup-native
-```
-
-Build-time feature changes only apply after rebuilding and reinstalling:
-
-```bash
 make install-native
 ```
 
-For manual-update packages:
+Useful controls:
+
+| Variable | Meaning |
+|---|---|
+| `CODEX_BOOTSTRAP_NONINTERACTIVE=1` | Never prompt |
+| `CODEX_BOOTSTRAP_DRY_RUN=1` | Preview install and cleanup actions |
+| `CODEX_BOOTSTRAP_INSTALL_DEPS=1` | Run `scripts/install-deps.sh` after checks |
+| `CODEX_BOOTSTRAP_INSTALL_NATIVE=1` | Run `make install-native` after checks |
+| `CODEX_LINUX_FEATURES=a,b` | Enable the listed feature IDs |
+| `CODEX_LINUX_DISABLE_FEATURES=a,b` | Disable the listed IDs |
+| `CODEX_LINUX_FEATURES_CONFIG=/path/file.json` | Use another local config path |
+| `CODEX_BOOTSTRAP_COLOR=auto\|1\|0` | Auto-detect, force, or disable ANSI color |
+| `PACKAGE_WITH_UPDATER=0` | Build a manual-update native package |
+
+A combined non-interactive run is possible:
 
 ```bash
-PACKAGE_WITH_UPDATER=0 make install-native
+CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
+CODEX_BOOTSTRAP_INSTALL_DEPS=1 \
+CODEX_BOOTSTRAP_INSTALL_NATIVE=1 \
+CODEX_LINUX_FEATURES=read-aloud \
+bash scripts/bootstrap-wizard.sh
 ```
 
-## Feature Cleanup
+## Build from a local package
 
-Disabling a feature in `features.json` affects the next rebuild. It does not
-delete local device keys, Read Aloud model files, plugin caches, Python
-runtimes, or services.
-
-Feature cleanup is separate and interactive:
+For an official package already downloaded from a source you trust:
 
 ```bash
-CODEX_BOOTSTRAP_CLEANUP_FEATURES=remote-mobile-control,read-aloud make setup-native
+UPSTREAM_DEB=/absolute/path/chatgpt_<version>_<arch>.deb make install-native
 ```
 
-Each deletion requires typing `DELETE <exact path>`. Preview cleanup targets:
+The build checks control metadata, architecture, required payload, and records
+the computed SHA-256. It does not independently prove the file's provenance,
+because signed repository discovery is intentionally skipped for explicit
+local input.
+
+## Native helper builds
+
+Most optional features are JavaScript descriptors or declarative resources.
+When an enabled feature needs a Rust helper, `make install-native` builds it
+once in release mode before staging the application. The packaged update-builder
+reuses these executables during future official-package updates and never ships
+or runs the full Cargo workspace.
+
+To limit local build concurrency:
+
+```bash
+MAX_BUILD_THREADS=4 make install-native
+```
+
+## Feature cleanup
+
+Disabling a feature controls the next build but does not automatically delete
+feature-owned user data. Preview a supported cleanup first:
 
 ```bash
 CODEX_BOOTSTRAP_DRY_RUN=1 \
@@ -111,11 +128,26 @@ CODEX_BOOTSTRAP_CLEANUP_FEATURES=remote-mobile-control,read-aloud \
 make setup-native
 ```
 
-## Color Output
+Then rerun without `CODEX_BOOTSTRAP_DRY_RUN=1` and confirm the exact paths.
+The wizard refuses paths outside known feature-owned locations. Remote Mobile
+Control device keys should be revoked before deletion. Read Aloud models,
+Python environments, and plugin caches are removed only when their exact paths
+are explicitly confirmed.
 
-The wizard uses ANSI color when the terminal supports it.
+## Verify the installation
 
 ```bash
-CODEX_BOOTSTRAP_COLOR=0 make setup-native  # disable
-CODEX_BOOTSTRAP_COLOR=1 make setup-native  # force
+command -v codex-desktop
+codex-desktop --diagnose
+systemctl --user status codex-update-manager.service --no-pager
 ```
+
+The official `chatgpt` and Community `codex-desktop` packages can coexist, but
+both retain the upstream `Codex` user profile. Fully exit one application
+before starting the other.
+
+## Uninstall
+
+Use the commands in the main [Uninstall guide](../README.md#uninstall). Native
+package removal preserves user data and should disable the update service. Do
+not delete `~/.codex` unless you intend to delete shared Codex state.

@@ -80,13 +80,13 @@ Area identifies the source-of-truth surface a reviewer must inspect.
 
 | Label | Use and justification |
 | --- | --- |
-| `area: build and install` | DMG extraction, dependencies, native modules, installer orchestration, or initial setup. |
+| `area: build and install` | Signed package extraction, dependencies, installer orchestration, or initial setup. |
 | `area: launcher and runtime` | Process lifecycle, the generated launcher source, webview serving, or packaged runtime behavior. |
 | `area: updater` | Update detection, rebuilds, installation, rollback, or persisted updater state. |
 | `area: native packaging` | Shared or format-specific `.deb`, RPM, or pacman package behavior. |
 | `area: appimage` | AppImage construction, runtime behavior, or desktop integration. |
 | `area: nix` | Flake outputs, Nix modules, fixed-output hashes, or Nix-only packaging. |
-| `area: upstream dmg` | Compatibility with, or drift in, the latest supported upstream DMG. |
+| `area: upstream package` | Compatibility with, or drift in, the latest signed stable upstream Linux package. |
 | `area: linux features` | The opt-in feature framework or one of its modules. |
 | `area: computer use` | Linux Computer Use backends, helpers, capture, input, or desktop control. |
 | `area: integrations` | Browser, desktop environment, portal, or other external integration boundaries. |
@@ -106,7 +106,7 @@ Status records the single next condition needed to move an issue forward.
 | `status: needs information` | The reporter must provide named missing details, such as logs, versions, or commands. |
 | `status: needs reproduction` | The report is understandable but still needs a reliable reproduction or failing test. |
 | `status: ready for work` | The problem is confirmed, scoped, and has enough acceptance criteria to implement. |
-| `status: awaiting upstream` | Progress depends on an upstream DMG, dependency, or external project. Name that dependency in the thread. |
+| `status: awaiting upstream` | Progress depends on an upstream package, dependency, or external project. Name that dependency in the thread. |
 | `status: needs maintainer decision` | Product direction, architecture, scope, or policy must be decided by a maintainer. |
 | `status: blocked` | A documented non-upstream blocker prevents progress. Replace it when the blocker clears. |
 
@@ -197,7 +197,7 @@ protection, review requirements, and the contributor workflow in
 
 Repository-owned issue producers must read their labels from the policy and
 apply a complete deterministic classification. The Computer Use sync reminder
-and upstream DMG drift reconciler follow this rule. Existing item automation,
+and upstream package drift reconciler follow this rule. Existing item automation,
 including the contributor pull request limit, must inspect
 `workflow: manual only` before any comment, edit, classification, close, or
 merge operation and leave that item for staff.
@@ -229,7 +229,7 @@ The migration is intentionally split:
 
 1. Merge the reviewed policy, documentation, script, tests, and workflow.
 2. Update or disable any external automation that still writes retired names.
-   The committed Computer Use and upstream DMG issue producers read their
+   The committed Computer Use and upstream package issue producers read their
    classifications from the policy.
 3. Run `plan`. It is read-only and needs no confirmation text.
    It also reports open items whose migrated labels still need a required
@@ -280,8 +280,8 @@ the new taxonomy or alter native GitHub state.
 
 ## Examples
 
-A confirmed latest-DMG regression in an opt-in feature could be classified as
-`type: bug`, `area: upstream dmg`, `area: linux features`,
+A confirmed latest-package regression in an opt-in feature could be classified as
+`type: bug`, `area: upstream package`, `area: linux features`,
 `status: ready for work`, and an evidence-based impact.
 
 A pull request that changes this label policy is `type: maintenance`,

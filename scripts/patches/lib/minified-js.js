@@ -12,15 +12,6 @@ function requireName(source, moduleName) {
     return directMatch[1];
   }
 
-  if (moduleName === "electron") {
-    const wrappedMatch = source.match(
-      new RegExp(
-        `([A-Za-z_$][\\w$]*)=(?:\\/\\*codexLinuxExternalOpenTarget\\*\\/)?codexLinuxPatchExternalOpen\\(require\\(([\\\`"'])${escaped}\\2\\)\\)`,
-      ),
-    );
-    return wrappedMatch?.[1] ?? null;
-  }
-
   return null;
 }
 

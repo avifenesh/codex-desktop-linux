@@ -1,151 +1,68 @@
-# Agent Validation Playbook
+# Validation playbook
 
-Run the smallest validation set that matches the touched surface, then broaden
-when the change crosses package formats, launcher/runtime behavior, updater
-state, or patch drift handling.
-
-## Shell, Launcher, And Package Scripts
+## Fast source checks
 
 ```bash
-bash -n install.sh
-bash -n scripts/lib/*.sh
-bash -n launcher/start.sh.template
-bash -n scripts/build-deb.sh
-bash -n scripts/build-rpm.sh
-bash -n scripts/build-pacman.sh
-bash -n scripts/build-appimage.sh
-```
-
-For launcher behavior changes, rebuild or inspect the generated launcher:
-
-```bash
-sed -n '1,160p' codex-app/start.sh
-```
-
-If the change affects webview startup probes, run:
-
-```bash
-bash tests/webview_probe_equivalence.sh
-```
-
-## Patch Registry And Linux Features
-
-```bash
-node --test scripts/patch-linux-window-ui.test.js
-node --test linux-features/*/test.js
+bash -n install.sh scripts/lib/*.sh launcher/start.sh.template
 bash tests/scripts_smoke.sh
-```
-
-For upstream drift or protected surface analysis:
-
-```bash
-make inspect-upstream DMG=/path/to/Codex.dmg
-make inspect-upstream-intel-devcontainer
-```
-
-For patch report validation:
-
-```bash
-scripts/ci/validate-patch-report.js codex-app/.codex-linux/patch-report.json
-```
-
-Local installs and scheduled CI share `scripts/validate-upstream-dmg.js` and
-`scripts/lib/upstream-dmg-release-profile.js`. Acceptance must inspect only the
-features recorded as enabled in the candidate patch report. Add fixtures
-proving enabled feature drift rejects promotion and disabled features are not
-probed. Exercise decision and issue behavior with:
-
-```bash
-node --test scripts/ci/upstream-dmg-acceptance.test.js
-node --test scripts/ci/upstream-dmg-issue.test.js
-```
-
-## Rust Crates
-
-Updater:
-
-```bash
-cargo check -p codex-update-manager
+node --test scripts/lib/upstream-linux-package.test.js
+node --test scripts/patch-linux-window-ui.test.js scripts/lib/linux-features.test.js linux-features/*/test.js
 cargo test -p codex-update-manager
+cargo clippy -p codex-update-manager --all-targets -- -D warnings
 ```
 
-Linux Computer Use:
+## Source-security matrix
 
-```bash
-cargo check -p codex-computer-use-linux
-cargo test -p codex-computer-use-linux
-```
+Cover valid, corrupt, unsigned, and wrong-key `InRelease`; `Packages` digest
+mismatch; package digest mismatch; wrong name/version/architecture; unsupported
+architecture; and incomplete official payload. These are unit-tested with local
+fixtures and fail closed.
 
-Read Aloud:
+## Baseline build
 
-```bash
-cargo check -p codex-read-aloud-linux
-cargo test -p codex-read-aloud-linux
-```
+Build with `features.example.json`, inspect `.codex-linux/build-info.json`, and
+compare the official and staged `resources/app.asar` hashes. Confirm no runtime
+replacement, external CLI, or local content server appears in the staged tree.
+Confirm the desktop name is **ChatGPT Community**, its icon has the community
+mark, and the package/bin/path identity is still `codex-desktop`.
 
-Record & Replay:
+Smoke-test login, project open, terminal, file picker, URI launch, tray,
+notifications, clean quit, and a second launch on GNOME Wayland, KDE Wayland,
+and X11. Verify official/custom coexistence and shared-profile single-instance
+behavior.
 
-```bash
-cargo check -p codex-record-replay-linux
-cargo test -p codex-record-replay-linux
-```
+When upgrading an installation made by the former Linux port, also exercise the
+recognized Browser/Chrome cache migration. Confirm the official clients use
+`/tmp/codex-browser-use`, the Chrome app-server parent is not group-writable,
+and unrelated/user-authored plugin caches are unchanged.
 
-## Package Payloads
+## Features
 
-Build the relevant package format and inspect metadata/layout:
+Build every retained feature independently and run its adjacent test. Enabled
+drift must reject a candidate; disabled drift must not be probed. Retired IDs
+are ignored and arbitrary unknown IDs fail.
 
-```bash
-./scripts/build-deb.sh
-dpkg-deb -I dist/codex-desktop_*.deb
-dpkg-deb -c dist/codex-desktop_*.deb | sed -n '1,80p'
-```
+## Package matrix
 
-Run other package formats when shared payload logic, package hooks, updater
-bundles, desktop files, permissions, or runtime helpers are touched:
+Inspect deb, RPM, pacman, AppImage, and Nix outputs on both architectures. Check
+official ELF/runtime payload, dependencies, desktop identity, AppArmor path,
+updater payload, and absence of official package-manager configuration.
+AppImage must never inject `--no-sandbox`.
 
-```bash
-./scripts/build-rpm.sh
-./scripts/build-pacman.sh
-./scripts/build-appimage.sh
-```
+## Updater
 
-Use a package version override when a deterministic package name helps review:
+Test new/unchanged releases, interrupted download, trust failures,
+build-while-running, promotion-after-exit, rollback, cleanup, and state-schema
+migration without losing installed/rollback artifacts.
 
-```bash
-PACKAGE_VERSION=2026.03.24.120000+deadbeef ./scripts/build-deb.sh
-```
-
-## Updater Runtime Checks
-
-When updater behavior changes, inspect service and state:
-
-```bash
-systemctl --user status codex-update-manager.service
-codex-update-manager status --json
-sed -n '1,120p' ~/.local/state/codex-update-manager/state.json
-sed -n '1,160p' ~/.local/state/codex-update-manager/service.log
-```
-
-For rebuild candidates:
-
-```bash
-./scripts/rebuild-candidate.sh
-./scripts/rebuild-candidate.sh --install
-```
-
-## Broad CI
-
-Run broader local CI when a change affects multiple package formats, updater
-install flows, launcher/runtime behavior, Nix pins, or core patch policy:
+## Broad validation
 
 ```bash
 ./scripts/ci-local.sh pr
 ./scripts/ci-local.sh all
+nix flake check
+nix build .#codex-desktop
 ```
 
-For Nix hash refreshes:
-
-```bash
-scripts/ci/update-nix-hashes.sh
-scripts/ci/validate-nix-pins.sh
-```
+Finish with a repository search for retired active architecture references and
+a diff review for orphan helpers, tests, workflows, fixtures, and docs.

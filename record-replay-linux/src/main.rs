@@ -7,17 +7,15 @@ use codex_record_replay_linux::{
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    if matches!(
-        &cli.command,
+    match &cli.command {
         Commands::Mcp
-            | Commands::EventStream {
-                command: EventStreamCommand::Mcp,
-            }
-            | Commands::Skysight {
-                command: SkysightCommand::Mcp,
-            }
-    ) {
-        return mcp::serve_mcp().await;
+        | Commands::EventStream {
+            command: EventStreamCommand::Mcp,
+        } => return mcp::serve_event_stream_mcp().await,
+        Commands::Skysight {
+            command: SkysightCommand::Mcp,
+        } => return mcp::serve_skysight_mcp().await,
+        _ => {}
     }
 
     let response = command_json(cli.command).await?;

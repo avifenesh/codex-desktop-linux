@@ -22,7 +22,55 @@ ensure_file_exists() {
 ensure_app_layout() {
     [ -d "$APP_DIR" ] || error "Missing app directory: $APP_DIR. Run ./install.sh first."
     [ -x "$APP_DIR/start.sh" ] || error "Missing launcher: $APP_DIR/start.sh"
-    [ -f "$APP_DIR/content/webview/index.html" ] || error "Missing webview entrypoint: $APP_DIR/content/webview/index.html. Run ./install.sh first."
+    [ -x "$APP_DIR/ChatGPT" ] || error "Missing official ChatGPT runtime: $APP_DIR/ChatGPT. Run ./install.sh first."
+    [ -f "$APP_DIR/resources/app.asar" ] || error "Missing official app.asar: $APP_DIR/resources/app.asar. Run ./install.sh first."
+    [ -x "$APP_DIR/resources/codex" ] || error "Missing bundled Codex CLI: $APP_DIR/resources/codex. Run ./install.sh first."
+}
+
+upstream_linux_control_field() {
+    local field_name="$1"
+    local control_file="$APP_DIR/.codex-linux/upstream-package/control"
+    local node_bin
+
+    ensure_file_exists "$control_file" "official Linux package control metadata"
+    node_bin="$(package_node_binary)"
+    "$node_bin" - "$control_file" "$field_name" <<'NODE'
+const fs = require("node:fs");
+const [controlPath, fieldName] = process.argv.slice(2);
+const fields = new Map();
+let current = null;
+for (const line of fs.readFileSync(controlPath, "utf8").split(/\r?\n/)) {
+  if (/^[ \t]/.test(line) && current != null) {
+    fields.set(current, `${fields.get(current)} ${line.trim()}`);
+    continue;
+  }
+  const separator = line.indexOf(":");
+  if (separator < 1) {
+    current = null;
+    continue;
+  }
+  current = line.slice(0, separator);
+  fields.set(current, line.slice(separator + 1).trim());
+}
+process.stdout.write(fields.get(fieldName) ?? "");
+NODE
+}
+
+official_payload_deb_architecture() {
+    local architecture
+    architecture="$(upstream_linux_control_field Architecture)"
+    case "$architecture" in
+        amd64|arm64) printf '%s\n' "$architecture" ;;
+        *) error "Unsupported official payload architecture '${architecture:-missing}'; expected amd64 or arm64" ;;
+    esac
+}
+
+assert_official_payload_architecture() {
+    local host_architecture="$1"
+    local payload_architecture
+    payload_architecture="$(official_payload_deb_architecture)"
+    [ "$payload_architecture" = "$host_architecture" ] || \
+        error "Official payload architecture is '$payload_architecture', but this package builder targets '$host_architecture'"
 }
 
 sed_escape_replacement() {
@@ -44,12 +92,6 @@ package_with_updater_enabled() {
 }
 
 package_node_binary() {
-    local managed_node="${APP_DIR:-}/resources/node-runtime/bin/node"
-    if [ -x "$managed_node" ] && [ "$("$managed_node" -e 'process.stdout.write("ok")' 2>/dev/null || true)" = "ok" ]; then
-        printf '%s\n' "$managed_node"
-        return 0
-    fi
-
     command -v node >/dev/null 2>&1 || error "node is required"
     command -v node
 }
@@ -96,17 +138,6 @@ fs.writeFileSync(targetPath, `${JSON.stringify(config, null, 2)}\n`);
 NODE
 }
 
-stage_update_builder_global_dictation_source() {
-    local update_builder_root="$1"
-    local source_root="$REPO_DIR/global-dictation-linux"
-    local target_root="$update_builder_root/global-dictation-linux"
-
-    mkdir -p "$target_root/src"
-    cp "$source_root/Cargo.toml" "$target_root/Cargo.toml"
-    cp "$source_root/Cargo.lock" "$target_root/Cargo.lock"
-    cp -R "$source_root/src/." "$target_root/src/"
-}
-
 linux_features_root_path() {
     local helper="$REPO_DIR/scripts/lib/linux-features.js"
     local node_bin
@@ -126,7 +157,53 @@ stage_update_builder_linux_features_tree() {
     [ -d "$source_root" ] || error "Missing Linux features root: $source_root"
 
     mkdir -p "$target"
-    cp -a "$source_root/." "$target/"
+    cp "$source_root/features.example.json" "$target/features.example.json"
+    cp "$source_root/compatibility.json" "$target/compatibility.json"
+
+    local feature_id relative_dir source destination feature_dirs_file
+    feature_dirs_file="$(mktemp "$target/.enabled-feature-dirs.XXXXXX")"
+    if ! "$(package_node_binary)" "$REPO_DIR/scripts/lib/linux-features.js" \
+        --enabled-feature-dirs0 > "$feature_dirs_file"; then
+        rm -f "$feature_dirs_file"
+        error "Failed to discover enabled Linux features for the update-builder"
+    fi
+    while IFS= read -r -d '' feature_id && IFS= read -r -d '' relative_dir; do
+        source="$source_root/$relative_dir"
+        destination="$target/$relative_dir"
+        [ -d "$source" ] || error "Missing enabled Linux feature: $feature_id ($source)"
+        mkdir -p "$(dirname "$destination")"
+        cp -a "$source" "$destination"
+        find "$destination" -type d -name target -prune -exec rm -rf {} +
+        if [ "$feature_id" = "directory-only-working-tree-watch" ]; then
+            rm -rf "$destination/acceptance"
+        fi
+        if [ "$feature_id" = "mcp-helper-reaper" ]; then
+            rm -rf \
+                "$destination/reaper/src" \
+                "$destination/reaper/Cargo.toml" \
+                "$destination/reaper/Cargo.lock"
+        fi
+    done < "$feature_dirs_file"
+    rm -f "$feature_dirs_file"
+}
+
+stage_update_builder_enabled_plugin_templates() {
+    local update_builder_root="$1"
+    local feature_id
+    local plugin_id
+
+    while IFS= read -r feature_id; do
+        case "$feature_id" in
+            computer-use-linux) plugin_id="computer-use" ;;
+            read-aloud-mcp) plugin_id="read-aloud" ;;
+            *) continue ;;
+        esac
+        local source="$REPO_DIR/plugins/openai-bundled/plugins/$plugin_id"
+        local target="$update_builder_root/plugins/openai-bundled/plugins/$plugin_id"
+        [ -d "$source" ] || error "Missing enabled Linux feature plugin template: $source"
+        mkdir -p "$(dirname "$target")"
+        cp -a "$source" "$target"
+    done < <("$(package_node_binary)" "$REPO_DIR/scripts/lib/linux-features.js" --enabled)
 }
 
 run_linux_feature_package_hooks() {
@@ -243,8 +320,8 @@ render_desktop_entry() {
     local rendered_target="$target.tmp"
 
     package_name="$(sed_escape_replacement "$PACKAGE_NAME")"
-    display_name="$(sed_escape_replacement "${PACKAGE_DISPLAY_NAME:-ChatGPT}")"
-    comment="$(sed_escape_replacement "${PACKAGE_COMMENT:-Run ChatGPT Desktop on Linux}")"
+    display_name="$(sed_escape_replacement "${PACKAGE_DISPLAY_NAME:-ChatGPT Community}")"
+    comment="$(sed_escape_replacement "${PACKAGE_COMMENT:-Community Linux distribution based on OpenAI ChatGPT}")"
 
     awk \
         -v package_name="$package_name" \
@@ -303,32 +380,6 @@ resolve_package_icon_source() {
     if [ -n "${PACKAGE_ICON_SOURCE:-}" ]; then
         printf '%s\n' "$PACKAGE_ICON_SOURCE"
         return 0
-    fi
-
-    local expected_icon="$APP_DIR/.codex-linux/$PACKAGE_NAME.png"
-    if [ -f "$expected_icon" ]; then
-        printf '%s\n' "$expected_icon"
-        return 0
-    fi
-
-    local icon_dir="$APP_DIR/.codex-linux"
-    local -a candidates=()
-    local candidate
-    if [ -d "$icon_dir" ]; then
-        while IFS= read -r -d '' candidate; do
-            candidates+=("$candidate")
-        done < <(
-            find "$icon_dir" -maxdepth 1 -type f -name '*.png' -print0 |
-                sort -z
-        )
-    fi
-    if [ "${#candidates[@]}" -eq 1 ]; then
-        printf '%s\n' "${candidates[0]}"
-        return 0
-    fi
-
-    if [ "${#candidates[@]}" -gt 1 ]; then
-        warn "Multiple generated app icons found in $icon_dir; using the bundled Linux icon"
     fi
     printf '%s\n' "$REPO_DIR/assets/codex-linux.png"
 }
@@ -481,6 +532,40 @@ SCRIPT
     chmod 0755 "$target"
 }
 
+append_deb_apparmor_postinst() {
+    local target="$1"
+    local package_name
+    package_name="$(sed_escape_replacement "$PACKAGE_NAME")"
+    sed -i '/^exit 0$/d' "$target"
+    cat >> "$target" <<SCRIPT
+
+if command -v aa-enabled >/dev/null 2>&1 &&
+   command -v apparmor_parser >/dev/null 2>&1 &&
+   aa-enabled --quiet && [ -f "/etc/apparmor.d/$package_name" ]; then
+    apparmor_parser -r -W -T "/etc/apparmor.d/$package_name" >/dev/null 2>&1 || true
+fi
+
+exit 0
+SCRIPT
+}
+
+stage_deb_maintainer_scripts() {
+    local root="$1"
+    local package_name="$2"
+    local postinst_template="$3"
+    local prerm_template="$4"
+    local postrm_template="$5"
+
+    mkdir -p "$root/DEBIAN"
+    sed \
+        -e "s|/opt/codex-desktop|/opt/$package_name|g" \
+        -e "s|codex_desktop_repair_system_package_shadow_entries codex-desktop|codex_desktop_repair_system_package_shadow_entries $package_name|g" \
+        "$postinst_template" > "$root/DEBIAN/postinst"
+    cp "$prerm_template" "$root/DEBIAN/prerm"
+    cp "$postrm_template" "$root/DEBIAN/postrm"
+    chmod 0755 "$root/DEBIAN/postinst" "$root/DEBIAN/prerm" "$root/DEBIAN/postrm"
+}
+
 write_no_updater_deb_prerm() {
     local target="$1"
     local package_name
@@ -593,9 +678,22 @@ updater_build_output_binary() {
 ensure_updater_binary() {
     local cargo_cmd=""
     local built_binary=""
+    local deleted_suffix=" (deleted)"
+    local recovered_binary=""
 
     if ! package_with_updater_enabled; then
         return
+    fi
+
+    if [ ! -x "$UPDATER_BINARY_SOURCE" ]; then
+        case "$UPDATER_BINARY_SOURCE" in
+            *"$deleted_suffix")
+                recovered_binary="${UPDATER_BINARY_SOURCE%"$deleted_suffix"}"
+                if [ -x "$recovered_binary" ]; then
+                    UPDATER_BINARY_SOURCE="$recovered_binary"
+                fi
+                ;;
+        esac
     fi
 
     if [ -x "$UPDATER_BINARY_SOURCE" ] && ! updater_binary_is_stale "$UPDATER_BINARY_SOURCE"; then
@@ -782,7 +880,6 @@ write_update_builder_manifest() {
     (
         cd "$update_builder_root"
         find . -mindepth 1 -type f \
-            ! -path './node-runtime/*' \
             ! -path './.codex-linux/update-builder-manifest.txt' \
             -printf '%P\n' | LC_ALL=C sort > "$manifest"
     )
@@ -803,7 +900,8 @@ stage_common_package_files() {
         "$root/opt" \
         "$root/usr/bin" \
         "$root/usr/share/applications" \
-        "$root/usr/share/icons/hicolor/256x256/apps"
+        "$root/usr/share/icons/hicolor/256x256/apps" \
+        "$root/etc/apparmor.d"
     if package_with_updater_enabled; then
         mkdir -p \
             "$root/usr/lib/systemd/user" \
@@ -814,10 +912,11 @@ stage_common_package_files() {
     cp -aT "$APP_DIR" "$app_root"
     mkdir -p "$app_root/.codex-linux"
     cp "$ICON_SOURCE" "$app_root/.codex-linux/$PACKAGE_NAME.png"
-    cp "$REPO_DIR/launcher/cli-launch-path.py" "$app_root/.codex-linux/cli-launch-path.py"
+    cp "$ICON_SOURCE" "$app_root/resources/icon-chatgpt.png"
     render_desktop_entry_doctor_helper "$app_root/.codex-linux/codex-desktop-entry-doctor.sh"
     render_desktop_entry "$root/usr/share/applications/$PACKAGE_NAME.desktop"
     cp "$ICON_SOURCE" "$root/usr/share/icons/hicolor/256x256/apps/$PACKAGE_NAME.png"
+    render_apparmor_profile "$root/etc/apparmor.d/$PACKAGE_NAME"
     if package_with_updater_enabled; then
         cp "$UPDATER_BINARY_SOURCE" "$root/usr/bin/codex-update-manager"
         chmod 0755 "$root/usr/bin/codex-update-manager"
@@ -832,101 +931,126 @@ stage_common_package_files() {
     render_packaged_runtime_helper "$app_root/.codex-linux/codex-packaged-runtime.sh"
 }
 
+render_apparmor_profile() {
+    local target="$1"
+    cat > "$target" <<PROFILE
+abi <abi/4.0>,
+include <tunables/global>
+
+profile $PACKAGE_NAME "/opt/$PACKAGE_NAME/ChatGPT" flags=(unconfined) {
+  userns,
+  include if exists <local/$PACKAGE_NAME>
+}
+PROFILE
+    chmod 0644 "$target"
+}
+
 stage_update_builder_bundle() {
     local root="$1"
     local update_builder_root="$root/opt/$PACKAGE_NAME/update-builder"
-    local node_runtime_source="$APP_DIR/resources/node-runtime"
+    local relative
 
     mkdir -p \
-        "$update_builder_root/scripts" \
         "$update_builder_root/scripts/lib" \
         "$update_builder_root/scripts/patches" \
         "$update_builder_root/launcher" \
-        "$update_builder_root/linux-features" \
         "$update_builder_root/packaging/linux" \
         "$update_builder_root/assets"
 
     cp "$REPO_DIR/install.sh" "$update_builder_root/install.sh"
-    cp "$REPO_DIR/CHANGELOG.md" "$update_builder_root/CHANGELOG.md"
     cp "$REPO_DIR/launcher/start.sh.template" "$update_builder_root/launcher/start.sh.template"
-    cp "$REPO_DIR/launcher/cli-launch-path.py" "$update_builder_root/launcher/cli-launch-path.py"
-    cp "$REPO_DIR/launcher/webview-server.py" "$update_builder_root/launcher/webview-server.py"
-    cp "$REPO_DIR/Cargo.toml" "$update_builder_root/Cargo.toml"
-    cp "$REPO_DIR/Cargo.lock" "$update_builder_root/Cargo.lock"
-    cp -r "$REPO_DIR/computer-use-linux" "$update_builder_root/computer-use-linux"
-    cp -r "$REPO_DIR/notification-actions-linux" "$update_builder_root/notification-actions-linux"
-    cp -r "$REPO_DIR/record-replay-linux" "$update_builder_root/record-replay-linux"
-    cp -r "$REPO_DIR/read-aloud-linux" "$update_builder_root/read-aloud-linux"
-    cp -r "$REPO_DIR/updater" "$update_builder_root/updater"
-    mkdir -p "$update_builder_root/plugins/openai-bundled/plugins"
-    cp -r "$REPO_DIR/plugins/openai-bundled/plugins/computer-use" \
-        "$update_builder_root/plugins/openai-bundled/plugins/computer-use"
-    cp -r "$REPO_DIR/plugins/openai-bundled/plugins/read-aloud" \
-        "$update_builder_root/plugins/openai-bundled/plugins/read-aloud"
     cp "$REPO_DIR/scripts/build-deb.sh" "$update_builder_root/scripts/build-deb.sh"
     cp "$REPO_DIR/scripts/build-rpm.sh" "$update_builder_root/scripts/build-rpm.sh"
     cp "$REPO_DIR/scripts/build-pacman.sh" "$update_builder_root/scripts/build-pacman.sh"
-    cp "$REPO_DIR/scripts/rebuild-candidate.sh" "$update_builder_root/scripts/rebuild-candidate.sh"
-    cp "$REPO_DIR/scripts/validate-upstream-dmg.js" "$update_builder_root/scripts/validate-upstream-dmg.js"
     cp "$REPO_DIR/scripts/patch-linux-window-ui.js" "$update_builder_root/scripts/patch-linux-window-ui.js"
-    cp -r "$REPO_DIR/scripts/patches/." "$update_builder_root/scripts/patches/"
-    cp "$REPO_DIR/scripts/lib/package-common.sh" "$update_builder_root/scripts/lib/package-common.sh"
-    cp "$REPO_DIR/scripts/lib/patch-chrome-plugin.js" "$update_builder_root/scripts/lib/patch-chrome-plugin.js"
-    cp "$REPO_DIR/scripts/lib/node-runtime.sh" "$update_builder_root/scripts/lib/node-runtime.sh"
-    cp "$REPO_DIR/scripts/lib/upstream-dmg-intel.js" "$update_builder_root/scripts/lib/upstream-dmg-intel.js"
-    cp "$REPO_DIR/scripts/lib/install-helpers.sh" "$update_builder_root/scripts/lib/install-helpers.sh"
-    cp "$REPO_DIR/scripts/lib/process-detection.sh" "$update_builder_root/scripts/lib/process-detection.sh"
-    cp "$REPO_DIR/scripts/lib/dmg.sh" "$update_builder_root/scripts/lib/dmg.sh"
-    cp "$REPO_DIR/scripts/lib/native-modules.sh" "$update_builder_root/scripts/lib/native-modules.sh"
-    cp "$REPO_DIR/scripts/lib/asar-patch.sh" "$update_builder_root/scripts/lib/asar-patch.sh"
-    cp "$REPO_DIR/scripts/lib/webview-install.sh" "$update_builder_root/scripts/lib/webview-install.sh"
-    cp "$REPO_DIR/scripts/lib/bundled-plugins.sh" "$update_builder_root/scripts/lib/bundled-plugins.sh"
-    cp "$REPO_DIR/scripts/lib/notification-actions.sh" "$update_builder_root/scripts/lib/notification-actions.sh"
-    cp "$REPO_DIR/scripts/lib/patch-browser-client-iab-socket-scope.js" \
-        "$update_builder_root/scripts/lib/patch-browser-client-iab-socket-scope.js"
-    cp "$REPO_DIR/scripts/lib/linux-features.js" "$update_builder_root/scripts/lib/linux-features.js"
-    cp "$REPO_DIR/scripts/lib/linux-features.sh" "$update_builder_root/scripts/lib/linux-features.sh"
-    cp "$REPO_DIR/scripts/lib/linux-target-context.js" "$update_builder_root/scripts/lib/linux-target-context.js"
-    cp "$REPO_DIR/scripts/lib/linux-update-bridge-patch.js" "$update_builder_root/scripts/lib/linux-update-bridge-patch.js"
-    cp "$REPO_DIR/scripts/lib/patch-report.js" "$update_builder_root/scripts/lib/patch-report.js"
-    cp "$REPO_DIR/scripts/lib/patch-validation.js" "$update_builder_root/scripts/lib/patch-validation.js"
-    cp "$REPO_DIR/scripts/lib/upstream-dmg-acceptance.js" "$update_builder_root/scripts/lib/upstream-dmg-acceptance.js"
-    cp "$REPO_DIR/scripts/lib/upstream-dmg-release-profile.js" "$update_builder_root/scripts/lib/upstream-dmg-release-profile.js"
-    cp "$REPO_DIR/scripts/lib/candidate-install.sh" "$update_builder_root/scripts/lib/candidate-install.sh"
-    cp "$REPO_DIR/scripts/lib/candidate-promotion.py" "$update_builder_root/scripts/lib/candidate-promotion.py"
-    cp "$REPO_DIR/scripts/lib/rebuild-report.sh" "$update_builder_root/scripts/lib/rebuild-report.sh"
-    cp "$REPO_DIR/scripts/lib/build-info.js" "$update_builder_root/scripts/lib/build-info.js"
-    cp "$REPO_DIR/scripts/lib/build-info.sh" "$update_builder_root/scripts/lib/build-info.sh"
-    cp "$REPO_DIR/packaging/linux/control" "$update_builder_root/packaging/linux/control"
-    cp "$REPO_DIR/packaging/linux/codex-desktop.spec" "$update_builder_root/packaging/linux/codex-desktop.spec"
-    cp "$REPO_DIR/packaging/linux/codex-desktop.desktop" "$update_builder_root/packaging/linux/codex-desktop.desktop"
-    cp "$REPO_DIR/packaging/linux/codex-desktop-entry-doctor.sh" \
-        "$update_builder_root/packaging/linux/codex-desktop-entry-doctor.sh"
-    cp "$REPO_DIR/packaging/linux/codex-packaged-runtime.sh" "$update_builder_root/packaging/linux/codex-packaged-runtime.sh"
-    cp "$REPO_DIR/packaging/linux/com.github.ilysenko.codex-desktop-linux.update.policy" \
-        "$update_builder_root/packaging/linux/com.github.ilysenko.codex-desktop-linux.update.policy"
-    cp "$REPO_DIR/packaging/linux/codex-update-manager-user-service.sh" \
-        "$update_builder_root/packaging/linux/codex-update-manager-user-service.sh"
-    cp "$REPO_DIR/packaging/linux/PKGBUILD.template" "$update_builder_root/packaging/linux/PKGBUILD.template"
-    cp "$REPO_DIR/packaging/linux/codex-desktop.install" "$update_builder_root/packaging/linux/codex-desktop.install"
-    cp "$UPDATER_SERVICE_SOURCE" "$update_builder_root/packaging/linux/codex-update-manager.service"
-    cp "$REPO_DIR/packaging/linux/codex-update-manager.postinst" "$update_builder_root/packaging/linux/codex-update-manager.postinst"
-    cp "$REPO_DIR/packaging/linux/codex-update-manager.prerm" "$update_builder_root/packaging/linux/codex-update-manager.prerm"
-    stage_update_builder_linux_features_tree "$update_builder_root"
-    stage_update_builder_linux_features_config "$update_builder_root"
-    if linux_feature_enabled "global-dictation"; then
-        stage_update_builder_global_dictation_source "$update_builder_root"
-    fi
-    cp "$REPO_DIR/packaging/linux/codex-update-manager.postrm" "$update_builder_root/packaging/linux/codex-update-manager.postrm"
+    cp -a "$REPO_DIR/scripts/patches/." "$update_builder_root/scripts/patches/"
+
+    for relative in \
+        asar-patch.sh \
+        build-info.js \
+        build-info.sh \
+        candidate-install.sh \
+        candidate-promotion.py \
+        install-helpers.sh \
+        linux-features.js \
+        linux-features.sh \
+        linux-target-context.js \
+        package-common.sh \
+        patch-report.js \
+        patch-validation.js \
+        process-detection.sh \
+        upstream-linux-package.js \
+        upstream-linux-package.sh; do
+        cp "$REPO_DIR/scripts/lib/$relative" "$update_builder_root/scripts/lib/$relative"
+    done
+
+    cp -a "$REPO_DIR/packaging/linux/." "$update_builder_root/packaging/linux/"
     cp "$REPO_DIR/assets/codex.png" "$update_builder_root/assets/codex.png"
     cp "$REPO_DIR/assets/codex-linux.png" "$update_builder_root/assets/codex-linux.png"
+    cp "$REPO_DIR/assets/openai-codex-linux-repository-key.gpg.base64" \
+        "$update_builder_root/assets/openai-codex-linux-repository-key.gpg.base64"
+
+    stage_update_builder_linux_features_tree "$update_builder_root"
+    stage_update_builder_enabled_plugin_templates "$update_builder_root"
+    stage_update_builder_linux_features_config "$update_builder_root"
+    stage_enabled_native_feature_artifacts "$update_builder_root"
     stage_update_builder_source_info "$update_builder_root"
     write_update_builder_manifest "$update_builder_root"
-    if [ -d "$node_runtime_source" ]; then
-        cp -a "$node_runtime_source" "$update_builder_root/node-runtime"
-    else
-        error "Missing managed Node.js runtime: $node_runtime_source. Run ./install.sh first."
-    fi
+}
+
+stage_update_builder_native_artifact() {
+    local source="$1"
+    local target="$2"
+    local label="$3"
+
+    [ -x "$source" ] || error "Missing staged native feature artifact for $label: $source"
+    mkdir -p "$(dirname "$target")"
+    install -m 0755 "$source" "$target"
+}
+
+stage_enabled_native_feature_artifacts() {
+    local update_builder_root="$1"
+    local feature_id
+
+    while IFS= read -r feature_id; do
+        case "$feature_id" in
+            computer-use-linux)
+                stage_update_builder_native_artifact \
+                    "$APP_DIR/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-linux" \
+                    "$update_builder_root/target/release/codex-computer-use-linux" \
+                    "$feature_id backend"
+                stage_update_builder_native_artifact \
+                    "$APP_DIR/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-cosmic" \
+                    "$update_builder_root/target/release/codex-computer-use-cosmic" \
+                    "$feature_id COSMIC helper"
+                ;;
+            global-dictation)
+                stage_update_builder_native_artifact \
+                    "$APP_DIR/resources/native/codex-global-dictation-linux" \
+                    "$update_builder_root/global-dictation-linux/target/release/codex-global-dictation-linux" \
+                    "$feature_id helper"
+                ;;
+            mcp-helper-reaper)
+                stage_update_builder_native_artifact \
+                    "$APP_DIR/.codex-linux/mcp-helper-reaper/codex-mcp-helper-reaper" \
+                    "$update_builder_root/linux-features/mcp-helper-reaper/reaper/target/release/codex-mcp-helper-reaper" \
+                    "$feature_id helper"
+                ;;
+            read-aloud-mcp)
+                stage_update_builder_native_artifact \
+                    "$APP_DIR/resources/plugins/openai-bundled/plugins/read-aloud/bin/codex-read-aloud-linux" \
+                    "$update_builder_root/target/release/codex-read-aloud-linux" \
+                    "$feature_id backend"
+                ;;
+            chronicle-skysight)
+                stage_update_builder_native_artifact \
+                    "$APP_DIR/resources/native/codex-record-replay-linux" \
+                    "$update_builder_root/target/release/codex-record-replay-linux" \
+                    "$feature_id backend"
+                ;;
+            *) continue ;;
+        esac
+    done < <("$(package_node_binary)" "$REPO_DIR/scripts/lib/linux-features.js" --enabled)
 }
 
 stage_optional_update_builder_bundle() {

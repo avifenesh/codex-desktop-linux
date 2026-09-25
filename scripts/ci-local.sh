@@ -26,17 +26,25 @@ Targets:
   deb                        Build and inspect the Debian package
   rpm                        Build and inspect the RPM package
   pacman                     Build and inspect the pacman package
-  install-deps               Test install-deps on Ubuntu 22.04, Ubuntu 24.04, and Debian 12
+  install-deps               Test install-deps on apt images and the Arch Rust matrix
   install-deps:ubuntu-22.04  Test install-deps on one apt image
   install-deps:ubuntu-24.04  Test install-deps on one apt image
   install-deps:debian-12     Test install-deps on one apt image
+  install-deps:arch-rust     Test the full pacman Rust state matrix
+  install-deps:arch-working-distro-cargo
+                             Test pacman with working distro Cargo
+  install-deps:arch-rustup-without-toolchain
+                             Test pacman with rustup but no toolchain
+  install-deps:arch-neither-rust-nor-rustup
+                             Test pacman with no Rust or rustup
+  install-deps:arch-shadowed-user-local-proxy
+                             Test pacman with system Cargo shadowed by user rustup
   nix                        Run the heavy Nix flake build checks
-  upstream                   Build the app against the upstream DMG
+  upstream                   Build the app from the signed official Linux package
 
 Environment:
   CI_CONTAINER_ENGINE=docker|podman
   CI_PACKAGE_VERSION=2026.04.28.000000+local
-  CI_DMG_PATH=/path/to/Codex.dmg
   CI_SKIP_PULL=1
   CI_CACHE_DIR=/path/to/cache
 
@@ -104,23 +112,10 @@ mount_github_summary_args() {
     fi
 }
 
-mount_upstream_args() {
-    local -n _args="$1"
-    local upstream_dir="/tmp/codex-upstream-ci"
-    mkdir -p "$upstream_dir"
-    _args+=(-v "$upstream_dir:$upstream_dir")
-
-    if [ -n "${CI_DMG_PATH:-}" ] && [ "${CI_DMG_PATH#/}" != "$CI_DMG_PATH" ]; then
-        local dmg_dir
-        dmg_dir="$(dirname "$CI_DMG_PATH")"
-        mkdir -p "$dmg_dir"
-        _args+=(-v "$dmg_dir:$dmg_dir")
-    fi
-}
-
 run_container_job() {
     local job="$1"
     local image_key="$2"
+    local install_deps_case="${3:-${CI_INSTALL_DEPS_CASE:-}}"
     local engine
     local image
     engine="$(container_engine)"
@@ -143,12 +138,14 @@ run_container_job() {
         -e "CI_PACKAGE_VERSION=$CI_PACKAGE_VERSION"
         -e "PACKAGE_VERSION=$CI_PACKAGE_VERSION"
         -e "CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-always}"
-        -e "UPSTREAM_DMG_URL=${UPSTREAM_DMG_URL:-https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg}"
-        -e "UPSTREAM_DMG_PATH=${UPSTREAM_DMG_PATH:-/tmp/codex-upstream-ci/Codex.dmg}"
         -v "$REPO_DIR:/work"
         -v "$CI_CACHE_DIR:/ci-cache"
         -w /work
     )
+
+    if [ -n "$install_deps_case" ]; then
+        args+=(-e "CI_INSTALL_DEPS_CASE=$install_deps_case")
+    fi
 
     # Linked worktrees keep only a pointer in /work/.git. Mount the shared Git
     # metadata at its original absolute path so git ls-files/diff work inside
@@ -159,17 +156,15 @@ run_container_job() {
         args+=(-v "$git_common_dir:$git_common_dir:ro")
     fi
 
-    if [ -n "${CI_DMG_PATH:-}" ]; then
-        args+=(-e "CI_DMG_PATH=$CI_DMG_PATH")
-    fi
-    if [ -n "${UPSTREAM_DMG_CACHE_HIT:-}" ]; then
-        args+=(-e "UPSTREAM_DMG_CACHE_HIT=$UPSTREAM_DMG_CACHE_HIT")
+    # The Nix suite contains a real NixOS VM launch check. Make the host KVM
+    # device available to the disposable Nix container when it exists; without
+    # this, Nix rejects the derivation before the test can start even though the
+    # same host can run it directly.
+    if [ "$job" = nix ] && [ -c /dev/kvm ]; then
+        args+=(--device /dev/kvm)
     fi
 
     mount_github_summary_args args
-    if [ "$job" = "upstream" ]; then
-        mount_upstream_args args
-    fi
 
     info "Running $job in $image_key"
     "$engine" "${args[@]}" "$image" bash /work/scripts/ci/container-entrypoint.sh "$job"
@@ -201,6 +196,7 @@ run_target() {
             run_target install-deps:ubuntu-22.04
             run_target install-deps:ubuntu-24.04
             run_target install-deps:debian-12
+            run_target install-deps:arch-rust
             ;;
         install-deps:ubuntu-22.04)
             run_container_job install-deps ubuntu-22.04
@@ -210,6 +206,21 @@ run_target() {
             ;;
         install-deps:debian-12)
             run_container_job install-deps debian-12
+            ;;
+        install-deps:arch-rust)
+            run_container_job install-deps archlinux-base-devel
+            ;;
+        install-deps:arch-working-distro-cargo)
+            run_container_job install-deps archlinux-base-devel working-distro-cargo
+            ;;
+        install-deps:arch-rustup-without-toolchain)
+            run_container_job install-deps archlinux-base-devel rustup-without-toolchain
+            ;;
+        install-deps:arch-neither-rust-nor-rustup)
+            run_container_job install-deps archlinux-base-devel neither-rust-nor-rustup
+            ;;
+        install-deps:arch-shadowed-user-local-proxy)
+            run_container_job install-deps archlinux-base-devel shadowed-user-local-proxy
             ;;
         *)
             usage >&2

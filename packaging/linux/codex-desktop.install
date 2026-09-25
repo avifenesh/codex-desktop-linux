@@ -16,6 +16,10 @@ codex_desktop_post_transaction_common() {
     if [ -f "$DESKTOP_ENTRY_DOCTOR" ]; then
         codex_desktop_repair_system_package_shadow_entries codex-desktop || true
     fi
+    if command -v aa-enabled >/dev/null 2>&1 && command -v apparmor_parser >/dev/null 2>&1 &&
+       aa-enabled --quiet && [ -f /etc/apparmor.d/codex-desktop ]; then
+        apparmor_parser -r -W -T /etc/apparmor.d/codex-desktop >/dev/null 2>&1 || true
+    fi
 }
 
 post_install() {

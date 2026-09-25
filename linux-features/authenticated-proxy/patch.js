@@ -5,6 +5,7 @@ const {
 } = require("../../scripts/patches/lib/minified-js.js");
 
 const JS_IDENT = "[A-Za-z_$][\\w$]*";
+const BT = "`";
 
 function applyAuthenticatedProxyPatch(currentSource) {
   const electronVar = inferModuleAlias(currentSource, "electron");
@@ -14,7 +15,6 @@ function applyAuthenticatedProxyPatch(currentSource) {
     );
     return currentSource;
   }
-
   const appLoginHelper =
     "function codexLinuxProxyAuthHost(e){return String(e??``).trim().replace(/^\\[|\\]$/g,``).toLowerCase()}" +
     "function codexLinuxProxyAuthEntry(e=process.env){if(process.platform!==`linux`)return null;let t=codexLinuxProxyAuthHost(e.CODEX_LINUX_PROXY_AUTH_HOST),n=String(e.CODEX_LINUX_PROXY_AUTH_PORT??``).trim(),r=e.CODEX_LINUX_PROXY_USERNAME;if(!t||r==null||String(r).length===0)return null;return{host:t,port:n,username:String(r),password:String(e.CODEX_LINUX_PROXY_PASSWORD??``)}}" +
@@ -56,34 +56,67 @@ function applyAuthenticatedProxyPatch(currentSource) {
     return patchedSource;
   }
 
-  const fetchNeedle =
-    `let f=i==null?await ${electronVar}.net.fetch(a,{method:r,headers:n,body:m(),signal:o,credentials:s?\`include\`:\`same-origin\`}):await this.performProgressRequest({body:m(),headers:n,method:r,onUploadProgress:i,resolvedUrl:a,signal:o,useSessionCookies:s});`;
-  const fetchReplacement =
-    `let f=i==null&&!codexLinuxProxyAuthEntry()?await ${electronVar}.net.fetch(a,{method:r,headers:n,body:m(),signal:o,credentials:s?\`include\`:\`same-origin\`}):await this.performProgressRequest({body:m(),headers:n,method:r,onUploadProgress:i,resolvedUrl:a,signal:o,useSessionCookies:s});`;
-  if (patchedSource.includes(fetchNeedle)) {
-    patchedSource = patchedSource.replace(fetchNeedle, fetchReplacement);
-  } else if (
-    patchedSource.includes("performDesktopFetch") &&
-    !patchedSource.includes("!codexLinuxProxyAuthEntry()?await")
-  ) {
-    console.warn(
-      "WARN: Could not route Linux proxy-auth desktop fetches through ClientRequest",
-    );
-  }
+  const currentFetchGate = new RegExp(
+    `if\\((${JS_IDENT})==null\\)(?=\\{let ${JS_IDENT}=\\{method:${JS_IDENT},headers:${JS_IDENT},` +
+      `body:${JS_IDENT}\\(\\),redirect:[^,{}]{1,120},signal:${JS_IDENT},credentials:${JS_IDENT}\\?` +
+      `${BT}include${BT}:${BT}same-origin${BT}\\};${JS_IDENT}=await ` +
+      `this\\.options\\.applicationNetwork\\.fetch\\()`,
+    "g",
+  );
+  const patchedCurrentFetchGate = new RegExp(
+    `if\\((${JS_IDENT})==null&&!codexLinuxProxyAuthEntry\\(\\)\\)(?=\\{let ${JS_IDENT}=\\{method:${JS_IDENT},` +
+      `headers:${JS_IDENT},body:${JS_IDENT}\\(\\),redirect:[^,{}]{1,120},signal:${JS_IDENT},credentials:${JS_IDENT}\\?` +
+      `${BT}include${BT}:${BT}same-origin${BT}\\};${JS_IDENT}=await this\\.options\\.applicationNetwork\\.fetch\\()`,
+    "g",
+  );
+  const currentRequestPattern = new RegExp(
+    `let (?<request>${JS_IDENT})=(?<owner>this\\.options\\.applicationNetwork)\\.request\\(` +
+      `\\{method:(?<method>${JS_IDENT}),url:(?<url>${JS_IDENT}),redirect:(?<redirect>[^,{}]{1,120}),` +
+      `headers:(?<headers>${JS_IDENT}),useSessionCookies:(?<cookies>${JS_IDENT})\\}\\),` +
+      `(?<last>${JS_IDENT})=-1,(?<poll>${JS_IDENT})=\\(\\)=>\\{let (?<progress>${JS_IDENT})=` +
+      `\\k<request>\\.getUploadProgress\\(\\);\\k<progress>\\.started&&` +
+      `\\k<progress>\\.current!==\\k<last>&&\\(\\k<last>=\\k<progress>\\.current,` +
+      `(?<callback>${JS_IDENT})\\(\\{loaded:\\k<progress>\\.current,total:\\k<progress>\\.total\\}\\)\\)\\}`,
+    "g",
+  );
+  const patchedRequestPattern = new RegExp(
+    `let (?<request>${JS_IDENT})=this\\.options\\.applicationNetwork\\.request\\(` +
+      `\\{method:${JS_IDENT},url:${JS_IDENT},redirect:[^,{}]{1,120},headers:${JS_IDENT},useSessionCookies:${JS_IDENT}\\}\\);` +
+      `codexLinuxAttachProxyAuthToRequest\\(\\k<request>\\);let (?<last>${JS_IDENT})=-1,(?<poll>${JS_IDENT})=\\(\\)=>` +
+      `\\{if\\((?<callback>${JS_IDENT})==null\\)return;let (?<progress>${JS_IDENT})=\\k<request>\\.getUploadProgress\\(\\);` +
+      `!\\k<progress>\\.started\\|\\|\\k<progress>\\.current===\\k<last>\\|\\|` +
+      `\\(\\k<last>=\\k<progress>\\.current,\\k<callback>\\(\\{loaded:\\k<progress>\\.current,` +
+      `total:\\k<progress>\\.total\\}\\)\\)\\}`,
+    "g",
+  );
+  const hasFetchSurface = patchedSource.includes(".applicationNetwork.fetch(") &&
+    patchedSource.includes("performProgressRequest");
+  if (hasFetchSurface) {
+    const currentFetches = [...patchedSource.matchAll(currentFetchGate)];
+    const patchedFetches = [...patchedSource.matchAll(patchedCurrentFetchGate)];
+    const currentRequests = [...patchedSource.matchAll(currentRequestPattern)];
+    const patchedRequests = [...patchedSource.matchAll(patchedRequestPattern)];
+    const pristine = currentFetches.length === 1 && patchedFetches.length === 0 &&
+      currentRequests.length === 1 && patchedRequests.length === 0;
+    const complete = currentFetches.length === 0 && patchedFetches.length === 1 &&
+      currentRequests.length === 0 && patchedRequests.length === 1;
+    if (!pristine && !complete) {
+      console.warn("WARN: Could not identify unique current applicationNetwork proxy-auth contracts");
+      return currentSource;
+    }
+    if (complete) return patchedSource;
 
-  const requestNeedle =
-    `let u=${electronVar}.net.request({method:n,url:i,headers:t,useSessionCookies:o}),d=-1,f=()=>{let e=u.getUploadProgress();!e.started||e.current===d||(d=e.current,r({loaded:e.current,total:e.total}))}`;
-  const requestReplacement =
-    `let u=${electronVar}.net.request({method:n,url:i,headers:t,useSessionCookies:o});codexLinuxAttachProxyAuthToRequest(u);let d=-1,f=()=>{if(r==null)return;let e=u.getUploadProgress();!e.started||e.current===d||(d=e.current,r({loaded:e.current,total:e.total}))}`;
-  if (patchedSource.includes(requestNeedle)) {
-    patchedSource = patchedSource.replace(requestNeedle, requestReplacement);
-  } else if (
-    patchedSource.includes("performProgressRequest") &&
-    !new RegExp(`codexLinuxAttachProxyAuthToRequest\\(${JS_IDENT}\\);`).test(patchedSource)
-  ) {
-    console.warn(
-      "WARN: Could not attach Linux proxy authentication to ClientRequest fetch path",
+    patchedSource = patchedSource.replace(
+      currentFetchGate,
+      (_match, progressVar) => `if(${progressVar}==null&&!codexLinuxProxyAuthEntry())`,
     );
+    patchedSource = patchedSource.replace(currentRequestPattern, (...args) => {
+      const groups = args.at(-1);
+      return `let ${groups.request}=${groups.owner}.request({method:${groups.method},url:${groups.url},redirect:${groups.redirect},headers:${groups.headers},useSessionCookies:${groups.cookies}});` +
+        `codexLinuxAttachProxyAuthToRequest(${groups.request});let ${groups.last}=-1,${groups.poll}=()=>{if(${groups.callback}==null)return;` +
+        `let ${groups.progress}=${groups.request}.getUploadProgress();!${groups.progress}.started||${groups.progress}.current===${groups.last}||` +
+        `(${groups.last}=${groups.progress}.current,${groups.callback}({loaded:${groups.progress}.current,total:${groups.progress}.total}))}`;
+    });
   }
 
   return patchedSource;

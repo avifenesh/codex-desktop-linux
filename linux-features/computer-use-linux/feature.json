@@ -1,0 +1,29 @@
+{
+  "id": "computer-use-linux",
+  "title": "Linux Computer Use",
+  "description": "Optional Linux desktop-control UI and native MCP backend integration.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patchDescriptors": "./patch.js",
+    "stageHook": "./stage.sh"
+  },
+  "resources": [
+    {
+      "source": "host-service.mjs",
+      "target": ".codex-linux/features/computer-use-linux/host-service.mjs",
+      "mode": "0644"
+    }
+  ],
+  "runtimeHooks": {
+    "launcher": {
+      "source": "host-service-hook.sh",
+      "name": "host-service.sh",
+      "mode": "0755"
+    },
+    "afterExit": {
+      "source": "host-service-hook.sh",
+      "name": "host-service-cleanup.sh",
+      "mode": "0755"
+    }
+  }
+}

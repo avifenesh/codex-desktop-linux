@@ -11,12 +11,8 @@ node_bin="$(command -v node || true)"
 
 if [ -n "${CODEX_LINUX_APP_DIR:-}" ]; then
     staged_reaper="$CODEX_LINUX_APP_DIR/.codex-linux/features/shared-app-server-socket/orphan-reaper.js"
-    managed_node="$CODEX_LINUX_APP_DIR/resources/node-runtime/bin/node"
     if [ -f "$staged_reaper" ]; then
         reaper_path="$staged_reaper"
-    fi
-    if [ -x "$managed_node" ]; then
-        node_bin="$managed_node"
     fi
 fi
 
@@ -27,5 +23,7 @@ if [ -n "$node_bin" ] && [ -f "$reaper_path" ]; then
 fi
 
 if [ "${CODEX_LINUX_FEATURE_HOOK_PHASE:-launcher}" = "launcher" ]; then
+    cli_path="${CODEX_CLI_PATH:-${CODEX_LINUX_APP_DIR:?}/resources/codex}"
     printf 'env CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET=%s\n' "$socket_path"
+    printf 'env CODEX_CLI_PATH=%s\n' "$cli_path"
 fi

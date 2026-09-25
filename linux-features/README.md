@@ -5,6 +5,9 @@ These are not upstream Codex plugins; they are Linux-side extensions that can
 add ASAR patches, staged resources, runtime hooks, package hooks, or custom
 build/install hooks. The full architecture contract is documented in
 [`docs/linux-features-architecture.md`](../docs/linux-features-architecture.md).
+Every feature targets the verified official Linux `.deb` payload; none depends
+on a macOS bundle, replacement Electron runtime, or rebuilt upstream native
+module.
 
 By default, no optional Linux features are enabled. Copy
 `features.example.json` to `features.json` before running `./install.sh` or
@@ -12,9 +15,7 @@ building packages, then list the feature ids you want:
 
 ```json
 {
-  "enabled": [
-    "example-feature"
-  ]
+  "enabled": []
 }
 ```
 
@@ -65,7 +66,7 @@ make setup-native
 # non-interactive feature edits:
 CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
 CODEX_LINUX_FEATURES=remote-mobile-control,read-aloud \
-CODEX_LINUX_DISABLE_FEATURES=conversation-mode \
+CODEX_LINUX_DISABLE_FEATURES=pet-overlay \
 make setup-native
 ```
 
@@ -93,13 +94,19 @@ Each feature directory must include:
 - optional `stage.sh` — legacy install/build staging hook
 - optional `test.js` — self-contained tests for the feature
 
+Repository-owned build plumbing may set `"internal": true` in `feature.json`.
+Internal features are hidden from the setup wizard and public feature summary,
+cannot be selected through native `features.json`, and must be explicitly
+allowlisted by the owning build integration.
+
 `stage.sh` hooks run with `SCRIPT_DIR`, `INSTALL_DIR`, `WORK_DIR`, `ARCH`, and
 `CODEX_UPSTREAM_APP_DIR` in the environment.
 
 Declarative runtime hooks are staged under `codex-app/.codex-linux/`:
 
 - `runtimeHooks.env` writes literal `KEY=VALUE` files consumed by the launcher
-- `runtimeHooks.prelaunch` runs synchronously before webview setup
+- `runtimeHooks.prelaunch` runs synchronously before the official `ChatGPT`
+  executable starts
 - `runtimeHooks.electronArgs` appends one Electron argument per line
 - `runtimeHooks.launcher` runs before final Electron args are built; executable
   hooks receive current Electron args as argv and can print `env KEY=VALUE` or
@@ -118,7 +125,8 @@ Declarative resources and runtime hooks are tracked in
 the owning feature is disabled. Legacy `stage.sh` hooks own their own cleanup.
 
 Runtime hooks receive `CODEX_HOME`, `CODEX_LINUX_APP_DIR`,
-`CODEX_LINUX_APP_STATE_DIR`, `CODEX_LINUX_FEATURES_DIR`, and
+`CODEX_LINUX_APP_STATE_DIR`, `CODEX_LINUX_APP_CACHE_DIR`,
+`CODEX_LINUX_FEATURES_DIR`, and
 `CODEX_LINUX_LAUNCHER_LOG`. Executable hooks also receive
 `CODEX_LINUX_FEATURE_HOOK_PHASE`; after-exit hooks receive
 `CODEX_LINUX_ELECTRON_EXIT_STATUS`. If a feature needs to install a Codex skill
@@ -126,6 +134,8 @@ or other user-home artifact, stage the source with `resources` and copy it from
 `$CODEX_LINUX_FEATURES_DIR/<feature-id>/...` in `runtimeHooks.prelaunch`.
 Avoid writing user-home files from `stage.sh`, because install/package/update
 rebuilds may run outside the real user's session.
+Launcher hooks also receive `CODEX_LINUX_LAUNCHER_PID`, the identity of the
+wrapper process that remains alive through the matching after-exit hooks.
 
 `packageResources` stage feature-owned regular files outside the app directory
 for native packages. Their targets cannot overlap the packaged app directory,
@@ -157,6 +167,7 @@ Feature self-tests live inside each feature directory. Run them with:
 node --test linux-features/*/test.js
 ```
 
-Core Linux compatibility patches should stay in `scripts/patches/` until they
-are deliberately migrated. Use `linux-features/` for additions that are useful
-for some users but not mandatory for every Linux build.
+The default core patch registry is empty. A core compatibility patch requires a
+reproduced blocker on the official Linux package and a regression test. Use
+`linux-features/` for additions that are useful for some users but not mandatory
+for every Linux build.

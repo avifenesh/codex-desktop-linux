@@ -13,10 +13,76 @@ const {
   enabledLinuxFeaturePackageFiles,
   enabledLinuxFeaturePackagePlan,
   loadLinuxFeaturePatchDescriptors,
+  loadEnabledLinuxFeatures,
+  linuxFeaturesConfig,
   restoreEnabledLinuxFeaturePackageResourcePermissions,
   stageEnabledLinuxFeaturePackageResources,
   stageEnabledLinuxFeatureInstall,
 } = require("./linux-features.js");
+
+test("known retired feature ids are ignored while arbitrary unknown ids fail", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-retired-feature-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const featuresRoot = path.join(root, "linux-features");
+  fs.mkdirSync(featuresRoot);
+  const configPath = path.join(featuresRoot, "features.json");
+  fs.writeFileSync(configPath, JSON.stringify({
+    enabled: [
+      "codex-wrapper-updater",
+      "conversation-delete",
+      "conversation-mode",
+      "deferred-update-build",
+      "example-feature",
+      "open-target-discovery",
+      "ssh-command-wrapper",
+      "x11-ewmh-computer-use",
+      "zed-opener",
+    ],
+    settings: { "open-target-discovery": { stale: true } },
+  }));
+
+  assert.deepEqual(linuxFeaturesConfig({ featuresRoot, featuresConfigPath: configPath }), {
+    enabled: [], settings: {}, configPath,
+  });
+  assert.deepEqual(loadEnabledLinuxFeatures({ featuresRoot, featuresConfigPath: configPath }), []);
+
+  fs.writeFileSync(configPath, JSON.stringify({ enabled: ["open-target-discovry"] }));
+  assert.throws(
+    () => loadEnabledLinuxFeatures({ featuresRoot, featuresConfigPath: configPath }),
+    /not found.*open-target-discovry/,
+  );
+});
+
+test("enabled feature dependencies are added for persisted and explicit selections", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-feature-dependency-closure-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const featuresRoot = path.join(root, "linux-features");
+  const configPath = path.join(featuresRoot, "features.json");
+  fs.mkdirSync(featuresRoot);
+  fs.writeFileSync(configPath, `${JSON.stringify({ enabled: ["recording"] })}\n`);
+  for (const [id, requires] of [
+    ["chronicle", []],
+    ["recording", ["chronicle"]],
+  ]) {
+    const featureDir = path.join(featuresRoot, id);
+    fs.mkdirSync(featureDir);
+    fs.writeFileSync(path.join(featureDir, "README.md"), `# ${id}\n`);
+    fs.writeFileSync(
+      path.join(featureDir, "feature.json"),
+      `${JSON.stringify({ id, title: id, requires }, null, 2)}\n`,
+    );
+  }
+
+  assert.deepEqual(
+    linuxFeaturesConfig({ featuresRoot, featuresConfigPath: configPath }).enabled,
+    ["chronicle", "recording"],
+  );
+  assert.deepEqual(
+    loadEnabledLinuxFeatures({ featuresRoot, enabledFeatureIds: ["recording"] })
+      .map((feature) => feature.id),
+    ["chronicle", "recording"],
+  );
+});
 
 function makeFeatureRoot(root, featureManifest) {
   const featuresRoot = path.join(root, "linux-features");
@@ -100,6 +166,35 @@ test("Linux feature asset matchers receive feature settings", (t) => {
 
   const [descriptor] = loadLinuxFeaturePatchDescriptors({ featuresRoot });
   assert.equal(descriptor.assetMatch("current-contract", "app-current.js", {}), true);
+});
+
+test("enabled patch descriptor load errors are fatal", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-feature-invalid-descriptor-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const { featureDir, featuresRoot } = makeFeatureRoot(root, {
+    id: "unsafe-link",
+    title: "Unsafe Link",
+    entrypoints: { patchDescriptors: "./patch.js" },
+  });
+  const descriptorModule = path.join(__dirname, "..", "patches", "descriptor.js");
+  fs.writeFileSync(
+    path.join(featureDir, "patch.js"),
+    [
+      `const { mainBundlePatch } = require(${JSON.stringify(descriptorModule)});`,
+      "module.exports = mainBundlePatch({",
+      "  id: 'invalid-required-bypass',",
+      "  ciPolicy: 'required-upstream',",
+      "  enforceWhenEnabled: false,",
+      "  apply: (source) => source,",
+      "});",
+      "",
+    ].join("\n"),
+  );
+
+  assert.throws(
+    () => loadLinuxFeaturePatchDescriptors({ featuresRoot }),
+    /Could not load Linux feature 'unsafe-link' patchDescriptors:.*only with ciPolicy 'optional'/,
+  );
 });
 
 test("Linux feature staging rejects duplicate resource targets", (t) => {

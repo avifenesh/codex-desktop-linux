@@ -10,11 +10,13 @@ const RESERVED_TOP_LEVEL_NAMES = new Set([
   "README.md",
   "features.example.json",
   "features.json",
+  "compatibility.json",
 ]);
-// Keep removed feature ids loadable so preserved update-builder configs still rebuild.
-const LEGACY_FEATURE_ID_ALIASES = new Map([
-  ["zed-opener", "open-target-discovery"],
-]);
+const FEATURE_COMPATIBILITY = require("../../linux-features/compatibility.json");
+const LEGACY_FEATURE_ID_ALIASES = new Map(Object.entries(FEATURE_COMPATIBILITY.aliases));
+// Only explicitly retired ids are ignored. This lets a preserved local config
+// survive a removal without making typos or arbitrary unknown ids fail open.
+const RETIRED_FEATURE_IDS = new Set(FEATURE_COMPATIBILITY.retired);
 
 const RUNTIME_HOOK_DIRS = {
   env: { dir: "env.d", executable: false },
@@ -152,6 +154,9 @@ function normalizeEnabledFeatureIds(value, sourcePath, options = {}) {
       continue;
     }
     const id = LEGACY_FEATURE_ID_ALIASES.get(item) ?? item;
+    if (RETIRED_FEATURE_IDS.has(id)) {
+      continue;
+    }
     if (seen.has(id)) {
       if (options.strict === true) {
         throw new Error(`Duplicate Linux feature id in ${sourcePath}: ${item}`);
@@ -209,6 +214,9 @@ function normalizeLinuxFeatureSettings(value, sourcePath) {
       continue;
     }
     const id = LEGACY_FEATURE_ID_ALIASES.get(rawId) ?? rawId;
+    if (RETIRED_FEATURE_IDS.has(id)) {
+      continue;
+    }
     if (rawSettings == null || typeof rawSettings !== "object" || Array.isArray(rawSettings)) {
       console.warn(`WARN: Linux feature '${rawId}' settings in ${sourcePath} must be an object`);
       continue;
@@ -223,12 +231,14 @@ function linuxFeaturesConfig(options = {}) {
   if (config == null) {
     return { enabled: [], settings: {}, configPath };
   }
+  const normalizedEnabled = normalizeEnabledFeatureIds(
+    config.enabled,
+    configPath,
+    { strict: options.strictConfig === true },
+  );
+  const available = linuxFeatureManifestMap(options);
   return {
-    enabled: normalizeEnabledFeatureIds(
-      config.enabled,
-      configPath,
-      { strict: options.strictConfig === true },
-    ),
+    enabled: expandEnabledFeatureDependencies(normalizedEnabled, available),
     settings: normalizeLinuxFeatureSettings(config.settings, configPath),
     configPath,
   };
@@ -306,6 +316,9 @@ function normalizeLinuxFeatureManifest(featuresRoot, candidate) {
   if (manifest.defaultEnabled === true) {
     throw new Error(`Linux feature '${id}' must be disabled by default; defaultEnabled true is not allowed`);
   }
+  if (manifest.internal != null && typeof manifest.internal !== "boolean") {
+    throw new Error(`Linux feature '${id}' internal must be a boolean`);
+  }
 
   const relativeDir = path.relative(featuresRoot, candidate.dir);
   return {
@@ -319,10 +332,23 @@ function normalizeLinuxFeatureManifest(featuresRoot, candidate) {
     manifest: {
       ...manifest,
       defaultEnabled: false,
+      internal: manifest.internal === true,
       requires: normalizeFeatureIdList(manifest.requires, "requires", id),
       conflicts: normalizeFeatureIdList(manifest.conflicts, "conflicts", id),
     },
   };
+}
+
+function allowedInternalFeatureIds(options = {}) {
+  const configured = options.internalFeatureIds ??
+    String(process.env.CODEX_INTERNAL_LINUX_FEATURE_IDS ?? "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean);
+  if (!Array.isArray(configured)) {
+    throw new Error("internalFeatureIds must be an array");
+  }
+  return new Set(configured.map((id) => assertFeatureId(id, "Internal Linux feature id")));
 }
 
 function discoverLinuxFeatureManifests(options = {}) {
@@ -345,6 +371,37 @@ function discoverLinuxFeatureManifests(options = {}) {
 
 function linuxFeatureManifestMap(options = {}) {
   return new Map(discoverLinuxFeatureManifests(options).map((feature) => [feature.id, feature]));
+}
+
+function expandEnabledFeatureDependencies(enabled, available) {
+  const expanded = [];
+  const completed = new Set();
+  const visiting = [];
+
+  const visit = (id) => {
+    if (completed.has(id)) {
+      return;
+    }
+    const cycleIndex = visiting.indexOf(id);
+    if (cycleIndex !== -1) {
+      throw new Error(
+        `Linux feature dependency cycle: ${[...visiting.slice(cycleIndex), id].join(" -> ")}`,
+      );
+    }
+    visiting.push(id);
+    const feature = available.get(id);
+    for (const required of feature?.manifest.requires ?? []) {
+      visit(required);
+    }
+    visiting.pop();
+    completed.add(id);
+    expanded.push(id);
+  };
+
+  for (const id of enabled) {
+    visit(id);
+  }
+  return expanded;
 }
 
 function loadLinuxFeatureManifest(featuresRoot, id, options = {}) {
@@ -376,13 +433,20 @@ function loadEnabledLinuxFeatures(options = {}) {
   const featuresRoot = linuxFeaturesRoot(options);
   const available = linuxFeatureManifestMap({ ...options, featuresRoot });
   const config = linuxFeaturesConfig({ ...options, featuresRoot });
-  const enabled = options.enabledFeatureIds ?? config.enabled;
+  const enabled = options.enabledFeatureIds == null
+    ? config.enabled
+    : expandEnabledFeatureDependencies(options.enabledFeatureIds, available);
   const features = [];
   const missing = [];
+  const allowedInternal = allowedInternalFeatureIds(options);
   for (const id of enabled) {
     const feature = available.get(id);
     if (feature == null) {
       missing.push(id);
+    } else if (feature.manifest.internal && !allowedInternal.has(id)) {
+      throw new Error(
+        `Linux feature '${id}' is internal and cannot be enabled through public feature configuration`,
+      );
     } else {
       features.push({ ...feature, settings: config.settings[id] ?? {} });
     }
@@ -463,7 +527,7 @@ function resolveFeatureRelativePath(feature, relativePath, label, { mustExist = 
   return resolved;
 }
 
-function resolveFeatureEntrypoint(feature, key) {
+function resolveFeatureEntrypoint(feature, key, options = {}) {
   const relativePath = feature.manifest.entrypoints?.[key];
   if (relativePath == null) {
     return null;
@@ -471,13 +535,16 @@ function resolveFeatureEntrypoint(feature, key) {
   try {
     return resolveFeatureRelativePath(feature, relativePath, `${key} entrypoint`);
   } catch (error) {
+    if (options.strict === true) {
+      throw error;
+    }
     console.warn(`WARN: ${error.message}`);
     return null;
   }
 }
 
-function loadFeatureEntrypointModule(feature, key) {
-  const entrypoint = resolveFeatureEntrypoint(feature, key);
+function loadFeatureEntrypointModule(feature, key, options = {}) {
+  const entrypoint = resolveFeatureEntrypoint(feature, key, options);
   if (entrypoint == null) {
     return null;
   }
@@ -488,6 +555,11 @@ function loadFeatureEntrypointModule(feature, key) {
       moduleExports: require(entrypoint),
     };
   } catch (error) {
+    if (options.strict === true) {
+      throw new Error(`Could not load Linux feature '${feature.id}' ${key}: ${error.message}`, {
+        cause: error,
+      });
+    }
     console.warn(`WARN: Could not load Linux feature '${feature.id}' ${key}: ${error.message}`);
     return null;
   }
@@ -572,7 +644,7 @@ function featurePatchDescriptorListFromExports(feature, moduleExports, sourcePat
 function loadLinuxFeaturePatchDescriptors(options = {}) {
   const descriptors = [];
   for (const [featureIndex, feature] of loadEnabledLinuxFeatures(options).entries()) {
-    const loaded = loadFeatureEntrypointModule(feature, "patchDescriptors");
+    const loaded = loadFeatureEntrypointModule(feature, "patchDescriptors", { strict: true });
     if (loaded == null) {
       continue;
     }
@@ -1305,7 +1377,9 @@ function restoreEnabledLinuxFeaturePackageResourcePermissions(packageRoot, optio
 }
 
 function featuresJsonSummary(options = {}) {
-  return discoverLinuxFeatureManifests(options).map((feature) => ({
+  return discoverLinuxFeatureManifests(options)
+    .filter((feature) => !feature.manifest.internal)
+    .map((feature) => ({
     id: feature.id,
     title: feature.manifest.title ?? feature.manifest.name ?? feature.id,
     name: feature.manifest.name ?? feature.manifest.title ?? feature.id,
@@ -1318,7 +1392,7 @@ function featuresJsonSummary(options = {}) {
     defaultEnabled: false,
     setup: feature.manifest.setup ?? null,
     cleanup: feature.manifest.cleanup ?? null,
-  }));
+    }));
 }
 
 function main() {
@@ -1428,6 +1502,16 @@ function main() {
     }
     return;
   }
+  if (command === "--enabled-feature-dirs0") {
+    for (const feature of loadEnabledLinuxFeatures()) {
+      process.stdout.write(`${feature.id}\0${feature.relativeDir}\0`);
+    }
+    return;
+  }
+  if (command === "--patch-descriptor-count") {
+    process.stdout.write(`${loadLinuxFeaturePatchDescriptors().length}\n`);
+    return;
+  }
   if (command === "--features-json") {
     process.stdout.write(`${JSON.stringify(featuresJsonSummary(), null, 2)}\n`);
     return;
@@ -1436,7 +1520,7 @@ function main() {
     process.stdout.write(`${linuxFeaturesRoot()}\n`);
     return;
   }
-  console.error("Usage: linux-features.js --enabled | --features-json | --features-root | --stage-install <install-dir> | --staged-files-json <install-dir> | --stage-hooks | --cleanup-hooks | --package-hooks <format> <app-dir> | --stage-package-resources <format> <package-root> <app-dir> | --restore-package-resource-permissions <format> <package-root> <app-dir> | --package-dependencies <format> <app-dir> | --package-files <format> <app-dir>");
+  console.error("Usage: linux-features.js --enabled | --enabled-feature-dirs0 | --patch-descriptor-count | --features-json | --features-root | --stage-install <install-dir> | --staged-files-json <install-dir> | --stage-hooks | --cleanup-hooks | --package-hooks <format> <app-dir> | --stage-package-resources <format> <package-root> <app-dir> | --restore-package-resource-permissions <format> <package-root> <app-dir> | --package-dependencies <format> <app-dir> | --package-files <format> <app-dir>");
   process.exit(1);
 }
 
@@ -1462,12 +1546,15 @@ module.exports = {
   enabledLinuxFeaturePackagePlan,
   enabledLinuxFeatureStageHooks,
   featuresJsonSummary,
+  expandEnabledFeatureDependencies,
   loadEnabledLinuxFeatures,
   loadLinuxFeaturePatchDescriptors,
   linuxFeatureManifestMap,
+  linuxFeaturesConfig,
   linuxFeaturesConfigPath,
   linuxFeaturesRoot,
   resolveFeatureEntrypoint,
+  RETIRED_FEATURE_IDS,
   restoreEnabledLinuxFeaturePackageResourcePermissions,
   stageEnabledLinuxFeatureInstall,
   stageEnabledLinuxFeaturePackageResources,

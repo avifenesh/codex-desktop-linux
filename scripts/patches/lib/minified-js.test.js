@@ -18,25 +18,9 @@ test("requireName finds require with backticks", () => {
   assert.strictEqual(requireName(source, "electron"), "myModule");
 });
 
-test("requireName finds wrapped require with codexLinuxPatchExternalOpen", () => {
-  const source = `let a=1,electronAlias=codexLinuxPatchExternalOpen(require(\`electron\`)),c=3`;
-  assert.strictEqual(requireName(source, "electron"), "electronAlias");
-});
-
-test("requireName finds locally marked external-open targets", () => {
-  const source =
-    'let electronAlias=/*codexLinuxExternalOpenTarget*/codexLinuxPatchExternalOpen(require("electron"))';
-  assert.strictEqual(requireName(source, "electron"), "electronAlias");
-});
-
 test("requireName rejects an arbitrary require wrapper", () => {
   const source = `let a=1,electronAlias=myCustomWrapper(require(\`electron\`)),c=3`;
   assert.strictEqual(requireName(source, "electron"), null);
-});
-
-test("requireName limits the Linux external-open wrapper to electron", () => {
-  const source = `const fsAlias=codexLinuxPatchExternalOpen(require("node:fs"))`;
-  assert.strictEqual(requireName(source, "node:fs"), null);
 });
 
 test("requireName returns null when module not found", () => {
@@ -46,11 +30,6 @@ test("requireName returns null when module not found", () => {
 
 test("inferModuleAlias delegates to requireName for direct require", () => {
   const source = `let electronAlias=require("electron")`;
-  assert.strictEqual(inferModuleAlias(source, "electron"), "electronAlias");
-});
-
-test("inferModuleAlias delegates to requireName for the Linux external-open wrapper", () => {
-  const source = `let electronAlias=codexLinuxPatchExternalOpen(require("electron"))`;
   assert.strictEqual(inferModuleAlias(source, "electron"), "electronAlias");
 });
 
