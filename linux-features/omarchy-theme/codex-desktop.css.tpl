@@ -1,4 +1,4 @@
-/* Managed by the Codex Desktop Linux omarchy-theme feature. */
+/* Managed by the ChatGPT Community omarchy-theme feature. */
 :root {
   color-scheme: dark;
   --codex-omarchy-accent: {{ accent }};

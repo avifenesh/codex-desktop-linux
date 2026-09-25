@@ -7,49 +7,19 @@ installer_source="$SCRIPT_DIR/linux-features/read-aloud/install-kokoro-runtime.s
 target_plugin="$INSTALL_DIR/resources/plugins/openai-bundled/plugins/read-aloud"
 target_marketplace="$INSTALL_DIR/resources/plugins/openai-bundled/.agents/plugins/marketplace.json"
 
-find_cargo_for_read_aloud_mcp() {
-    if command -v cargo >/dev/null 2>&1; then
-        command -v cargo
-        return 0
-    fi
-
-    if [ -x "$HOME/.cargo/bin/cargo" ]; then
-        echo "$HOME/.cargo/bin/cargo"
-        return 0
-    fi
-
-    return 1
-}
-
-build_read_aloud_mcp_backend() {
+resolve_read_aloud_mcp_backend() {
     local source_binary="$SCRIPT_DIR/target/release/codex-read-aloud-linux"
-    local cargo_cmd=""
 
     if [ -n "${CODEX_LINUX_READ_ALOUD_MCP_SOURCE:-}" ]; then
-        [ -x "$CODEX_LINUX_READ_ALOUD_MCP_SOURCE" ] || {
-            echo "Read Aloud MCP source is not executable: $CODEX_LINUX_READ_ALOUD_MCP_SOURCE" >&2
-            return 1
-        }
-        echo "Using prebuilt Read Aloud MCP backend" >&2
-        printf '%s\n' "$CODEX_LINUX_READ_ALOUD_MCP_SOURCE"
-        return 0
-    fi
-
-    if ! cargo_cmd="$(find_cargo_for_read_aloud_mcp)"; then
-        echo "cargo not found; Read Aloud MCP plugin will be unavailable" >&2
-        return 1
-    fi
-
-    echo "Building Read Aloud MCP backend..." >&2
-    if ! (cd "$SCRIPT_DIR" && "$cargo_cmd" build --release -p codex-read-aloud-linux >&2); then
-        echo "Failed to build Read Aloud MCP backend" >&2
-        return 1
+        source_binary="$CODEX_LINUX_READ_ALOUD_MCP_SOURCE"
     fi
 
     [ -x "$source_binary" ] || {
-        echo "Read Aloud MCP backend missing after build: $source_binary" >&2
+        echo "Read Aloud MCP requires a prebuilt release backend: $source_binary" >&2
+        echo "Build native feature helpers once before packaging, or set CODEX_LINUX_READ_ALOUD_MCP_SOURCE." >&2
         return 1
     }
+    echo "Using prebuilt Read Aloud MCP backend" >&2
     printf '%s\n' "$source_binary"
 }
 
@@ -100,7 +70,7 @@ NODE
     exit 1
 }
 
-backend_binary="$(build_read_aloud_mcp_backend)"
+backend_binary="$(resolve_read_aloud_mcp_backend)"
 
 rm -rf "$target_plugin"
 mkdir -p "$target_plugin"

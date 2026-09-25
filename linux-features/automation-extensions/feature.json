@@ -1,0 +1,9 @@
+{
+  "id": "automation-extensions",
+  "title": "Automation Extensions",
+  "description": "Optional multi-time scheduling and eager automation_update tool exposure.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patchDescriptors": "./patch.js"
+  }
+}

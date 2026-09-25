@@ -1,57 +1,19 @@
 //! Desktop notification helpers used by the updater daemon.
 
 use anyhow::Result;
-use notify_rust::{Hint, Timeout};
+use notify_rust::Hint;
 use std::path::{Path, PathBuf};
 
-const APP_NAME: &str = "ChatGPT Desktop";
+const APP_NAME: &str = "ChatGPT Community";
 const DESKTOP_ENTRY: &str = "codex-desktop";
 const PACKAGED_BUNDLE_ICON_PATH: &str = "/opt/codex-desktop/.codex-linux/codex-desktop.png";
 const SYSTEM_ICON_PATH: &str = "/usr/share/icons/hicolor/256x256/apps/codex-desktop.png";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActionResponse {
-    Invoked(String),
-    Closed,
-}
 
 /// Sends a desktop notification through the host notification service.
 pub fn send(summary: &str, body: &str) -> Result<()> {
     let notification = base_notification(summary, body);
     notification.show()?;
     Ok(())
-}
-
-pub fn send_actionable(
-    summary: &str,
-    body: &str,
-    actions: &[(&str, &str)],
-) -> Result<ActionResponse> {
-    let mut notification = base_notification(summary, body);
-    notification
-        .hint(Hint::Resident(true))
-        .timeout(Timeout::Milliseconds(20000));
-    for (action_id, label) in actions {
-        notification.action(action_id, label);
-    }
-
-    let selected_action = std::sync::Arc::new(std::sync::Mutex::new(ActionResponse::Closed));
-    let selected_action_clone = selected_action.clone();
-    notification.show()?.wait_for_action(move |action| {
-        let next_action = if action == "__closed" {
-            ActionResponse::Closed
-        } else {
-            ActionResponse::Invoked(action.to_string())
-        };
-        if let Ok(mut selected_action) = selected_action_clone.lock() {
-            *selected_action = next_action;
-        }
-    });
-
-    Ok(selected_action
-        .lock()
-        .map(|action| action.clone())
-        .unwrap_or(ActionResponse::Closed))
 }
 
 fn base_notification(summary: &str, body: &str) -> notify_rust::Notification {

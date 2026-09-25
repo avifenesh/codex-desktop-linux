@@ -1,6 +1,6 @@
 # Project Group Last Updated Sorting
 
-Optional current-DMG patch for the Projects sidebar.
+Optional current-package patch for the Projects sidebar.
 
 Upstream applies `Last updated` to task rows inside each project, but it then
 reapplies the saved manual project order to the project groups themselves. A

@@ -1,7 +1,7 @@
 {
   "id": "codex-micro",
   "title": "Codex Micro hardware support",
-  "description": "Adds the verified Linux node-hid binding and narrow USB-C/Bluetooth hidraw policy required by the upstream Work Louder Codex Micro service.",
+  "description": "Enables the upstream Work Louder Codex Micro service on Linux and adds narrow USB-C/Bluetooth hotplug and hidraw policy while reusing the official node-hid binding.",
   "defaultEnabled": false,
   "entrypoints": {
     "patchDescriptors": "./patch.js"

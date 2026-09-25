@@ -11,7 +11,7 @@ const {
   isPatchIntegrityError,
 } = require("../../scripts/patches/integrity-error.js");
 
-const WATCHBOUND_NODE_RANGE = ">=24.15.0 <25";
+const WATCHBOUND_NODE_RANGE = ">=18.15.0";
 const WATCHBOUND_TARGET_CONTRACTS = Object.freeze({
   x64: Object.freeze({
     packageName: "@gadicc/watchbound-node-linux-x64-gnu",
@@ -28,14 +28,6 @@ const WATCHBOUND_TARGET_CONTRACTS = Object.freeze({
     targetTriple: "aarch64-unknown-linux-gnu",
     elfClass: 64,
     elfMachine: 183,
-  }),
-  arm: Object.freeze({
-    packageName: "@gadicc/watchbound-node-linux-arm-gnueabihf",
-    path: "watchbound.linux-arm-gnueabihf.node",
-    target: "linux-arm-gnueabihf",
-    targetTriple: "armv7-unknown-linux-gnueabihf",
-    elfClass: 32,
-    elfMachine: 40,
   }),
 });
 const REQUIRED_WATCHBOUND_TARGET_ARCHITECTURES = Object.freeze(
@@ -87,9 +79,7 @@ function nodeVersionSupportsWatchbound(version) {
     version,
     "Watchbound target Node.js version",
   ).split(".").map(Number);
-  return major === 24 && (
-    minor > 15 || (minor === 15 && patch >= 0)
-  );
+  return major > 18 || (major === 18 && (minor > 15 || (minor === 15 && patch >= 0)));
 }
 
 function extractedAppElectronVersion(extractedDir) {
@@ -142,15 +132,18 @@ function validateTargetRuntime(
         `${manifest.runtime.node}`,
     );
   }
-  if (
-    targetNodeVersion != null &&
-    targetNodeVersion !== "" &&
-    exactVersion(targetNodeVersion, "Target Node.js version") !== manifest.runtime.node
-  ) {
+  if (targetNodeVersion != null && targetNodeVersion !== "") {
+    const targetNode = exactVersion(targetNodeVersion, "Target Node.js version");
+    if (nodeVersionSupportsWatchbound(targetNode)) {
+      return {
+        electron: buildElectronVersion,
+        node: targetNode,
+        qualification: "pinned-artifact-manifest",
+      };
+    }
     throw new Error(
-      `Watchbound ${manifest.version} is qualified for Electron ` +
-        `${manifest.runtime.electron} / Node.js ${manifest.runtime.node}, got Node.js ` +
-        `${targetNodeVersion}`,
+      `Watchbound ${manifest.version} requires Node.js ${WATCHBOUND_NODE_RANGE}, ` +
+        `got Node.js ${targetNode}`,
     );
   }
   return {
@@ -198,7 +191,7 @@ function validateArtifactManifest(manifest) {
     )
   ) {
     throw new Error(
-      "Watchbound artifact manifest must contain exactly the x64, arm64, and arm targets",
+      "Watchbound artifact manifest must contain exactly the x64 and arm64 targets",
     );
   }
   for (const [architecture] of targetArtifacts) {

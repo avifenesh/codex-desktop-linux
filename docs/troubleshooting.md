@@ -1,255 +1,310 @@
 # Troubleshooting
 
-| Problem | Solution |
-|---|---|
-| `Error: write EPIPE` | Run `start.sh` directly instead of piping output |
-| Blank window | Check whether the configured webview port is already in use: `ss -tlnp \| grep -E '5175\|5176'` |
-| `ERR_CONNECTION_REFUSED` on the webview port | Ensure `python3` works and the configured port is free |
-| Stuck on Codex logo splash | Check `~/.cache/codex-desktop/launcher.log`; another process may be serving the webview port |
-| A second launch opens another app instance, or Remote Control immediately turns itself off with `EACCES ... /tmp/codex-ipc/ipc-<uid>.sock` in the logs | Update and fully restart Codex Desktop. The launcher gives Electron a private default `TMPDIR` under `$XDG_STATE_HOME/codex-desktop/tmp` (normally `~/.local/state/codex-desktop/tmp`), preventing another Linux user from owning the shared IPC directory without placing bulk temporary data in `$XDG_RUNTIME_DIR` tmpfs. An explicitly configured `TMPDIR` remains unchanged. |
-| `$XDG_RUNTIME_DIR/codex-desktop/tmp` consumes significant tmpfs memory | Update and fully restart Codex Desktop. Current launchers keep bulk temporary data in the private disk-backed app state directory while runtime-only sockets remain under `$XDG_RUNTIME_DIR`. Remove old runtime temporary directories only after confirming no older Codex Desktop process is using them. |
-| `CODEX_CLI_PATH` error | Reopen the app to retry automatic CLI install, or install manually with `npm i -g --include=optional @openai/codex` / `npm i -g --include=optional --prefix ~/.local @openai/codex` |
-| `Missing optional dependency @openai/codex-linux-x64` or malformed tool calls after a self-managed npm CLI install | Reinstall with optional dependencies: `npm i -g --include=optional @openai/codex`. To repair an existing nvm install, run `npm install --include=optional` from the installed `@openai/codex` package directory |
-| `codex-update-manager status --json` shows `cli_status: "update_required"` for `/usr/bin/codex` on Arch | Pacman itself has a newer package for the installed CLI. Update through pacman instead of npm, for example `sudo pacman -Syu`; pacman-managed CLI installs are intentionally not auto-updated through npm |
-| `codex-update-manager status --json` shows `/usr/bin/codex` with `cli_status: "up_to_date"` but `cli_official_latest_version` is newer than `cli_package_manager_latest_version` | The distro package is behind the official npm release, but pacman does not currently offer a newer package. ChatGPT Desktop will not auto-switch channels; read `cli_error_message` and decide whether to stay on the distro-managed CLI or replace it with another install method |
-| `nix run` exits with no window or terminal output | Check `~/.cache/codex-desktop/launcher.log`; the Nix package still requires a user-provided `codex` CLI |
-| `gh auth status` works in terminal but fails inside ChatGPT Desktop | See [GitHub CLI auth in app-launched shells](github-cli-auth.md) |
-| Electron hangs while CLI is outdated | Re-run the launcher and check `~/.cache/codex-desktop/launcher.log` plus `~/.local/state/codex-update-manager/service.log` |
-| GPU / Vulkan / Wayland errors | Try `CODEX_LINUX_RENDERING_MODE=wayland-gpu ./codex-app/start.sh` or persistent launch flags below |
-| UI massively oversized, tiny, or blurry | See [Oversized or blurry UI](#oversized-or-blurry-ui-hidpi--fractional-scaling); quick fix: `CODEX_FORCE_DEVICE_SCALE_FACTOR=1 ./codex-app/start.sh` |
-| Window flickering, resize ghosting, or stale frame trails | Try `CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=1 ./codex-app/start.sh`, then `./codex-app/start.sh --disable-gpu` if needed |
-| Right-clicking the title bar leaves GNOME/X11 input stuck | Press `Esc` first, or use `Alt+Space` for the window menu. If the lockup is repeatable, test the optional `frameless-titlebar` feature below and include your distro, GNOME version, X11/Wayland session, package method, and `.codex-linux/linux-features-staged.json` when reporting it |
-| Transparent or dark left sidebar | Check whether the Linux opaque-window patch was applied, then rebuild with a current checkout |
-| Sandbox errors | The launcher already sets `--no-sandbox` |
-| Renderer crashes in containers with a tiny `/dev/shm` | The launcher keeps `--disable-dev-shm-usage` automatically when `/dev/shm` is missing or below 1 GiB; force it with `CODEX_ELECTRON_DISABLE_DEV_SHM_USAGE=1` |
-| Screen reader does not read the app UI | Renderer accessibility is forced automatically when Orca, brltty, the GNOME screen-reader setting, AT-SPI accessibility state (`org.a11y.Status IsEnabled` or `toolkit-accessibility`, e.g. after `codex-computer-use-linux setup`), or accessibility env markers are detected; force it with `CODEX_FORCE_RENDERER_ACCESSIBILITY=1` |
-| Stale install / cached DMG | `make build-app-fresh` refreshes the cached DMG and builds a clean candidate; the working app remains until acceptance succeeds |
-| `install.sh failed during local rebuild` after an upstream DMG update, with `Critical patch failures` or a `required-patch` blocker | The installed Linux wrapper may be older than the DMG. Check `~/.local/state/codex-update-manager/service.log` for the workspace `install.log` path and inspect `/opt/codex-desktop/update-builder/.codex-linux/source-info.json`. Update the wrapper/package from a current trusted checkout or package source, then retry. Do not use `CODEX_ENFORCE_CRITICAL_PATCHES=0` for routine updates; if current `main` still rejects the DMG, report the drift with the acceptance decision and patch report. |
-| `Candidate was not installed (verdict: rejected)` | Open `dist-next/rebuild/upstream-dmg-decision.json`. If the blocker is `enabled-feature-drift`, disable the named Linux Feature and retry; otherwise fix required current-DMG drift before retrying |
-| `Candidate was not installed (verdict: inconclusive)` | Check the build/inspect logs and missing report paths in `upstream-dmg-decision.json`; infrastructure failures intentionally preserve the working app |
-| `Atomic directory exchange is unsupported` | Keep the candidate and final app as sibling directories on a local Linux filesystem that supports `renameat2(RENAME_EXCHANGE)`; promotion deliberately does not use a non-atomic fallback |
-| Interrupted install left a promotion journal | Run the installer again. It recovers the previous app into the recorded backup before reusing the candidate path; the canonical app remains available throughout |
-| Computer Use plugin invisible in UI | Enable the Computer Use UI opt-in; upstream server/account rollout can still hide some controls |
-| Computer Use `doctor` reports no keyboard-capable input backend | On X11, install `xdotool` and confirm `DISPLAY` is nonempty. On Wayland, use a RemoteDesktop portal that advertises keyboard support, or install ydotool 1.0.3+ and start `ydotoold` / `ydotool.service` with a connectable socket. Access to `/dev/uinput` alone provides absolute pointer input only |
-| Computer Use `doctor` reports `ydotool_socket: Permission denied` | Adjust the daemon socket so users in the `input` group can use it |
-| Computer Use reports an unsupported ydotool CLI even though `ydotoold` is running | Upgrade to ydotool 1.0.3+ with absolute/wheel mousemove, click, `key -d 100`, and `type --file -` semantics; socket presence alone is intentionally insufficient |
-| Computer Use cannot list or focus windows on a generic X11 desktop | Install `wmctrl` and `xprop`, confirm `XDG_SESSION_TYPE=x11` (or no Wayland display) and a nonempty `DISPLAY`, then rerun `codex-computer-use-linux doctor` |
-| `ConnectTimeoutError` for Electron headers | Re-run `make build-app`; the installer uses `https://artifacts.electronjs.org/headers/dist` by default |
-| Computer Use AT-SPI tree empty | Run `codex-computer-use-linux setup`, then restart the target app |
-| `ERR_NO_SUPPORTED_PROXIES` with an authenticated proxy | Do not pass credentials inside Chromium's `--proxy-server` URL; enable the optional `authenticated-proxy` Linux feature |
-| `codex-update-manager` keeps running after package removal | Run `systemctl --user disable --now codex-update-manager.service` and confirm `/opt/codex-desktop` is gone |
+## Source verification fails
 
-## Persistent Launch Flags
-
-The launcher creates `~/.config/codex-desktop/electron-flags.conf` on first
-cold start. Uncomment one flag per line; blank lines and lines starting with
-`#` are ignored. Existing files are never overwritten.
-
-For KDE/Wayland rendering issues, try:
-
-```text
---ozone-platform=x11
-```
-
-For resize ghosting, stale frame trails, or compositor artifacts after dragging
-window borders, try:
-
-```text
---disable-gpu-compositing
-```
-
-For native Wayland IME setups, try:
-
-```text
---wayland
---enable-wayland-ime
---wayland-text-input-version=1
-```
-
-Restart ChatGPT Desktop after changing this file. Warm-start launches reuse the
-running Electron process and will not pick up new flags.
-
-## Oversized Or Blurry UI (HiDPI / Fractional Scaling)
-
-If the whole Codex UI renders far too large (or too small/blurry) inside its
-window while other apps scale normally, Electron picked a wrong device scale
-factor for your display setup. Chromium computes the scale differently per
-backend: under native Wayland it uses the compositor's monitor scale, while
-under X11/XWayland it derives the scale from `Xft.dpi` (dpi / 96), `GDK_SCALE`,
-and `GDK_DPI_SCALE`. On GNOME Wayland sessions with fractional scaling or
-XWayland native scaling enabled, those two views can disagree — the compositor
-scales the window buffer and Chromium applies its own scale on top, so the UI
-ends up double-scaled (oversized) or unscaled (tiny/blurry).
-
-First inspect what the launcher and your session report:
+Run the verifier test suite and inspect the generated metadata:
 
 ```bash
-./codex-app/start.sh --diagnose-scaling          # local build
-/opt/codex-desktop/start.sh --diagnose-scaling   # native package install
+node --test scripts/lib/upstream-linux-package.test.js
+./install.sh --inspect --report-dir /tmp/codex-inspect
 ```
 
-It prints the session type, scaling-related environment variables, GNOME
-`scaling-factor` / `text-scaling-factor`, `Xft.dpi`, monitor layout, and the
-exact Electron flags a launch would use.
+Do not bypass a signature or hash failure. Confirm system time, HTTPS access to
+`persistent.oaistatic.com`, `gpgv`, the pinned key fingerprint, and sufficient
+disk space. An explicit package must match host architecture and be named
+`chatgpt` in control metadata.
 
-One-line workarounds (quit the app fully first — warm starts reuse the
-running process and ignore new flags):
+## The app does not launch
 
 ```bash
-# Force a specific device scale factor (1 = unscaled; 1.5, 2, ... also work)
-CODEX_FORCE_DEVICE_SCALE_FACTOR=1 codex-desktop
-
-# Force the X11/XWayland backend instead of native Wayland
-CODEX_OZONE_PLATFORM=x11 codex-desktop
-
-# Force native Wayland (best for fractional scaling on current GNOME)
-CODEX_OZONE_PLATFORM=wayland codex-desktop
+/opt/codex-desktop/start.sh --diagnose
+/opt/codex-desktop/ChatGPT --version
+journalctl --user -u codex-update-manager.service --no-pager
 ```
 
-On GNOME Wayland with more than one monitor, the default `auto` rendering
-profile detects connected displays through `/sys/class/drm` and forces the
-X11/XWayland backend. This avoids Electron resizing or rescaling the maximized
-window when pointer focus crosses to another display. To opt back in to native
-Wayland, set `CODEX_OZONE_PLATFORM=wayland` or
-`CODEX_LINUX_RENDERING_MODE=default`.
+The diagnostic checks the official executable, ASAR, bundled `codex`, `rg`, and
+code-mode host. It also warns when Chromium sandbox prerequisites are missing.
 
-For a local self-build, replace `codex-desktop` with `./codex-app/start.sh`.
-Explicit launcher flags (`--x11`, `--wayland`, `--ozone-platform=*`,
-`--force-device-scale-factor=*`) always win over these environment variables.
-
-To make the fix persistent, uncomment the matching flag in
-`~/.config/codex-desktop/electron-flags.conf`:
-
-```text
---force-device-scale-factor=1
-```
-
-or edit the desktop launcher: copy
-`/usr/share/applications/codex-desktop.desktop` to
-`~/.local/share/applications/` and prepend the variable to the `Exec` line:
-
-```text
-Exec=env CODEX_FORCE_DEVICE_SCALE_FACTOR=1 BAMF_DESKTOP_FILE_HINT=... /usr/bin/codex-desktop %u
-```
-
-Ubuntu GNOME notes:
-
-- With plain 100% or 200% scaling in Settings → Displays, the defaults work;
-  do not force anything.
-- Fractional scaling (125%/150%/175%) is a Mutter experimental feature
-  (`scale-monitor-framebuffer`). If the UI is oversized there, try
-  `CODEX_OZONE_PLATFORM=wayland` first; if it is blurry instead, try
-  `CODEX_FORCE_DEVICE_SCALE_FACTOR` matching your monitor scale (e.g. `1.5`).
-- On GNOME 47+ the `xwayland-native-scaling` experimental feature changes how
-  XWayland apps are scaled; if you enabled it and Codex looks double-scaled
-  under `CODEX_OZONE_PLATFORM=x11`, either disable that feature or run the
-  app on native Wayland.
-- "Large Text" (accessibility) only sets `text-scaling-factor` and affects
-  fonts, not the window scale; `--diagnose-scaling` shows both values.
-
-## GNOME/X11 Title Bar Right-click Lockups
-
-On some GNOME/X11 setups, right-clicking the Codex title bar can leave the
-desktop input focused on the window-manager menu. Try `Esc` first. `Alt+Space`
-opens the same window menu through the keyboard path and can be a safer
-workaround while debugging.
-
-If the issue is repeatable, verify whether the installed app is using optional
-Linux features:
+Also confirm that the installed package architecture matches the machine and
+that no official ChatGPT process is already holding the shared profile lock:
 
 ```bash
-if [ -f /opt/codex-desktop/.codex-linux/linux-features-staged.json ]; then
-  cat /opt/codex-desktop/.codex-linux/linux-features-staged.json
-else
-  echo "No staged Linux feature manifest found for this install"
-fi
+uname -m
+pgrep -a -f '(/ChatGPT|/chatgpt)' || true
 ```
 
-Then test the disabled-by-default `frameless-titlebar` feature in a local
-checkout:
+Do not start the underlying `ChatGPT` binary directly for normal use. The
+`codex-desktop` wrapper supplies the correct desktop identity and enabled
+feature hooks.
+
+## Persistent Electron flags and native Wayland
+
+The launcher reads shared Electron flags from
+`${XDG_CONFIG_HOME:-$HOME/.config}/electron-flags.conf` and Community-specific
+flags from
+`${XDG_CONFIG_HOME:-$HOME/.config}/codex-desktop/electron-flags.conf`, in that
+order. Put one complete argument on each line; blank lines and lines beginning
+with `#` are ignored. App-specific flags are followed by enabled feature flags
+and explicit command-line arguments, so a later explicit argument can override
+an earlier setting.
+
+The official Electron runtime defaults to the X11 Ozone backend, so without a
+flag a Wayland session runs the app through XWayland, and a compositor whose
+XWayland does not scale clients draws the window at 1x on a HiDPI output. The
+launcher therefore appends `--ozone-platform=wayland` when `WAYLAND_DISPLAY`
+names a compositor socket with a listener (checked through `ss` where iproute2
+is available) and the session is not X11. That switch has no
+fallback, which is why the socket is confirmed first, and sessions known to
+misbehave on the Wayland backend keep the X11 default: ChromeOS Crostini
+(Sommelier, read from the environment or the systemd user manager), GNOME
+Wayland with more than one connected monitor, and WSLg. Any explicit selection
+wins: a command-line argument, either flag file, a feature argument, or a
+launcher hook. This runtime does not accept `--ozone-platform-hint` or
+`ELECTRON_OZONE_PLATFORM_HINT`.
+
+`CODEX_OZONE_PLATFORM=x11` or `CODEX_OZONE_PLATFORM=wayland` pins a backend
+ahead of that detection while still yielding to an explicit flag; the Nix
+wrapper sets `x11` so its `NIXOS_OZONE_WL` opt-in stays authoritative. To pin a
+backend for every launch without editing a generated desktop entry:
 
 ```bash
-cp linux-features/features.example.json linux-features/features.json
-python3 - <<'PY'
-import json
-from pathlib import Path
-
-path = Path("linux-features/features.json")
-data = json.loads(path.read_text())
-enabled = set(data.get("enabled", []))
-enabled.add("frameless-titlebar")
-data["enabled"] = sorted(enabled)
-path.write_text(json.dumps(data, indent=2) + "\n")
-PY
-make install-native
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/codex-desktop"
+printf '%s\n' '--ozone-platform=x11' > \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/codex-desktop/electron-flags.conf"
 ```
 
-When opening an issue, include the distro/version, GNOME Shell version,
-`XDG_SESSION_TYPE`, package method, ChatGPT Desktop build information, and whether
-the lockup happens with `frameless-titlebar` enabled. This path changes the
-window controls contract, so it is kept opt-in rather than enabled for all
-Linux users.
+Restart every running official and Community process after changing the file.
+The launcher does not evaluate shell quoting or split a line into multiple
+arguments.
 
-## Authenticated HTTP Proxies
+## Chromium sandbox or AppArmor
 
-Chromium does not accept `user:password@` credentials inside the proxy list
-passed through `--proxy-server`. Authenticated proxy support is available as
-the disabled-by-default `linux-features/authenticated-proxy/` feature; enable
-that feature and follow its README for `CODEX_LINUX_PROXY_*`, standard proxy
-environment variable, and Flatpak override examples.
+Prefer a native package, which installs an AppArmor profile adapted to
+`/opt/codex-desktop/ChatGPT`. AppImage intentionally refuses to disable the
+sandbox automatically. Enable unprivileged user namespaces according to your
+distribution policy or use the native package.
 
-## Transparent Or Dark Sidebar
+If a native package was copied between systems, verify its adapted profile and
+reload AppArmor according to the distribution's tooling. Never solve a
+packaging error by globally disabling Chromium sandboxing.
 
-If the left sidebar looks black, translucent, or shows the desktop through it,
-first confirm whether the Linux opaque-window patch was applied. This is
-usually patch drift rather than a GPU flag issue.
+## Duplicate or stale desktop entries
 
-For a native package built by the updater, inspect the latest report:
+The official package should appear as **ChatGPT**. This project should appear
+as **ChatGPT Community** with a blue `C` mark. Confirm the selected entry:
 
 ```bash
-python3 - <<'PY'
-import json
-from pathlib import Path
-
-reports = sorted(Path("~/.cache/codex-update-manager/workspaces").expanduser().glob("*/reports/patch-report.json"))
-report = reports[-1]
-data = json.loads(report.read_text())
-print(report)
-for patch in data.get("patches", []):
-    if patch.get("name") == "linux-opaque-background":
-        print(patch.get("status"), patch.get("reason", ""))
-PY
+grep -H '^Name=' \
+  /usr/share/applications/chatgpt.desktop \
+  /usr/share/applications/codex-desktop.desktop 2>/dev/null || true
 ```
 
-If `linux-opaque-background` is `skipped-*`, update this checkout and rebuild
-from the same DMG or a fresh one:
+After upgrading from an older package, refresh the desktop database or log out
+and in if your shell keeps stale names or icons. Do not rename the official
+desktop file to work around a shell cache.
 
-```bash
-git pull --ff-only
-make build-app DMG=~/.cache/codex-update-manager/downloads/Codex.dmg
-make package
-make install
+## Official and custom apps interfere
+
+Both use the upstream `Codex` profile. Fully exit the official `chatgpt` process
+before starting `codex-desktop`, and vice versa. Their packages and desktop
+entries can coexist, but upstream single-instance locking prevents reliable
+parallel sessions.
+
+In the desktop menu, the custom build is **ChatGPT Community** with a blue `C`;
+the unqualified **ChatGPT** entry is OpenAI's package.
+
+## AppImage opens from Flatpak Chrome but the extension cannot connect
+
+The optional `flatpak-chrome-native-messaging` feature supports the
+**AppImage + Flatpak Google Chrome (`com.google.Chrome`)** combination. Enable
+it before building the AppImage:
+
+```json
+{
+  "enabled": ["flatpak-chrome-native-messaging"]
+}
 ```
 
-## `/tmp` Mounted `noexec`
+Fully exit ChatGPT Community and Chrome after installing the rebuilt AppImage.
+Start ChatGPT Community first, then reopen Chrome.
 
-Some hardened systems mount `/tmp` with `noexec`, which can prevent the Rust
-installer or bundled Node.js runtime from executing.
+In [issue #1434](https://github.com/ilysenko/codex-desktop-linux/issues/1434),
+**Open the app** launches Community, while the extension reports **Native
+transport disconnected** and Settings > Computer use > Google Chrome shows
+**Not installed**. Opening a URI only verifies the desktop link handler; it
+does not verify the extension's native-messaging handshake.
+
+Flatpak isolates the browser's configuration and host access. Its ability to
+open a URI through a portal does not establish access to a native host; see the
+[Flatpak sandbox documentation](https://docs.flatpak.org/en/latest/sandbox-permissions.html).
+The feature installs a private native-host manifest and Bash wrapper under
+`~/.var/app/com.google.Chrome/config/google-chrome/NativeMessagingHosts/`.
+The wrapper forwards the binary native-messaging stream to an authenticated
+`127.0.0.1` relay. The relay runs the exact official host selected by the
+upstream runtime registry outside the sandbox. It does not add a Flatpak
+override or copy the official host into the sandbox.
+
+To identify this case, open `chrome://version` in the browser that has the
+extension and inspect **Executable Path** and **Profile Path**. Check the
+Flatpak installation with:
 
 ```bash
-mkdir -p ~/tmp/codex-work ~/tmp/codex-cache
-
-export TMPDIR=~/tmp/codex-work
-export XDG_CACHE_HOME=~/tmp/codex-cache
-
-# run install steps in this shell
+flatpak info com.google.Chrome
 ```
 
-## Useful Logs
+An installed Flatpak does not prove that the current browser is using it; check
+the browser paths as well, especially when native Chrome is also installed.
+
+The launcher also points the upstream Chrome diagnostics at the Flatpak profile
+and manifest. If Settings still shows **Not installed**, verify that the
+extension is installed in the same Flatpak profile shown by `chrome://version`,
+then restart both applications in that order. If the problem persists, include
+both application and browser versions, the enabled feature list, and the
+extension error in the issue. Redact personal directory names from paths before
+sharing them.
+
+The legacy plugin-cache repair below addresses a different migration problem.
+
+## Browser or Chrome plugin is visible but cannot connect
+
+The first Community launch after migrating from the legacy pre-official build
+refreshes cached Browser and Chrome plugins only when their bundled manifests
+match the official Linux plugins and they contain a known retired Linux-port
+marker. This one-time migration replaces the old custom Chrome extension host
+and fixes the old `/tmp/codex-browser-use-<uid>` discovery path; the official
+Linux runtime uses `/tmp/codex-browser-use`. It also removes legacy group-write
+permission from the private `.plugin-appserver` runtime directory, which the
+Chrome host rejects as an untrusted parent path.
+
+If Browser was already loaded before that migration ran, fully exit every
+ChatGPT process, fully exit Chrome/Chromium, start **ChatGPT Community**, and
+then reopen the browser. Arbitrary plugin caches and user-authored plugins are
+never rewritten.
+
+Clearing the entire browser profile or all Codex plugin caches is not a normal
+repair step. The official Browser/Chrome integration is already present in the
+Linux payload; this migration only replaces known snapshots created by the old
+community port.
+
+If the legacy snapshot predates the recognized migration markers, remove only
+the two re-creatable upstream-bundled caches, then restart Community followed
+by Chrome:
 
 ```bash
-sed -n '1,160p' ~/.cache/codex-desktop/launcher.log
-sed -n '1,160p' ~/.local/state/codex-update-manager/service.log
-codex-update-manager status --json
+pkill -TERM -x ChatGPT 2>/dev/null || true
+rm -rf -- \
+  "${CODEX_HOME:-$HOME/.codex}/plugins/cache/openai-bundled/browser" \
+  "${CODEX_HOME:-$HOME/.codex}/plugins/cache/openai-bundled/chrome"
+chmod go-w "${CODEX_HOME:-$HOME/.codex}/plugins/.plugin-appserver" 2>/dev/null || true
+```
+
+Do not delete the whole `plugins` directory: it may contain user plugins and
+unrelated cached integrations.
+
+## A feature build fails after an upstream release
+
+Disable the feature in `linux-features/features.json` and rebuild to confirm the
+official baseline. Enabled feature drift deliberately blocks candidate
+promotion. Report the feature ID, package version/architecture, and patch report.
+
+Known retired feature IDs are ignored. A misspelled or arbitrary unknown ID is
+an error; correct the config rather than adding a compatibility alias.
+
+## Updater is waiting
+
+```bash
+codex-update-manager status
 systemctl --user status codex-update-manager.service
 ```
+
+`WaitingForAppExit` is expected: close all ChatGPT/Codex desktop processes. For
+a failed privileged install, run `codex-update-manager install-ready` after
+fixing the reported package-manager issue. Roll back with
+`codex-update-manager rollback`.
+
+A release check that fails during metadata retrieval, download, or build sends
+one desktop notification. Repeated failures for the same candidate stay silent,
+so a stalled updater should be diagnosed rather than waited out.
+
+If the failure log reports `npx is required to patch app.asar` (or the older
+`npx: command not found`), the build host has `node` without npm/npx — typically
+the Debian/Ubuntu `nodejs` package alone, or a version-manager (nvm/fnm) Node
+that is not visible to the systemd user service. Install npm
+(`sudo apt install npm`) or run `systemctl --user edit codex-update-manager` and
+add the following lines in the editor, replacing the example Node path with
+your own:
+
+```ini
+[Service]
+Environment=PATH=/home/<user>/.local/share/fnm/node-versions/<ver>/installation/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+```
+
+Restart the service with `systemctl --user restart codex-update-manager.service`.
+
+Collect a useful updater report with:
+
+```bash
+codex-update-manager diagnose --json
+journalctl --user -u codex-update-manager.service -n 200 --no-pager
+```
+
+## Native package build or install fails
+
+Start by separating staging from packaging:
+
+```bash
+make build-app
+make package
+```
+
+If staging passes but packaging fails, confirm the distribution builder is
+installed and inspect the final lines for the selected deb/RPM/pacman command.
+If `sudo`-created files from an old checkout block cleanup, use the exact backup
+procedure below; do not rerun the whole build as root.
+
+For constrained systems, limit parallel compilation and compression:
+
+```bash
+MAX_BUILD_THREADS=2 make install-native
+```
+
+## Clean rebuild
+
+Generated state may be removed and rebuilt:
+
+```bash
+make clean-dist
+make build-app
+make package
+```
+
+Do not delete the updater rollback artifact unless you intentionally give up
+the recovery path.
+
+To remove only package artifacts, use `make clean-dist`. `make clean-state` is
+more destructive: it removes updater config/state/cache and therefore its
+managed rollback information.
+
+## Old app backup cannot be removed
+
+`codex-app.backup-*` directories are generated transactional backups, not
+source files or additional installed applications. A backup created by an old
+root-run build may be owned by root. Current builds collapse that cleanup
+failure to one warning and continue with the accepted candidate.
+
+Inspect the exact stale directories before changing or deleting anything:
+
+```bash
+find "$PWD" -maxdepth 1 -type d -name 'codex-app.backup-*' -print
+```
+
+For a confirmed stale path, replace `/absolute/path/to/backup` below with one
+exact path printed above:
+
+```bash
+sudo chown -R -- "$(id -u):$(id -g)" /absolute/path/to/backup
+rm -rf -- /absolute/path/to/backup
+```
+
+Never run the cleanup against the repository root, `codex-app/`, the active
+updater rollback artifact, `$HOME`, or a wildcard you have not inspected.

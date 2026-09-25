@@ -1,6 +1,6 @@
 # Agent Workspaces Linux Feature
 
-`agent-workspace` is an opt-in ChatGPT Desktop for Linux feature that adds the
+`agent-workspace` is an opt-in ChatGPT Community feature that adds the
 `agent-workspace-linux` control surface to the app settings UI.
 
 Enable it in `linux-features/features.json` before running the install/build
@@ -21,7 +21,7 @@ the agent-facing progressive routing entrypoint; the feature does not write
 `~/.codex/config.toml` or register a generic MCP server at startup.
 
 The feature adds a Linux-only settings section named **Agent Workspaces**. The
-page can point ChatGPT Desktop at an `agent-workspace-linux` binary, list and edit
+page can point ChatGPT Community at an `agent-workspace-linux` binary, list and edit
 saved profiles, validate profile JSON without saving, preview profile-backed
 workspace starts, require an explicit approval card before starting a hidden
 workspace, stop running workspaces, run stale workspace cleanup, and create a restricted Chrome
@@ -74,7 +74,7 @@ lifecycle actions needed by the UI. The install button also uses `execFile` with
 the fixed npm package name. When no npm prefix is already configured, the
 install button runs `npm install -g --prefix ~/.local
 @agent-sh/agent-workspace-linux` so packaged installs do not try to write into
-the bundled managed Node.js runtime or a system directory.
+the application runtime or a system directory.
 It resolves the binary in this order (highest priority first):
 
 1. the settings-page command field, persisted as

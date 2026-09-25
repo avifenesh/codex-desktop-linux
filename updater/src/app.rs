@@ -1,1391 +1,172 @@
-//! Application entrypoints and orchestration for the local updater daemon.
+//! Updater orchestration for the signed official Linux package.
 
 use crate::{
     builder, cache_cleanup,
     cli::{Cli, Commands},
-    codex_cli,
     config::{RuntimeConfig, RuntimePaths},
-    diagnostics, feature_picker, install, install_rollback, liveness, logging, notify, restart,
-    rollback,
-    state::{CliStatus, PersistedState, UpdateStatus},
-    upstream, wrapper, wrapper_apply,
+    install, install_rollback, install_transaction, liveness, logging, notify, restart, rollback,
+    state::{InstallOperation, PersistedState, UpdateStatus},
+    upstream,
 };
 use anyhow::{Context, Result};
-use chrono::{Duration as ChronoDuration, Utc};
-use serde::Deserialize;
+use chrono::Utc;
 use std::{
-    ffi::OsString,
     fs::{self, OpenOptions},
-    io::{Seek, SeekFrom, Write},
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-    process::Command,
+    path::Path,
+    time::Duration,
 };
-use tokio::time::{self, Duration};
+use tokio::time;
 use tracing::{error, info, warn};
 
-const RECONCILE_INTERVAL_SECONDS: u64 = 15;
-const CLI_MISSING_NOTIFICATION_EVENT: &str = "cli_missing";
-const CLI_MISSING_PROMPT_DISMISS_TTL: ChronoDuration = ChronoDuration::minutes(10);
-const PROMPT_INSTALL_CLI_CANCELLED_EXIT_CODE: i32 = 10;
-const PROMPT_INSTALL_CLI_NO_BACKEND_EXIT_CODE: i32 = 11;
-// Nonzero so `Restart=on-failure` relaunches the daemon on the new binary.
-const BINARY_REPLACED_RESTART_EXIT_CODE: i32 = 12;
-const DMS_POLKIT_AGENT_PROCESS_TOKEN: &str = "quickshell/dms";
-const DMS_DISABLE_POLKIT_ENV_ENTRY: &[u8] = b"DMS_DISABLE_POLKIT=1";
-const POLKIT_AUTH_AGENT_PROCESS_TOKENS: &[&str] = &[
-    "budgie-polkit",
-    "cinnamon-polkit",
-    "cosmic-osd",
-    "gnome-shell",
-    "hyprpolkitagent",
-    "io.elementary.desktop.agent-polkit",
-    "lxpolkit",
-    "lxqt-policykit-agent",
-    "mate-polkit",
-    "polkit-agent",
-    "polkit-dde-agent",
-    "polkit-gnome-authentication-agent",
-    "polkit-kde-authentication-agent",
-    DMS_POLKIT_AGENT_PROCESS_TOKEN,
-    "soteria",
-    "ukui-polkit",
-    "xfce-polkit",
-];
+const UNKNOWN_INSTALL_RECOVERY_MESSAGE: &str = "Package transaction owner could not be classified safely after the recovery grace period; automatic recovery stopped. Confirm no package manager is running, then explicitly retry the interrupted update or rollback";
 
-/// Runs the updater command-line entrypoint.
 pub async fn run(cli: Cli) -> Result<()> {
-    if let Commands::RunNpmSupervisor {
-        owner_pid,
-        timeout_millis,
-        install_lock_fd,
-        program,
-        args,
-    } = &cli.command
-    {
-        return codex_cli::run_npm_supervisor(
-            *owner_pid,
-            *timeout_millis,
-            *install_lock_fd,
-            program,
-            args,
-        );
+    if let Some(result) = run_privileged_command(&cli.command) {
+        return result;
     }
-
     let paths = RuntimePaths::detect()?;
-    if let Commands::Diagnose { json } = &cli.command {
-        return run_diagnose_command(&paths, *json).await;
-    }
-
     paths.ensure_dirs()?;
     logging::init(&paths.log_file)?;
-
-    let mut config = RuntimeConfig::load_or_default(&paths)?;
-    if let Some(enabled) = crate::config::settings_wrapper_updates_override() {
-        config.enable_wrapper_updates = enabled;
-    }
-    let mut state =
-        PersistedState::load_or_default(&paths.state_file, effective_auto_install(&config))?;
-    #[cfg(test)]
-    wait_for_process_test_barrier(
-        "CODEX_UPDATE_MANAGER_TEST_ENTRYPOINT_LOADED",
-        "CODEX_UPDATE_MANAGER_TEST_ENTRYPOINT_CONTINUE",
-    )?;
-    if !matches!(
-        &cli.command,
-        Commands::Daemon | Commands::CheckNow { .. } | Commands::InstallReady
-    ) {
-        let original_state = state.clone();
-        state.installed_version = install::installed_package_version();
-        persist_if_changed(&paths, &state, &original_state)?;
-    }
-    #[cfg(test)]
-    signal_process_test_marker("CODEX_UPDATE_MANAGER_TEST_ENTRYPOINT_PRE_DISPATCH")?;
+    let config = RuntimeConfig::load_or_default(&paths)?;
 
     match cli.command {
-        Commands::Daemon => run_daemon(&config, &mut state, &paths).await,
-        Commands::CheckNow { if_stale } => {
-            run_check_now(&config, &mut state, &paths, if_stale).await
-        }
-        Commands::CheckWrapper { json } => run_check_wrapper(&config, &mut state, &paths, json),
-        Commands::ApplyWrapperUpdate => {
-            wrapper_apply::run_apply_wrapper_update(&config, &mut state, &paths).await
-        }
-        Commands::PickFeatures { json } => feature_picker::run_pick_features(&config, &paths, json),
-        Commands::CliPreflight {
-            cli_path,
-            print_path,
-            allow_install_missing,
-        } => run_cli_preflight(
-            &mut state,
-            &paths,
-            cli_path,
-            print_path,
-            allow_install_missing,
-        ),
-        Commands::RecoverStandaloneCli {
-            codex_home,
-            install_dir,
-            print_path,
-        } => run_recover_standalone_cli(codex_home, install_dir, print_path),
-        Commands::RepairCli => run_repair_cli(&mut state, &paths),
-        Commands::RunNpmSupervisor { .. } => {
-            unreachable!("npm supervisor is handled before runtime writes")
-        }
-        Commands::PromptInstallCli {
-            cli_path,
-            print_path,
-        } => run_prompt_install_cli(&mut state, &paths, cli_path, print_path),
-        Commands::Status { json } => run_status(&config, &mut state, &paths, json),
-        Commands::Diagnose { .. } => unreachable!("diagnose is handled before runtime writes"),
-        Commands::InstallReady => run_install_ready(&config, &mut state, &paths).await,
-        Commands::Rollback => rollback::run(&config, &mut state, &paths).await,
-        Commands::InstallDeb { path } => install::install_deb(&path),
-        Commands::InstallRpm { path } => install::install_rpm(&path),
-        Commands::InstallPacman { path } => install::install_pacman(&path),
-        Commands::InstallRollbackDeb { path } => install_rollback::install_deb(&path),
-        Commands::InstallRollbackRpm { path } => install_rollback::install_rpm(&path),
-        Commands::InstallRollbackPacman { path } => install_rollback::install_pacman(&path),
-    }
-}
-
-async fn run_diagnose_command(paths: &RuntimePaths, json: bool) -> Result<()> {
-    let mut config = RuntimeConfig::load_or_default(paths)?;
-    if let Some(enabled) = crate::config::settings_wrapper_updates_override() {
-        config.enable_wrapper_updates = enabled;
-    }
-    let mut state =
-        PersistedState::load_or_default(&paths.state_file, effective_auto_install(&config))?;
-    state.installed_version = install::installed_package_version();
-    diagnostics::run(&config, &state, paths, json).await
-}
-
-fn persist_state(paths: &RuntimePaths, state: &PersistedState) -> Result<()> {
-    state.save_updater(&paths.state_file)
-}
-
-fn persist_if_changed(
-    paths: &RuntimePaths,
-    state: &PersistedState,
-    original_state: &PersistedState,
-) -> Result<()> {
-    if state != original_state {
-        persist_state(paths, state)?;
-    }
-
-    Ok(())
-}
-
-fn effective_auto_install(config: &RuntimeConfig) -> bool {
-    crate::config::settings_auto_install_override().unwrap_or(config.auto_install_on_app_exit)
-}
-
-fn should_build_detected_update(config: &RuntimeConfig, explicit_build: bool) -> bool {
-    explicit_build || crate::config::settings_auto_build_updates_override(config).unwrap_or(true)
-}
-
-fn sync_runtime_state(config: &RuntimeConfig, state: &mut PersistedState) {
-    state.auto_install_on_app_exit = effective_auto_install(config);
-    if state.status != UpdateStatus::WaitingForAppExit {
-        state.waiting_for_app_exit_auto_install = false;
-    }
-    state.installed_version = install::installed_package_version();
-}
-
-fn sync_and_persist(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-) -> Result<()> {
-    let original_state = state.clone();
-    sync_runtime_state(config, state);
-    persist_if_changed(paths, state, &original_state)
-}
-
-fn reload_state_from_disk(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-) -> Result<()> {
-    let previous_status = state.status.clone();
-    let previous_candidate_version = state.candidate_version.clone();
-    let previous_waiting_auto_install = state.waiting_for_app_exit_auto_install;
-
-    let loaded =
-        PersistedState::load_or_default(&paths.state_file, effective_auto_install(config))?;
-    let mut refreshed = loaded.clone();
-    sync_runtime_state(config, &mut refreshed);
-    persist_if_changed(paths, &refreshed, &loaded)?;
-
-    if previous_status != refreshed.status
-        || previous_candidate_version != refreshed.candidate_version
-        || previous_waiting_auto_install != refreshed.waiting_for_app_exit_auto_install
-    {
-        info!(
-            previous_status = ?previous_status,
-            status = ?refreshed.status,
-            previous_candidate_version = previous_candidate_version.as_deref(),
-            candidate_version = refreshed.candidate_version.as_deref(),
-            previous_waiting_auto_install,
-            waiting_auto_install = refreshed.waiting_for_app_exit_auto_install,
-            "reloaded updater state from disk"
-        );
-    }
-
-    *state = refreshed;
-    Ok(())
-}
-
-fn normalize_workspace_dir_and_persist(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-) -> Result<()> {
-    let original_state = state.clone();
-    cache_cleanup::normalize_artifact_workspace_dir(&paths.cache_dir, state);
-    persist_if_changed(paths, state, &original_state)
-}
-
-fn maybe_prune_workspace_cache(workspace_root: &Path, state: &PersistedState) {
-    match cache_cleanup::prune_unreferenced_workspaces(workspace_root, state) {
-        Ok(summary) if summary.pruned_workspaces > 0 => {
-            info!(
-                pruned_workspaces = summary.pruned_workspaces,
-                workspace_root = %workspace_root.display(),
-                "pruned unreferenced updater workspaces"
-            );
-        }
-        Ok(_) => {}
-        Err(error) => {
-            warn!(
-                ?error,
-                workspace_root = %workspace_root.display(),
-                "failed to prune unreferenced updater workspaces"
-            );
-        }
-    }
-}
-
-fn maybe_prune_generated_artifacts(config: &RuntimeConfig) {
-    match cache_cleanup::prune_generated_artifacts(
-        &config.generated_artifact_cleanup,
-        &config.builder_bundle_root,
-    ) {
-        Ok(summary) if summary.pruned_paths > 0 => {
-            info!(
-                inspected_roots = summary.inspected_roots,
-                pruned_paths = summary.pruned_paths,
-                bytes_removed = summary.bytes_removed,
-                "pruned generated wrapper artifacts"
-            );
-        }
-        Ok(_) => {}
-        Err(error) => {
-            warn!(?error, "failed to prune generated wrapper artifacts");
-        }
-    }
-}
-
-fn maybe_prune_caches(config: &RuntimeConfig, state: &PersistedState) {
-    maybe_prune_workspace_cache(&config.workspace_root, state);
-    match cache_cleanup::prune_dmg_cache(&config.workspace_root, state) {
-        Ok(summary) if summary.pruned_dmgs > 0 || summary.pruned_temps > 0 => {
-            info!(
-                pruned_dmgs = summary.pruned_dmgs,
-                pruned_temps = summary.pruned_temps,
-                "pruned updater DMG cache"
-            );
-        }
-        Ok(summary) if summary.skipped_locked => {
-            info!("skipping DMG cache cleanup while another updater flow holds its lease");
-        }
-        Ok(_) => {}
-        Err(error) => warn!(?error, "failed to prune updater DMG cache"),
-    }
-    maybe_prune_generated_artifacts(config);
-}
-
-fn run_daemon_startup_maintenance(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-) -> Result<()> {
-    let _check_lock = match try_acquire_check_lock(paths) {
-        Ok(Some(check_lock)) => check_lock,
-        Ok(None) => {
-            info!("skipping updater startup maintenance because another check is already active");
-            return Ok(());
-        }
-        Err(error) => {
-            warn!(
-                ?error,
-                "skipping updater startup maintenance because the check lock is unavailable"
-            );
-            return Ok(());
-        }
-    };
-
-    if let Err(error) = reload_state_from_disk(config, state, paths) {
-        warn!(
-            ?error,
-            "skipping updater startup maintenance because persisted state could not be reloaded"
-        );
-        return Ok(());
-    }
-
-    sync_and_persist(config, state, paths)?;
-    recover_interrupted_install(state, paths)?;
-    complete_current_dmg_update_if_already_installed(config, state, paths)?;
-    codex_cli::reconcile_if_present(state, paths)?;
-    normalize_workspace_dir_and_persist(state, paths)?;
-    maybe_prune_caches(config, state);
-    maybe_notify_cli_missing(state, paths, config.notifications)?;
-    Ok(())
-}
-
-fn clear_wrapper_update_candidate_and_persist(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-) -> Result<()> {
-    let original_state = state.clone();
-    state.clear_wrapper_update_candidate();
-    persist_if_changed(paths, state, &original_state)
-}
-
-fn refresh_installed_wrapper_state(config: &RuntimeConfig, state: &mut PersistedState) {
-    if let Some(installed) = wrapper::installed_wrapper_from_metadata(
-        &config.app_executable_path,
-        &config.builder_bundle_root,
-    ) {
-        state.installed_wrapper_version = installed.version;
-        state.installed_wrapper_commit = Some(installed.commit);
-    } else {
-        state.installed_wrapper_version = None;
-        state.installed_wrapper_commit = None;
-    }
-}
-
-fn clear_stale_wrapper_update_and_persist(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-) -> Result<()> {
-    let original_state = state.clone();
-    refresh_installed_wrapper_state(config, state);
-    state.clear_wrapper_update_candidate();
-    persist_if_changed(paths, state, &original_state)
-}
-
-fn set_status(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    status: UpdateStatus,
-) -> Result<()> {
-    state.status = status;
-    if state.status != UpdateStatus::WaitingForAppExit {
-        state.waiting_for_app_exit_auto_install = false;
-    }
-    persist_state(paths, state)
-}
-
-fn set_waiting_for_app_exit(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    auto_install: bool,
-) -> Result<()> {
-    state.waiting_for_app_exit_auto_install = auto_install;
-    state.status = UpdateStatus::WaitingForAppExit;
-    persist_state(paths, state)
-}
-
-fn mark_failed_and_persist(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    message: impl Into<String>,
-) -> Result<()> {
-    state.mark_failed(message);
-    persist_state(paths, state)
-}
-
-fn packaged_runtime_removed(config: &RuntimeConfig) -> bool {
-    config.builder_bundle_root == Path::new("/opt/codex-desktop/update-builder")
-        && !config.app_executable_path.exists()
-        && !install::is_primary_package_installed()
-}
-
-fn summarize_command_output(output: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(output);
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-
-    let mut lines = text.lines().rev().take(3).collect::<Vec<_>>();
-    lines.reverse();
-    Some(lines.join(" | "))
-}
-
-struct CheckLock {
-    _file: fs::File,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum CheckLockBehavior {
-    SkipIfBusy,
-    Wait,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CheckCycleOptions {
-    lock_behavior: CheckLockBehavior,
-    if_stale: bool,
-    recover_entrypoint_state: bool,
-    reconcile_after_check: bool,
-    explicit_build: bool,
-}
-
-fn try_acquire_check_lock(paths: &RuntimePaths) -> Result<Option<CheckLock>> {
-    let lock_path = paths.state_dir.join("check.lock");
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .with_context(|| format!("Failed to open {}", lock_path.display()))?;
-
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(fs::TryLockError::WouldBlock) => {
-            return Ok(None);
-        }
-        Err(fs::TryLockError::Error(error)) => {
-            return Err(error).with_context(|| format!("Failed to lock {}", lock_path.display()));
-        }
-    }
-
-    file.set_len(0)
-        .with_context(|| format!("Failed to truncate {}", lock_path.display()))?;
-    file.seek(SeekFrom::Start(0))
-        .with_context(|| format!("Failed to seek {}", lock_path.display()))?;
-    writeln!(file, "{}", std::process::id())
-        .with_context(|| format!("Failed to write {}", lock_path.display()))?;
-
-    Ok(Some(CheckLock { _file: file }))
-}
-
-async fn acquire_check_lock(
-    paths: &RuntimePaths,
-    behavior: CheckLockBehavior,
-) -> Result<Option<CheckLock>> {
-    let mut logged_wait = false;
-    loop {
-        if let Some(check_lock) = try_acquire_check_lock(paths)? {
-            return Ok(Some(check_lock));
-        }
-        #[cfg(test)]
-        signal_process_test_marker("CODEX_UPDATE_MANAGER_TEST_CHECK_LOCK_BUSY")?;
-
-        if behavior == CheckLockBehavior::SkipIfBusy {
-            return Ok(None);
-        }
-
-        if !logged_wait {
-            info!("waiting for the active updater flow");
-            logged_wait = true;
-        }
-        time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-fn update_install_is_pending(status: &UpdateStatus) -> bool {
-    matches!(
-        status,
-        UpdateStatus::ReadyToInstall | UpdateStatus::WaitingForAppExit | UpdateStatus::Installing
-    )
-}
-
-// Failed attempts and transient states persisted before fallible download or
-// build work must retry after the next checker acquires the check lock. A
-// still-running checker continues to own that lock and prevents duplicate work.
-fn stable_deferred_candidate(state: &PersistedState) -> bool {
-    state.status == UpdateStatus::UpdateDetected && state.deferred_build
-}
-
-fn update_check_should_retry(state: &PersistedState) -> bool {
-    matches!(
-        state.status,
-        UpdateStatus::Failed
-            | UpdateStatus::DownloadingDmg
-            | UpdateStatus::PreparingWorkspace
-            | UpdateStatus::PatchingApp
-            | UpdateStatus::BuildingPackage
-    ) || (state.status == UpdateStatus::UpdateDetected && !state.deferred_build)
-}
-
-fn prepare_upstream_check(state: &mut PersistedState, paths: &RuntimePaths) -> Result<bool> {
-    let retrying_update = update_check_should_retry(state);
-
-    // Keep a retryable status durable until the metadata request completes. If
-    // the updater exits while that request is in flight, the next run must not
-    // mistake the interrupted rebuild for an ordinary unchanged-upstream check.
-    // A deliberately deferred candidate is also durable while its HEAD request
-    // runs so an offline background check cannot erase the pending update.
-    if !retrying_update && !stable_deferred_candidate(state) {
-        state.status = UpdateStatus::CheckingUpstream;
-    }
-    state.last_check_at = Some(Utc::now());
-    state.error_message = None;
-    persist_state(paths, state)?;
-
-    Ok(retrying_update)
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum PendingInstallRecovery {
-    NoChange,
-    CandidateInstalled,
-    SupersededByInstalledVersion,
-}
-
-impl PendingInstallRecovery {
-    fn completed(self) -> bool {
-        !matches!(self, Self::NoChange)
-    }
-
-    fn should_notify_installed(self) -> bool {
-        matches!(self, Self::CandidateInstalled)
-    }
-}
-
-async fn run_daemon(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-) -> Result<()> {
-    run_daemon_startup_maintenance(config, state, paths)?;
-    if packaged_runtime_removed(config) {
-        info!("packaged app files are gone; stopping updater daemon");
-        return Ok(());
-    }
-    info!("daemon initialized");
-
-    time::sleep(config.initial_check_delay_duration()).await;
-    if let Err(error) = run_check_cycle_from_disk(config, state, paths).await {
-        error!(?error, "initial check failed");
-    }
-    if let Err(error) = reconcile_pending_install_from_disk(config, state, paths).await {
-        error!(?error, "initial reconciliation failed");
-    }
-
-    let mut check_interval = time::interval(config.check_interval_duration()?);
-    let mut reconcile_interval = time::interval(Duration::from_secs(RECONCILE_INTERVAL_SECONDS));
-    check_interval.tick().await;
-    reconcile_interval.tick().await;
-    loop {
-        if packaged_runtime_removed(config) {
-            info!("packaged app files are gone; stopping updater daemon");
-            break;
-        }
-
-        if let Some(installed_binary) = restart::replacement_binary() {
-            info!(
-                installed_binary = %installed_binary.display(),
-                "updater binary was replaced on disk; exiting so systemd restarts the daemon"
-            );
-            std::process::exit(BINARY_REPLACED_RESTART_EXIT_CODE);
-        }
-
-        tokio::select! {
-            _ = check_interval.tick() => {
-                if let Err(error) = run_check_cycle_from_disk(config, state, paths).await {
-                    error!(?error, "periodic check failed");
-                }
-            }
-            _ = reconcile_interval.tick() => {
-                if let Err(error) = reconcile_pending_install_from_disk(config, state, paths).await {
-                    error!(?error, "pending install reconciliation failed");
-                }
-            }
-            signal = tokio::signal::ctrl_c() => {
-                signal?;
-                info!("daemon received shutdown signal");
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn run_check_now(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    if_stale: bool,
-) -> Result<()> {
-    let lock_behavior = if if_stale {
-        CheckLockBehavior::SkipIfBusy
-    } else {
-        CheckLockBehavior::Wait
-    };
-    run_check_cycle_with_options(
-        config,
-        state,
-        paths,
-        CheckCycleOptions {
-            lock_behavior,
-            if_stale,
-            recover_entrypoint_state: true,
-            reconcile_after_check: true,
-            explicit_build: !if_stale,
-        },
-    )
-    .await
-}
-
-/// Detects a newer wrapper release and records it into state. Returns
-/// `Ok(true)` when an update was found and recorded. No-ops (returning
-/// `Ok(false)`) when wrapper tracking is disabled, the builder bundle is not a
-/// git checkout, or no newer commit is available. Never mutates the checkout.
-fn detect_and_record_wrapper_update(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-) -> Result<bool> {
-    if !config.enable_wrapper_updates {
-        clear_wrapper_update_candidate_and_persist(state, paths)?;
-        return Ok(false);
-    }
-
-    let Some(installed) = wrapper::installed_wrapper_from_metadata(
-        &config.app_executable_path,
-        &config.builder_bundle_root,
-    ) else {
-        clear_stale_wrapper_update_and_persist(config, state, paths)?;
-        return Ok(false);
-    };
-
-    use wrapper::WrapperDetectionState::*;
-
-    let detection = match wrapper::detect_state_from_bundle_root(
-        &config.builder_bundle_root,
-        &installed,
-        &config.wrapper_remote,
-        &config.wrapper_branch,
-    ) {
-        Ok(result) => result,
-        Err(error) => {
-            warn!(?error, "wrapper update detection failed");
-            let original_state = state.clone();
-            state.installed_wrapper_version = installed.version;
-            state.installed_wrapper_commit = Some(installed.commit);
-            persist_if_changed(paths, state, &original_state)?;
-            return Ok(false);
-        }
-    };
-
-    let original_state = state.clone();
-    state.installed_wrapper_version = installed.version.clone();
-    state.installed_wrapper_commit = Some(installed.commit.clone());
-
-    match detection {
-        (UpdateAvailable, Some(update)) => {
-            state.wrapper_dev_mode = Some(false);
-            state.installed_wrapper_version = update.installed_version.clone();
-            state.installed_wrapper_commit = Some(update.installed_commit.clone());
-            state.candidate_wrapper_version = update.candidate_version.clone();
-            state.candidate_wrapper_commit = Some(update.candidate_commit.clone());
-            state.wrapper_changelog = Some(update.changelog.clone());
-            persist_if_changed(paths, state, &original_state)?;
-
-            let change_count = update
-                .changelog
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .count();
-            maybe_notify(
-                state,
-                paths,
-                config.notifications,
-                &format!("wrapper_update:{}", update.candidate_commit),
-                "ChatGPT Desktop wrapper update available",
-                &format!(
-                    "A newer Linux wrapper build is available ({change_count} change(s)). Rebuild to apply."
-                ),
+        Commands::Daemon => {
+            let mut state = PersistedState::load_or_default(
+                &paths.state_file,
+                config.auto_install_on_app_exit,
             )?;
-
-            Ok(true)
+            daemon(&config, &mut state, &paths).await
         }
-        (DevMode, _) => {
-            state.clear_wrapper_update_candidate();
-            state.wrapper_dev_mode = Some(true);
-            persist_if_changed(paths, state, &original_state)?;
-            Ok(false)
-        }
-        (Aligned | NoRebuildNeeded, _) => {
-            state.clear_wrapper_update_candidate();
-            state.wrapper_dev_mode = Some(false);
-            persist_if_changed(paths, state, &original_state)?;
-            Ok(false)
-        }
-        (UnknownOffline, _) | (UpdateAvailable, None) => {
-            state.clear_wrapper_update_candidate();
-            persist_if_changed(paths, state, &original_state)?;
-            Ok(false)
-        }
-    }
-}
-
-fn run_check_wrapper(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    json: bool,
-) -> Result<()> {
-    if !config.enable_wrapper_updates {
-        clear_wrapper_update_candidate_and_persist(state, paths)?;
-        if json {
-            println!("{}", serde_json::json!({ "enabled": false }));
-        } else {
-            println!(
-                "Wrapper update tracking is disabled (set enable_wrapper_updates = true in config.toml)."
-            );
-        }
-        return Ok(());
-    }
-
-    let found = detect_and_record_wrapper_update(config, state, paths)?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(state)?);
-    } else if found {
-        println!(
-            "wrapper update available: {} -> {}",
-            state
-                .installed_wrapper_commit
-                .as_deref()
-                .unwrap_or("unknown"),
-            state
-                .candidate_wrapper_commit
-                .as_deref()
-                .unwrap_or("unknown")
-        );
-        if let Some(changelog) = state.wrapper_changelog.as_deref() {
-            println!("\n{changelog}");
-        }
-    } else if state.wrapper_dev_mode == Some(true) {
-        println!("wrapper is a local/dev build ahead of upstream; updates are disabled.");
-    } else {
-        println!("wrapper is up to date (or not a git checkout).");
-    }
-
-    Ok(())
-}
-
-fn upstream_check_is_fresh(config: &RuntimeConfig, state: &PersistedState) -> bool {
-    let Some(last_successful_check_at) = state.last_successful_check_at else {
-        return false;
-    };
-
-    let Ok(freshness_window) = config.check_interval_chrono_duration() else {
-        return false;
-    };
-    Utc::now().signed_duration_since(last_successful_check_at) < freshness_window
-}
-
-fn run_status(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    json: bool,
-) -> Result<()> {
-    codex_cli::reconcile_if_present(state, paths)?;
-    complete_current_dmg_update_if_already_installed(config, state, paths)?;
-    let _ = complete_pending_install_if_already_installed(state, paths)?;
-    normalize_workspace_dir_and_persist(state, paths)?;
-    if !config.enable_wrapper_updates {
-        clear_wrapper_update_candidate_and_persist(state, paths)?;
-    }
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&status_json_value(state)?)?
-        );
-    } else {
-        println!("status: {:?}", state.status);
-        println!("installed_version: {}", state.installed_version);
-        println!(
-            "candidate_version: {}",
-            state.candidate_version.as_deref().unwrap_or("none")
-        );
-        println!(
-            "last_known_good_version: {}",
-            state.last_known_good_version.as_deref().unwrap_or("none")
-        );
-        println!(
-            "rollback_blocked_candidate_version: {}",
-            state
-                .rollback_blocked_candidate_version
-                .as_deref()
-                .unwrap_or("none")
-        );
-        println!("{}", update_error_status_line(state));
-        println!("cli_status: {:?}", state.cli_status);
-        println!(
-            "cli_installed_version: {}",
-            state.cli_installed_version.as_deref().unwrap_or("unknown")
-        );
-        println!(
-            "cli_official_latest_version: {}",
-            state
-                .cli_official_latest_version
-                .as_deref()
-                .unwrap_or("unknown")
-        );
-        println!(
-            "cli_package_manager_latest_version: {}",
-            state
-                .cli_package_manager_latest_version
-                .as_deref()
-                .unwrap_or("unknown")
-        );
-        println!(
-            "cli_error: {}",
-            state.cli_error_message.as_deref().unwrap_or("none")
-        );
-    }
-
-    Ok(())
-}
-
-fn status_json_value(state: &PersistedState) -> Result<serde_json::Value> {
-    let mut value = serde_json::to_value(state)?;
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "cli_latest_version".to_string(),
-            serde_json::to_value(&state.cli_official_latest_version)?,
-        );
-    }
-    Ok(value)
-}
-
-fn update_error_status_line(state: &PersistedState) -> String {
-    format!(
-        "update_error: {}",
-        state.error_message.as_deref().unwrap_or("none")
-    )
-}
-
-fn run_prompt_install_cli(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    cli_path: Option<PathBuf>,
-    print_path: bool,
-) -> Result<()> {
-    let outcome = prompt_install_cli(state, paths, cli_path)?;
-    match outcome {
-        PromptInstallCliOutcome::Installed(path) => {
-            if print_path {
-                println!("{}", path.display());
-            }
-            std::process::exit(0);
-        }
-        PromptInstallCliOutcome::Cancelled => {
-            std::process::exit(PROMPT_INSTALL_CLI_CANCELLED_EXIT_CODE);
-        }
-        PromptInstallCliOutcome::NoBackend => {
-            std::process::exit(PROMPT_INSTALL_CLI_NO_BACKEND_EXIT_CODE);
-        }
-    }
-}
-
-fn run_cli_preflight(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    cli_path: Option<std::path::PathBuf>,
-    print_path: bool,
-    allow_install_missing: bool,
-) -> Result<()> {
-    let outcome = codex_cli::preflight(state, paths, cli_path, allow_install_missing)?;
-    if print_path {
-        println!("{}", outcome.cli_path.display());
-    }
-    Ok(())
-}
-
-fn run_recover_standalone_cli(
-    codex_home: Option<PathBuf>,
-    install_dir: Option<PathBuf>,
-    print_path: bool,
-) -> Result<()> {
-    let launch_path = codex_cli::recover_standalone_cli(codex_home, install_dir)?;
-    if print_path {
-        println!("{}", launch_path.display());
-    }
-    Ok(())
-}
-
-fn run_repair_cli(state: &mut PersistedState, paths: &RuntimePaths) -> Result<()> {
-    let outcome = codex_cli::repair_cli(state, paths)?;
-    if outcome.quarantine_paths.is_empty() {
-        println!(
-            "Codex CLI repaired at version {}. The stale npm directory was already absent.",
-            outcome.installed_version
-        );
-    } else {
-        println!(
-            "Codex CLI repaired at version {}. Quarantines preserved at {}",
-            outcome.installed_version,
-            outcome
-                .quarantine_paths
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PromptInstallCliOutcome {
-    Installed(PathBuf),
-    Cancelled,
-    NoBackend,
-}
-
-fn prompt_install_cli(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    cli_path: Option<PathBuf>,
-) -> Result<PromptInstallCliOutcome> {
-    if let Some(path) = cli_path
-        .as_deref()
-        .and_then(|path| codex_cli::resolve_cli_path(Some(path)))
-        .or_else(|| {
-            state
-                .cli_path
-                .as_deref()
-                .and_then(|path| codex_cli::resolve_cli_path(Some(path)))
-        })
-        .or_else(|| codex_cli::resolve_cli_path(None))
-    {
-        return Ok(PromptInstallCliOutcome::Installed(path));
-    }
-
-    if recently_dismissed_cli_prompt(state) {
-        return Ok(PromptInstallCliOutcome::Cancelled);
-    }
-
-    if !has_interactive_graphical_session() {
-        return Ok(PromptInstallCliOutcome::NoBackend);
-    }
-
-    let consent = if prefers_kdialog() && command_in_path("kdialog").is_some() {
-        run_kdialog_prompt()?
-    } else if command_in_path("zenity").is_some() {
-        run_zenity_prompt()?
-    } else if command_in_path("kdialog").is_some() {
-        run_kdialog_prompt()?
-    } else {
-        run_actionable_notification_prompt()?
-    };
-
-    if !consent {
-        state.cli_prompt_dismissed_at = Some(Utc::now());
-        persist_state(paths, state)?;
-        return Ok(PromptInstallCliOutcome::Cancelled);
-    }
-
-    state.cli_prompt_dismissed_at = None;
-    let outcome = codex_cli::preflight(state, paths, cli_path, true)?;
-    Ok(PromptInstallCliOutcome::Installed(outcome.cli_path))
-}
-
-fn recently_dismissed_cli_prompt(state: &PersistedState) -> bool {
-    state.cli_prompt_dismissed_at.is_some_and(|dismissed_at| {
-        Utc::now().signed_duration_since(dismissed_at) < CLI_MISSING_PROMPT_DISMISS_TTL
-    })
-}
-
-fn has_interactive_graphical_session() -> bool {
-    let has_display =
-        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let has_dbus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
-        || std::env::var_os("XDG_RUNTIME_DIR").is_some();
-    has_display && has_dbus
-}
-
-fn has_user_session_bus_for_polkit() -> bool {
-    std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
-        || std::env::var_os("XDG_RUNTIME_DIR").is_some()
-}
-
-fn prefers_kdialog() -> bool {
-    desktop_tokens().iter().any(|token| {
-        matches!(
-            token.as_str(),
-            "kde" | "plasma" | "plasmawayland" | "plasmax11"
-        )
-    })
-}
-
-fn desktop_tokens() -> Vec<String> {
-    [
-        std::env::var("XDG_CURRENT_DESKTOP").ok(),
-        std::env::var("DESKTOP_SESSION").ok(),
-    ]
-    .into_iter()
-    .flatten()
-    .flat_map(|value| {
-        value
-            .split(':')
-            .map(|segment| segment.trim().to_ascii_lowercase())
-            .collect::<Vec<_>>()
-    })
-    .filter(|token| !token.is_empty())
-    .collect()
-}
-
-fn command_in_path(name: &str) -> Option<PathBuf> {
-    let path_env = std::env::var_os("PATH").unwrap_or_else(|| OsString::from(""));
-    std::env::split_paths(&path_env).find_map(|entry| {
-        let candidate = entry.join(name);
-        if is_executable_file(&candidate) {
-            Some(candidate)
-        } else {
-            None
-        }
-    })
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
-        && path
-            .metadata()
-            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-}
-
-fn run_kdialog_prompt() -> Result<bool> {
-    let status = Command::new("kdialog")
-        .args([
-            "--title",
-            "ChatGPT Desktop",
-            "--yesno",
-            "Codex CLI is not installed. Install it now?",
-        ])
-        .status()
-        .context("Failed to launch kdialog")?;
-    Ok(status.success())
-}
-
-fn run_zenity_prompt() -> Result<bool> {
-    let status = Command::new("zenity")
-        .args([
-            "--question",
-            "--title=ChatGPT Desktop",
-            "--text=Codex CLI is not installed. Install it now?",
-        ])
-        .status()
-        .context("Failed to launch zenity")?;
-    Ok(status.success())
-}
-
-fn run_actionable_notification_prompt() -> Result<bool> {
-    match notify::send_actionable(
-        "Codex CLI not installed",
-        "ChatGPT Desktop needs the Codex CLI. Choose Install now to let ChatGPT Desktop install it.",
-        &[("install", "Install now"), ("dismiss", "Dismiss")],
-    )? {
-        notify::ActionResponse::Invoked(action) if action == "install" => Ok(true),
-        _ => Ok(false),
-    }
-}
-
-async fn run_check_cycle_from_disk(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-) -> Result<()> {
-    run_check_cycle_with_options(
-        config,
-        state,
-        paths,
-        CheckCycleOptions {
-            lock_behavior: CheckLockBehavior::SkipIfBusy,
-            if_stale: false,
-            recover_entrypoint_state: false,
-            reconcile_after_check: false,
-            explicit_build: false,
-        },
-    )
-    .await
-}
-
-#[cfg(test)]
-async fn run_check_cycle(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-) -> Result<()> {
-    state.save(&paths.state_file)?;
-    run_check_cycle_with_options(
-        config,
-        state,
-        paths,
-        CheckCycleOptions {
-            lock_behavior: CheckLockBehavior::SkipIfBusy,
-            if_stale: false,
-            recover_entrypoint_state: false,
-            reconcile_after_check: false,
-            explicit_build: true,
-        },
-    )
-    .await
-}
-
-async fn build_pending_detected_update(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-) -> Result<()> {
-    let candidate_version = state
-        .candidate_version
-        .clone()
-        .context("detected update is missing its candidate version")?;
-    let dmg_path = state
-        .artifact_paths
-        .dmg_path
-        .clone()
-        .context("detected update is missing its downloaded DMG")?;
-    if !dmg_path.is_file() {
-        anyhow::bail!("detected update DMG is missing: {}", dmg_path.display());
-    }
-
-    builder::build_update(config, state, paths, &candidate_version, &dmg_path).await?;
-    maybe_notify_update_ready(state, paths, config.notifications)
-}
-
-async fn run_check_cycle_with_options(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    options: CheckCycleOptions,
-) -> Result<()> {
-    let Some(_check_lock) = acquire_check_lock(paths, options.lock_behavior).await? else {
-        info!("skipping upstream check because another check is already active");
-        return Ok(());
-    };
-
-    // Reload only after entering the serialization boundary. Every operation
-    // below can persist the complete state document, so using a snapshot read
-    // before the lock could overwrite an active checker's workspace metadata.
-    reload_state_from_disk(config, state, paths)?;
-    if options.recover_entrypoint_state {
-        recover_interrupted_install(state, paths)?;
-        complete_current_dmg_update_if_already_installed(config, state, paths)?;
-        normalize_workspace_dir_and_persist(state, paths)?;
-        maybe_notify_cli_missing(state, paths, config.notifications)?;
-    }
-
-    // Keep wrapper state fresh even while a DMG package is pending; otherwise
-    // `status --json` could keep advertising stale wrapper candidates.
-    if let Err(error) = detect_and_record_wrapper_update(config, state, paths) {
-        warn!(?error, "wrapper update detection failed during check cycle");
-    }
-
-    let build_detected_update = should_build_detected_update(config, options.explicit_build);
-
-    if update_install_is_pending(&state.status) {
-        info!("skipping upstream check because an update is already pending");
-        maybe_prune_caches(config, state);
-        if options.reconcile_after_check {
-            reconcile_pending_install(config, state, paths).await?;
-        }
-        return Ok(());
-    }
-
-    if let Err(error) = codex_cli::reconcile_if_present(state, paths) {
-        warn!(
-            ?error,
-            "unable to reconcile Codex CLI before checking upstream packages"
-        );
-    }
-
-    let stable_deferred = stable_deferred_candidate(state);
-
-    if options.if_stale
-        && !(stable_deferred && build_detected_update)
-        && !update_check_should_retry(state)
-        && upstream_check_is_fresh(config, state)
-    {
-        info!("skipping check-now because the last successful upstream check is still fresh");
-        maybe_prune_caches(config, state);
-        if options.reconcile_after_check {
-            reconcile_pending_install(config, state, paths).await?;
-        }
-        return Ok(());
-    }
-
-    let deferred_refresh_snapshot =
-        (stable_deferred && !build_detected_update).then(|| state.clone());
-    let client = upstream::http_client()?;
-
-    let retrying_update = prepare_upstream_check(state, paths)?;
-    let mut candidate_refresh_committed = false;
-
-    let result: Result<()> = async {
-        let metadata = upstream::fetch_remote_metadata(&client, &config.dmg_url).await?;
-        let previous_headers_fingerprint = state.remote_headers_fingerprint.clone();
-        state.remote_headers_fingerprint = Some(metadata.headers_fingerprint.clone());
-        state.last_successful_check_at = Some(Utc::now());
-
-        if previous_headers_fingerprint.as_deref() == Some(metadata.headers_fingerprint.as_str())
-            && state.dmg_sha256.is_some()
-            && !retrying_update
-        {
-            if stable_deferred {
-                if state
-                    .artifact_paths
-                    .dmg_path
-                    .as_deref()
-                    .is_some_and(Path::is_file)
-                {
-                    if build_detected_update {
-                        state.deferred_build = false;
-                        persist_state(paths, state)?;
-                        info!("upstream fingerprint unchanged; building cached deferred DMG");
-                        build_pending_detected_update(config, state, paths).await?;
-                    } else {
-                        persist_state(paths, state)?;
-                        info!("upstream fingerprint unchanged; reusing cached deferred DMG");
-                    }
-                    return Ok(());
-                }
-            } else {
-                set_status(state, paths, UpdateStatus::Idle)?;
-                info!("upstream fingerprint unchanged; skipping download");
+        Commands::CheckNow => {
+            let Some(_lock) = MutationLock::try_acquire(&paths.state_dir.join("check.lock"))?
+            else {
+                info!("another updater mutation is active");
                 return Ok(());
-            }
-        }
-
-        set_status(state, paths, UpdateStatus::DownloadingDmg)?;
-
-        let downloads_dir = config.workspace_root.join("downloads");
-        let downloaded =
-            upstream::download_dmg(&client, &config.dmg_url, &downloads_dir, Utc::now()).await?;
-
-        if installed_upstream_dmg_matches(config, &downloaded.sha256) {
-            clear_dmg_update_candidate(
-                state,
-                paths,
-                Some(downloaded.path),
-                Some(downloaded.sha256),
+            };
+            let mut state = PersistedState::load_or_default(
+                &paths.state_file,
+                config.auto_install_on_app_exit,
             )?;
-            info!("downloaded DMG hash matches installed app; no update detected");
-            return Ok(());
-        }
-
-        if rollback_blocks_candidate(state, &downloaded.sha256, &downloaded.candidate_version) {
-            state.status = UpdateStatus::Idle;
-            state.error_message = Some(format!(
-                "Candidate {} was rolled back and will not be reinstalled automatically",
-                downloaded.candidate_version
-            ));
-            persist_state(paths, state)?;
-            info!(
-                candidate_version = %downloaded.candidate_version,
-                "skipping candidate blocked by rollback"
-            );
-            return Ok(());
-        }
-
-        if state.dmg_sha256.as_deref() == Some(downloaded.sha256.as_str())
-            && !retrying_update
-            && !stable_deferred
-        {
-            state.status = UpdateStatus::Idle;
-            state.artifact_paths.dmg_path = Some(downloaded.path);
-            persist_state(paths, state)?;
-            info!("downloaded DMG hash matches current cached DMG; no update detected");
-            return Ok(());
-        }
-
-        rollback::record_current_package_as_known_good(state);
-        state.status = UpdateStatus::UpdateDetected;
-        state.deferred_build = !build_detected_update;
-        state.candidate_version = Some(downloaded.candidate_version.clone());
-        state.dmg_sha256 = Some(downloaded.sha256.clone());
-        state.artifact_paths.dmg_path = Some(downloaded.path.clone());
-        state.notified_events.clear();
-        state.save_updater(&paths.state_file)?;
-        candidate_refresh_committed = true;
-
-        maybe_notify(
-            state,
-            paths,
-            config.notifications,
-            "update_detected",
-            "New ChatGPT Desktop update detected",
-            if build_detected_update {
-                "Preparing a local Linux package from the new upstream DMG."
-            } else {
-                "Automatic update builds are off. Open ChatGPT Desktop and choose Check for updates to build it."
-            },
-        )?;
-
-        if !build_detected_update {
-            info!("automatic update builds are disabled; keeping the current DMG pending");
-            return Ok(());
-        }
-
-        build_pending_detected_update(config, state, paths).await?;
-        drop(downloaded);
-        Ok(())
-    }
-    .await;
-
-    // Every check outcome, including an early no-update return, releases its
-    // DMG lease before bounded cache cleanup runs here.
-    maybe_prune_caches(config, state);
-    if let Err(error) = result {
-        if let Some(mut snapshot) = deferred_refresh_snapshot {
-            if !candidate_refresh_committed {
-                snapshot.last_check_at = state.last_check_at;
-                *state = snapshot;
-                persist_state(paths, state)?;
-                warn!(
-                    ?error,
-                    "background refresh failed; preserving deferred update"
+            if !prepare_mutation_state(&config, &mut state, &paths)? {
+                println!(
+                    "A package transaction is still active; refusing to start another update."
                 );
                 return Ok(());
             }
+            check(&config, &mut state, &paths, false, true).await
         }
-        mark_failed_and_persist(state, paths, error.to_string())?;
-        let _ = notify_failure(config, state, paths, &error);
-        return Err(error);
+        Commands::Status { json } => {
+            let state = PersistedState::load_or_default(
+                &paths.state_file,
+                config.auto_install_on_app_exit,
+            )?;
+            status(&state, json)
+        }
+        Commands::Diagnose { json } => {
+            let state = PersistedState::load_or_default(
+                &paths.state_file,
+                config.auto_install_on_app_exit,
+            )?;
+            diagnose(&config, &state, &paths, json)
+        }
+        Commands::InstallReady => {
+            let Some(_lock) = MutationLock::try_acquire(&paths.state_dir.join("check.lock"))?
+            else {
+                info!("another updater mutation is active");
+                return Ok(());
+            };
+            let mut state = PersistedState::load_or_default(
+                &paths.state_file,
+                config.auto_install_on_app_exit,
+            )?;
+            if !prepare_explicit_mutation_state(&config, &mut state, &paths)? {
+                println!(
+                    "A package transaction is still active; refusing to start another install."
+                );
+                return Ok(());
+            }
+            install_ready(&config, &mut state, &paths, true, false).await
+        }
+        Commands::Rollback => {
+            let Some(_lock) = MutationLock::try_acquire(&paths.state_dir.join("check.lock"))?
+            else {
+                info!("another updater mutation is active");
+                return Ok(());
+            };
+            let mut state = PersistedState::load_or_default(
+                &paths.state_file,
+                config.auto_install_on_app_exit,
+            )?;
+            if !prepare_explicit_mutation_state(&config, &mut state, &paths)? {
+                println!("A package transaction is still active; refusing to start rollback.");
+                return Ok(());
+            }
+            rollback::run(&config, &mut state, &paths).await
+        }
+        Commands::InstallDeb { .. }
+        | Commands::InstallRpm { .. }
+        | Commands::InstallPacman { .. }
+        | Commands::InstallRollbackDeb { .. }
+        | Commands::InstallRollbackRpm { .. }
+        | Commands::InstallRollbackPacman { .. } => unreachable!(),
     }
-
-    if options.reconcile_after_check {
-        reconcile_pending_install(config, state, paths).await?;
-    }
-
-    Ok(())
 }
 
-async fn reconcile_pending_install_from_disk(
+fn run_privileged_command(command: &Commands) -> Option<Result<()>> {
+    match command {
+        Commands::InstallDeb { path } => Some(install::install_deb(path)),
+        Commands::InstallRpm { path } => Some(install::install_rpm(path)),
+        Commands::InstallPacman { path } => Some(install::install_pacman(path)),
+        Commands::InstallRollbackDeb { path } => Some(install_rollback::install_deb(path)),
+        Commands::InstallRollbackRpm { path } => Some(install_rollback::install_rpm(path)),
+        Commands::InstallRollbackPacman { path } => Some(install_rollback::install_pacman(path)),
+        _ => None,
+    }
+}
+
+async fn daemon(
     config: &RuntimeConfig,
     state: &mut PersistedState,
     paths: &RuntimePaths,
 ) -> Result<()> {
-    let Some(_check_lock) = acquire_check_lock(paths, CheckLockBehavior::SkipIfBusy).await? else {
-        info!("skipping pending install reconciliation because another updater flow is active");
-        return Ok(());
-    };
-    reload_state_from_disk(config, state, paths)?;
-    reconcile_pending_install(config, state, paths).await
+    time::sleep(config.initial_check_delay_duration()).await;
+    if let Some(_lock) = MutationLock::try_acquire(&paths.state_dir.join("check.lock"))? {
+        if daemon_replacement_gate(config, state, paths)? {
+            if let Err(error) = check(config, state, paths, true, false).await {
+                error!(?error, "initial update check failed");
+            }
+        }
+    } else {
+        info!("another updater mutation is active");
+    }
+    let mut checks = time::interval(config.check_interval_duration());
+    let mut reconcile = time::interval(Duration::from_secs(15));
+    checks.tick().await;
+    reconcile.tick().await;
+    loop {
+        tokio::select! {
+            _ = checks.tick() => {
+                if let Some(_lock) = MutationLock::try_acquire(&paths.state_dir.join("check.lock"))? {
+                    if daemon_replacement_gate(config, state, paths)? {
+                        if let Err(error) = check(config, state, paths, true, false).await {
+                            error!(?error, "periodic update check failed");
+                        }
+                    }
+                }
+            },
+            _ = reconcile.tick() => {
+                if let Some(_lock) = MutationLock::try_acquire(&paths.state_dir.join("check.lock"))? {
+                    if daemon_replacement_gate(config, state, paths)? {
+                        if let Err(error) = reconcile_pending_install(config, state, paths).await {
+                            error!(?error, "deferred install failed");
+                        }
+                    }
+                }
+            },
+            signal = tokio::signal::ctrl_c() => { signal?; break; }
+        }
+    }
+    Ok(())
 }
 
 async fn reconcile_pending_install(
@@ -1393,974 +174,1040 @@ async fn reconcile_pending_install(
     state: &mut PersistedState,
     paths: &RuntimePaths,
 ) -> Result<()> {
-    sync_runtime_state(config, state);
-    recover_interrupted_install(state, paths)?;
-    let pending_recovery = complete_pending_install_if_already_installed(state, paths)?;
-    if pending_recovery.completed() {
-        if pending_recovery.should_notify_installed() {
-            let _ = maybe_notify_installed(state, paths, config.notifications);
-        }
-        return Ok(());
-    }
-
     match state.status {
-        UpdateStatus::ReadyToInstall => {
-            let Some(package_path) = state.artifact_paths.package_path.clone() else {
-                return Ok(());
-            };
-
-            if !package_path.exists() {
-                mark_failed_and_persist(
-                    state,
-                    paths,
-                    format!(
-                        "Pending package artifact is missing: {}",
-                        package_path.display()
-                    ),
-                )?;
-                return Ok(());
-            }
-
-            if state.auto_install_on_app_exit && liveness::is_app_running(config)? {
-                if !graphical_polkit_auth_agent_is_likely_available() {
-                    defer_install_for_manual_auth(state, paths, &package_path)?;
-                    maybe_notify_manual_install_required(state, paths, config.notifications)?;
-                    return Ok(());
-                }
-                clear_install_auth_required_event(state, paths)?;
-                set_waiting_for_app_exit(state, paths, true)?;
-                maybe_notify(
-                    state,
-                    paths,
-                    config.notifications,
-                    "ready_to_install",
-                    "ChatGPT Desktop update ready",
-                    "Close ChatGPT Desktop to install the ready update.",
-                )?;
-                return Ok(());
-            }
-
-            set_status(state, paths, UpdateStatus::ReadyToInstall)?;
+        UpdateStatus::WaitingForAppExit if !liveness::is_app_running(config)? => {
+            install_ready(config, state, paths, false, true).await?;
         }
-        UpdateStatus::WaitingForAppExit => {
-            let Some(package_path) = state.artifact_paths.package_path.clone() else {
-                return Ok(());
-            };
-
-            if !package_path.exists() {
-                mark_failed_and_persist(
-                    state,
-                    paths,
-                    format!(
-                        "Pending package artifact is missing: {}",
-                        package_path.display()
-                    ),
-                )?;
-                return Ok(());
-            }
-
-            if state.waiting_for_app_exit_auto_install && !state.auto_install_on_app_exit {
-                set_status(state, paths, UpdateStatus::ReadyToInstall)?;
-                return Ok(());
-            }
-
-            if liveness::is_app_running(config)? {
-                if !graphical_polkit_auth_agent_is_likely_available() {
-                    defer_install_for_manual_auth(state, paths, &package_path)?;
-                    maybe_notify_manual_install_required(state, paths, config.notifications)?;
-                    return Ok(());
-                }
-                clear_install_auth_required_event(state, paths)?;
-                maybe_notify(
-                    state,
-                    paths,
-                    config.notifications,
-                    "waiting_for_app_exit",
-                    "ChatGPT Desktop update ready",
-                    "The update will install after you close ChatGPT Desktop.",
-                )?;
-                return Ok(());
-            }
-
-            if install_auth_retry_is_blocked(state) {
-                return Ok(());
-            }
-
-            if !graphical_polkit_auth_agent_is_likely_available() {
-                defer_install_for_manual_auth(state, paths, &package_path)?;
-                maybe_notify_manual_install_required(state, paths, config.notifications)?;
-                return Ok(());
-            }
-
-            trigger_install(
-                state,
-                paths,
-                &config.workspace_root,
-                &package_path,
-                config.notifications,
-            )
-            .await?;
+        UpdateStatus::ReadyToInstall
+            if state.install_auth_retry_is_blocked()
+                && (config.auto_install_on_app_exit || state.install_after_app_exit_requested)
+                && liveness::is_app_running(config)? =>
+        {
+            state.clear_install_auth_retry_block();
+            state.status = UpdateStatus::WaitingForAppExit;
+            state.waiting_for_app_exit_auto_install =
+                !state.install_after_app_exit_requested && config.auto_install_on_app_exit;
+            state.save_updater(&paths.state_file)?;
         }
         _ => {}
     }
-
     Ok(())
 }
 
-async fn run_install_ready(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-) -> Result<()> {
-    let Some(_check_lock) = acquire_check_lock(paths, CheckLockBehavior::Wait).await? else {
-        unreachable!("waiting for the updater flow lock always returns a lock");
-    };
-    reload_state_from_disk(config, state, paths)?;
-    #[cfg(test)]
-    wait_for_process_test_barrier(
-        "CODEX_UPDATE_MANAGER_TEST_INSTALL_READY_RELOADED",
-        "CODEX_UPDATE_MANAGER_TEST_INSTALL_READY_CONTINUE",
-    )?;
-    run_install_ready_locked(config, state, paths).await
-}
-
-#[cfg(test)]
-fn signal_process_test_marker(variable: &str) -> Result<()> {
-    let Some(path) = std::env::var_os(variable).map(PathBuf::from) else {
-        return Ok(());
-    };
-    std::fs::write(&path, b"ready")
-        .with_context(|| format!("Failed to write process test marker {}", path.display()))
-}
-
-#[cfg(test)]
-fn wait_for_process_test_barrier(marker_variable: &str, release_variable: &str) -> Result<()> {
-    let Some(marker_path) = std::env::var_os(marker_variable).map(PathBuf::from) else {
-        return Ok(());
-    };
-    let release_path = std::env::var_os(release_variable)
-        .map(PathBuf::from)
-        .with_context(|| {
-            format!("{release_variable} must be set when {marker_variable} is used")
-        })?;
-    std::fs::write(&marker_path, b"ready").with_context(|| {
-        format!(
-            "Failed to write process test marker {}",
-            marker_path.display()
-        )
-    })?;
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !release_path.exists() {
-        anyhow::ensure!(
-            std::time::Instant::now() < deadline,
-            "Timed out waiting for process test release {}",
-            release_path.display()
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    Ok(())
-}
-
-async fn run_install_ready_locked(
-    config: &RuntimeConfig,
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-) -> Result<()> {
-    sync_and_persist(config, state, paths)?;
-    recover_interrupted_install(state, paths)?;
-
-    if complete_current_dmg_update_if_already_installed(config, state, paths)? {
-        println!("ChatGPT Desktop is already up to date.");
-        return Ok(());
-    }
-
-    let pending_recovery = complete_pending_install_if_already_installed(state, paths)?;
-    if pending_recovery.completed() {
-        if pending_recovery.should_notify_installed() {
-            let _ = maybe_notify_installed(state, paths, config.notifications);
-        }
-        println!("ChatGPT Desktop update is already installed or superseded.");
-        return Ok(());
-    }
-
-    match state.status {
-        UpdateStatus::ReadyToInstall | UpdateStatus::WaitingForAppExit => {}
-        UpdateStatus::Installing => {
-            maybe_send_notification(
-                config.notifications,
-                "ChatGPT Desktop update already installing",
-                "ChatGPT Desktop is already applying the ready update.",
-            );
-            println!("ChatGPT Desktop update is already installing.");
-            return Ok(());
-        }
-        _ => {
-            maybe_send_notification(
-                config.notifications,
-                "No ChatGPT Desktop update ready",
-                "There is no rebuilt ChatGPT Desktop update waiting to install.",
-            );
-            println!("No update is ready to install.");
-            return Ok(());
-        }
-    }
-
-    let Some(package_path) = state.artifact_paths.package_path.clone() else {
-        mark_failed_and_persist(state, paths, "No ready update package is recorded")?;
-        maybe_send_notification(
-            config.notifications,
-            "ChatGPT Desktop update failed",
-            "The updater has no package path recorded for the ready update.",
-        );
-        println!("No ready update package is recorded.");
-        return Ok(());
-    };
-
-    if !package_path.exists() {
-        mark_failed_and_persist(
-            state,
-            paths,
-            format!(
-                "Pending package artifact is missing: {}",
-                package_path.display()
-            ),
-        )?;
-        maybe_send_notification(
-            config.notifications,
-            "ChatGPT Desktop update failed",
-            "The rebuilt package is missing. Check the updater log for details.",
-        );
-        println!(
-            "Ready update package is missing: {}",
-            package_path.display()
-        );
-        return Ok(());
-    }
-
-    if liveness::is_app_running(config)? {
-        if !graphical_polkit_auth_agent_is_likely_available() {
-            defer_install_for_manual_auth(state, paths, &package_path)?;
-            maybe_send_manual_install_required_notification(config.notifications);
-            print_manual_install_required(&package_path);
-            return Ok(());
-        }
-        clear_install_auth_required_event(state, paths)?;
-        set_waiting_for_app_exit(state, paths, false)?;
-        maybe_send_notification(
-            config.notifications,
-            "ChatGPT Desktop update ready",
-            "Close ChatGPT Desktop to install the ready update.",
-        );
-        println!("ChatGPT Desktop is running. Close it to install the ready update.");
-        return Ok(());
-    }
-
-    clear_install_auth_required_event(state, paths)?;
-    state.waiting_for_app_exit_auto_install = false;
-    if !graphical_polkit_auth_agent_is_likely_available() {
-        defer_install_for_manual_auth(state, paths, &package_path)?;
-        maybe_send_manual_install_required_notification(config.notifications);
-        print_manual_install_required(&package_path);
-        return Ok(());
-    }
-    trigger_install(
-        state,
-        paths,
-        &config.workspace_root,
-        &package_path,
-        config.notifications,
-    )
-    .await
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct InstalledBuildInfo {
-    upstream_dmg: Option<InstalledUpstreamDmg>,
-}
-
-#[derive(Debug, Deserialize)]
-struct InstalledUpstreamDmg {
-    sha256: Option<String>,
-}
-
-fn complete_current_dmg_update_if_already_installed(
+fn daemon_replacement_gate(
     config: &RuntimeConfig,
     state: &mut PersistedState,
     paths: &RuntimePaths,
 ) -> Result<bool> {
-    if !dmg_update_state_can_be_cleared_as_current(&state.status) {
+    if !prepare_mutation_state(config, state, paths)? {
+        warn!("package transaction is still active; deferring updater work");
         return Ok(false);
     }
 
-    if state.candidate_version.is_none() {
-        return Ok(false);
+    if let Some(installed_binary) = restart::replacement_binary() {
+        restart_daemon(&installed_binary);
     }
-
-    let Some(candidate_sha256) = state.dmg_sha256.clone() else {
-        return Ok(false);
-    };
-
-    if !installed_upstream_dmg_matches(config, &candidate_sha256) {
-        return Ok(false);
-    }
-
-    clear_dmg_update_candidate(state, paths, None, Some(candidate_sha256))?;
-    info!("recovered DMG update state because the candidate DMG is already installed");
     Ok(true)
 }
 
-fn dmg_update_state_can_be_cleared_as_current(status: &UpdateStatus) -> bool {
-    matches!(
-        status,
-        UpdateStatus::UpdateDetected
-            | UpdateStatus::DownloadingDmg
-            | UpdateStatus::PreparingWorkspace
-            | UpdateStatus::PatchingApp
-            | UpdateStatus::BuildingPackage
-            | UpdateStatus::ReadyToInstall
-            | UpdateStatus::WaitingForAppExit
-            | UpdateStatus::Installing
-            | UpdateStatus::Failed
-    )
-}
-
-fn clear_dmg_update_candidate(
+fn prepare_mutation_state(
+    config: &RuntimeConfig,
     state: &mut PersistedState,
     paths: &RuntimePaths,
-    dmg_path: Option<PathBuf>,
-    sha256: Option<String>,
-) -> Result<()> {
-    state.status = UpdateStatus::Idle;
-    state.waiting_for_app_exit_auto_install = false;
-    state.deferred_build = false;
-    state.candidate_version = None;
-    if let Some(sha256) = sha256 {
-        state.dmg_sha256 = Some(sha256);
-    }
-    if let Some(dmg_path) = dmg_path {
-        state.artifact_paths.dmg_path = Some(dmg_path);
-    }
-    state.artifact_paths.package_path = None;
-    state.error_message = None;
-    state.notified_events.clear();
-    cache_cleanup::normalize_artifact_workspace_dir(&paths.cache_dir, state);
-    persist_state(paths, state)
+) -> Result<bool> {
+    prepare_mutation_state_with_policy(config, state, paths, false)
 }
 
-fn installed_upstream_dmg_matches(config: &RuntimeConfig, sha256: &str) -> bool {
-    installed_upstream_dmg_sha256(config).as_deref() == Some(sha256)
-}
-
-fn installed_upstream_dmg_sha256(config: &RuntimeConfig) -> Option<String> {
-    installed_build_info_paths(config)
-        .into_iter()
-        .find_map(|path| upstream_dmg_sha256_from_build_info(&path))
-}
-
-fn installed_build_info_paths(config: &RuntimeConfig) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(app_root) = config.app_executable_path.parent() {
-        paths.push(app_root.join(".codex-linux/build-info.json"));
-        paths.push(app_root.join("resources/codex-linux-build-info.json"));
-    }
-    paths
-}
-
-fn upstream_dmg_sha256_from_build_info(path: &Path) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
-    let build_info = serde_json::from_str::<InstalledBuildInfo>(&content).ok()?;
-    build_info
-        .upstream_dmg?
-        .sha256
-        .filter(|value| !value.is_empty())
-}
-
-fn complete_pending_install_if_already_installed(
+fn prepare_explicit_mutation_state(
+    config: &RuntimeConfig,
     state: &mut PersistedState,
     paths: &RuntimePaths,
-) -> Result<PendingInstallRecovery> {
-    if !matches!(
-        state.status,
-        UpdateStatus::ReadyToInstall | UpdateStatus::WaitingForAppExit
-    ) {
-        return Ok(PendingInstallRecovery::NoChange);
+) -> Result<bool> {
+    prepare_mutation_state_with_policy(config, state, paths, true)
+}
+
+fn prepare_mutation_state_with_policy(
+    config: &RuntimeConfig,
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    allow_manual_recovery: bool,
+) -> Result<bool> {
+    *state = PersistedState::load_or_default(&paths.state_file, config.auto_install_on_app_exit)?;
+
+    if state.manual_recovery_required && !allow_manual_recovery {
+        warn!("manual recovery confirmation is required before automatic updater work");
+        return Ok(false);
     }
 
-    let Some(candidate_version) = state.candidate_version.clone().filter(|candidate| {
-        installed_version_satisfies_candidate(&state.installed_version, candidate)
-    }) else {
-        return Ok(PendingInstallRecovery::NoChange);
-    };
+    if state.status != UpdateStatus::Installing {
+        state.installed_version = install::installed_package_version();
+        state.save_updater(&paths.state_file)?;
+        return Ok(true);
+    }
 
-    let candidate_is_installed =
-        installed_version_matches_candidate(&state.installed_version, &candidate_version);
-    let recovery = if candidate_is_installed {
-        PendingInstallRecovery::CandidateInstalled
+    match state.install_transaction.clone() {
+        Some(transaction) => {
+            let owner_state = install_transaction::owner_state(&transaction);
+            match owner_state {
+                install_transaction::OwnerState::Running => Ok(false),
+                install_transaction::OwnerState::Unknown => {
+                    if !install_transaction::grace_expired(&transaction) {
+                        warn!(
+                            "package transaction owner cannot be classified safely; deferring recovery"
+                        );
+                        return Ok(false);
+                    }
+                    state.mark_manual_recovery_required(UNKNOWN_INSTALL_RECOVERY_MESSAGE);
+                    state.save_updater(&paths.state_file)?;
+                    if allow_manual_recovery {
+                        // This explicit install-ready/rollback invocation is
+                        // the user's confirmation that no package manager is
+                        // still running. The transaction has been cleared, so
+                        // the requested operation can proceed immediately.
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                }
+                install_transaction::OwnerState::NotStarted
+                | install_transaction::OwnerState::Exited
+                    if !install_transaction::grace_expired(&transaction) =>
+                {
+                    Ok(false)
+                }
+                install_transaction::OwnerState::NotStarted
+                | install_transaction::OwnerState::Exited => {
+                    recover_abandoned_install(state, paths)?;
+                    Ok(true)
+                }
+            }
+        }
+        None => {
+            state.mark_failed("Installing state has no recoverable package transaction owner");
+            state.save_updater(&paths.state_file)?;
+            Ok(true)
+        }
+    }
+}
+
+fn recover_abandoned_install(state: &mut PersistedState, paths: &RuntimePaths) -> Result<()> {
+    let transaction = state
+        .install_transaction
+        .clone()
+        .context("Installing state has no transaction metadata")?;
+
+    let observed_installed_version = install::installed_package_version();
+    let verified_installed_version =
+        install::installed_package_version_for_recovery(&transaction.package_path);
+    let package_version = install::package_version(&transaction.package_path).ok();
+    let package_sha256 = install_transaction::package_sha256(&transaction.package_path).ok();
+    let package_identity_matches = transaction
+        .package_sha256
+        .as_deref()
+        .zip(package_sha256.as_deref())
+        .is_some_and(|(expected, actual)| expected == actual);
+    let replacement_observed = restart::replacement_binary().is_some();
+    let version_transition_observed = state.installed_version != "unknown"
+        && verified_installed_version
+            .as_deref()
+            .is_some_and(|installed| installed != state.installed_version);
+
+    let verified_package_matches = verified_installed_version
+        .as_deref()
+        .zip(package_version.as_deref())
+        .is_some_and(|(installed, candidate)| installed == candidate);
+
+    if verified_package_matches
+        && package_identity_matches
+        && (version_transition_observed || replacement_observed)
+    {
+        apply_reconciled_install(
+            state,
+            transaction,
+            verified_installed_version.expect("verified install version disappeared"),
+        );
     } else {
-        PendingInstallRecovery::SupersededByInstalledVersion
-    };
+        state.mark_failed(format!(
+            "abandoned package transaction could not be reconciled: installed={observed_installed_version}, candidate={}, configured={}, artifact_identity={}, install_effect={}",
+            package_version.as_deref().unwrap_or("unknown"),
+            if verified_installed_version.is_some() {
+                "verified"
+            } else {
+                "unproven"
+            },
+            if package_identity_matches { "matched" } else { "unproven" },
+            if version_transition_observed || replacement_observed {
+                "observed"
+            } else {
+                "unproven"
+            }
+        ));
+    }
+
+    state.save_updater(&paths.state_file)?;
+    Ok(())
+}
+
+fn apply_reconciled_install(
+    state: &mut PersistedState,
+    transaction: crate::state::InstallTransaction,
+    installed_version: String,
+) {
+    match transaction.operation {
+        InstallOperation::Update => {
+            let upstream_identity_proven = state
+                .artifact_paths
+                .package_candidate_sha256
+                .as_deref()
+                .zip(state.upstream_package_sha256.as_deref())
+                .is_some_and(|(package_candidate, candidate)| package_candidate == candidate);
+            state.installed_version = installed_version;
+            state.installed_upstream_version = upstream_identity_proven
+                .then(|| state.candidate_version.clone())
+                .flatten();
+            state.installed_upstream_sha256 = upstream_identity_proven
+                .then(|| state.upstream_package_sha256.clone())
+                .flatten();
+            state
+                .last_known_good_version
+                .get_or_insert_with(|| state.installed_version.clone());
+            state.candidate_version = None;
+            state.candidate_architecture = None;
+            state.candidate_repository_path = None;
+            state.artifact_paths.package_path = Some(transaction.package_path.clone());
+            if !upstream_identity_proven {
+                state.artifact_paths.package_candidate_sha256 = None;
+            }
+            state.waiting_for_app_exit_auto_install = false;
+        }
+        InstallOperation::Rollback => {
+            let blocked_version = state
+                .candidate_version
+                .clone()
+                .or_else(|| Some(state.installed_version.clone()));
+            let blocked_sha = state.upstream_package_sha256.clone();
+
+            state.installed_version = installed_version;
+            state.installed_upstream_version = state.last_known_good_upstream_version.clone();
+            state.installed_upstream_sha256 = state.last_known_good_upstream_sha256.clone();
+            state.candidate_version = None;
+            state.rollback_blocked_candidate_version = blocked_version;
+            state.rollback_blocked_package_sha256 = blocked_sha;
+            state.artifact_paths.package_path = Some(transaction.package_path.clone());
+            state.artifact_paths.package_candidate_sha256 = None;
+            state.artifact_paths.rollback_package_path = Some(transaction.package_path);
+            state.last_known_good_version = Some(state.installed_version.clone());
+        }
+    }
 
     state.status = UpdateStatus::Installed;
-    state.waiting_for_app_exit_auto_install = false;
-    state.candidate_version = None;
-    clear_rollback_blocked_candidate(state);
-    if !candidate_is_installed {
-        state.artifact_paths.package_path = None;
-    }
+    state.manual_recovery_required = false;
+    state.install_transaction = None;
     state.error_message = None;
-    state.notified_events.clear();
-    cache_cleanup::normalize_artifact_workspace_dir(&paths.cache_dir, state);
-    persist_state(paths, state)?;
-    info!("recovered pending install state because the candidate version is already installed or superseded");
-    Ok(recovery)
 }
 
-fn recover_interrupted_install(state: &mut PersistedState, paths: &RuntimePaths) -> Result<()> {
-    if state.status != UpdateStatus::Installing {
-        return Ok(());
-    }
-
-    if let Some(candidate_version) = state.candidate_version.clone().filter(|candidate| {
-        installed_version_satisfies_candidate(&state.installed_version, candidate)
-    }) {
-        let candidate_is_installed =
-            installed_version_matches_candidate(&state.installed_version, &candidate_version);
-
-        state.status = UpdateStatus::Installed;
-        state.waiting_for_app_exit_auto_install = false;
-        state.candidate_version = None;
-        clear_rollback_blocked_candidate(state);
-        if !candidate_is_installed {
-            state.artifact_paths.package_path = None;
-        }
-        state.error_message = None;
-        state.notified_events.clear();
-        cache_cleanup::normalize_artifact_workspace_dir(&paths.cache_dir, state);
-        persist_state(paths, state)?;
-        info!("recovered interrupted install state because the candidate version is already installed");
-        return Ok(());
-    }
-
-    let Some(package_path) = state.artifact_paths.package_path.clone() else {
-        mark_failed_and_persist(
-            state,
-            paths,
-            "Previous install attempt was interrupted and no package artifact is recorded",
-        )?;
+fn restart_after_persisted_install(config: &RuntimeConfig, paths: &RuntimePaths) -> Result<()> {
+    let replacement = restart::replacement_binary();
+    let Some(installed_binary) = replacement else {
         return Ok(());
     };
-
-    if !package_path.exists() {
-        mark_failed_and_persist(
-            state,
-            paths,
-            format!(
-                "Previous install attempt was interrupted and the package artifact is missing: {}",
-                package_path.display()
-            ),
-        )?;
+    test_wait_before_restart_readback()?;
+    let persisted =
+        PersistedState::load_or_default(&paths.state_file, config.auto_install_on_app_exit)?;
+    if persisted.status != UpdateStatus::Installed {
+        warn!(
+            status = ?persisted.status,
+            installed_binary = %installed_binary.display(),
+            "replacement updater exists but Installed state was not read back successfully; refusing to restart"
+        );
         return Ok(());
     }
-
-    state.status = UpdateStatus::ReadyToInstall;
-    state.waiting_for_app_exit_auto_install = false;
-    state.error_message =
-        Some("Previous install attempt was interrupted before completion".to_string());
-    cache_cleanup::normalize_artifact_workspace_dir(&paths.cache_dir, state);
-    persist_state(paths, state)?;
-    info!(package = %package_path.display(), "recovered interrupted install state back to ready_to_install");
-    Ok(())
+    restart_daemon(&installed_binary)
 }
 
-fn installed_version_satisfies_candidate(installed: &str, candidate: &str) -> bool {
-    if installed == "unknown" {
-        return false;
-    }
-
-    match compare_generated_versions(installed, candidate) {
-        Some(std::cmp::Ordering::Less) => false,
-        Some(_) => true,
-        None => installed == candidate,
-    }
-}
-
-fn installed_version_matches_candidate(installed: &str, candidate: &str) -> bool {
-    if installed == "unknown" {
-        return false;
-    }
-
-    match compare_generated_versions(installed, candidate) {
-        Some(std::cmp::Ordering::Equal) => true,
-        Some(_) => false,
-        None => installed == candidate,
-    }
-}
-
-fn rollback_blocks_candidate(
-    state: &PersistedState,
-    candidate_sha256: &str,
-    candidate_version: &str,
-) -> bool {
-    match state.rollback_blocked_dmg_sha256.as_deref() {
-        Some(blocked_sha256) => blocked_sha256 == candidate_sha256,
-        None => state
-            .rollback_blocked_candidate_version
-            .as_deref()
-            .is_some_and(|blocked| installed_version_matches_candidate(blocked, candidate_version)),
-    }
-}
-
-fn clear_rollback_blocked_candidate(state: &mut PersistedState) {
-    state.rollback_blocked_candidate_version = None;
-    state.rollback_blocked_dmg_sha256 = None;
-}
-
-fn compare_generated_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
-    let left = parse_generated_version(left)?;
-    let right = parse_generated_version(right)?;
-    Some(left.cmp(&right))
-}
-
-fn parse_generated_version(version: &str) -> Option<Vec<u32>> {
-    let without_metadata = version
-        .split_once('+')
-        .map(|(prefix, _)| prefix)
-        .unwrap_or(version);
-    let base = without_metadata
-        .split_once('-')
-        .map(|(prefix, _)| prefix)
-        .unwrap_or(without_metadata);
-    let mut parts = Vec::new();
-    for segment in base.split('.') {
-        parts.push(segment.parse::<u32>().ok()?);
-    }
-    if parts.len() != 4 {
-        return None;
-    }
-    Some(parts)
-}
-
-fn maybe_notify(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    enabled: bool,
-    event_name: &str,
-    summary: &str,
-    body: &str,
-) -> Result<()> {
-    let version = state
-        .candidate_version
-        .as_deref()
-        .unwrap_or(&state.installed_version);
-    let event_key = format!("{event_name}:{version}");
-    maybe_notify_with_event_key(state, paths, enabled, &event_key, summary, body)
-}
-
-fn maybe_notify_with_event_key(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    enabled: bool,
-    event_key: &str,
-    summary: &str,
-    body: &str,
-) -> Result<()> {
-    if !state.notified_events.insert(event_key.to_string()) {
+#[cfg(test)]
+fn test_wait_before_restart_readback() -> Result<()> {
+    let Some(marker) = std::env::var_os("CODEX_TEST_BEFORE_RESTART_READBACK") else {
         return Ok(());
+    };
+    let marker = std::path::PathBuf::from(marker);
+    fs::write(&marker, b"ready")?;
+    let release = std::path::PathBuf::from(
+        std::env::var_os("CODEX_TEST_RELEASE_RESTART_READBACK")
+            .context("restart readback fixture release path is required")?,
+    );
+    while !release.exists() {
+        std::thread::sleep(Duration::from_millis(10));
     }
-
-    if enabled {
-        if let Err(error) = notify::send(summary, body) {
-            warn!(?error, "failed to send desktop notification");
-        }
-    }
-
-    persist_state(paths, state)?;
     Ok(())
 }
 
-fn clear_notification_event(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    event_key: &str,
-) -> Result<()> {
-    if state.notified_events.remove(event_key) {
-        persist_state(paths, state)?;
-    }
-
+#[cfg(not(test))]
+fn test_wait_before_restart_readback() -> Result<()> {
     Ok(())
 }
 
-fn cli_is_missing(state: &PersistedState) -> bool {
-    state.cli_status == CliStatus::NotInstalled
+fn restart_daemon(installed_binary: &Path) -> ! {
+    info!(
+        installed_binary = %installed_binary.display(),
+        "updater binary was replaced after Installed state was persisted; exiting so systemd restarts on the new binary"
+    );
+    restart::exit_for_replacement();
 }
 
-fn maybe_notify_cli_missing(
+async fn check(
+    config: &RuntimeConfig,
     state: &mut PersistedState,
     paths: &RuntimePaths,
-    enabled: bool,
+    restart_on_replacement: bool,
+    retry_failed_candidate: bool,
 ) -> Result<()> {
-    if !cli_is_missing(state) {
-        return clear_notification_event(state, paths, CLI_MISSING_NOTIFICATION_EVENT);
-    }
+    recover_interrupted_check(state);
+    let previous_state = state.clone();
+    let previous_status = state.status.clone();
+    let previous_sha256 = state.upstream_package_sha256.clone();
+    let previous_error = state.error_message.clone();
+    let previous_waiting_auto_install = state.waiting_for_app_exit_auto_install;
+    state.installed_version = install::installed_package_version();
+    mark_check_started(state);
+    state.save_updater(&paths.state_file)?;
 
-    maybe_notify_with_event_key(
-        state,
-        paths,
-        enabled,
-        CLI_MISSING_NOTIFICATION_EVENT,
-        "Codex CLI not installed",
-        "ChatGPT Desktop needs the Codex CLI. Open the app to retry the automatic install flow, or install it manually with npm.",
+    let package_cache = paths.cache_dir.join("packages");
+    let metadata = match upstream::resolve_metadata(
+        &config.builder_bundle_root,
+        &config.repository_url,
+        &package_cache,
     )
-}
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => return fail_check(config, state, paths, previous_state.clone(), error),
+    };
+    state.last_successful_check_at = Some(Utc::now());
+    let _ = cache_cleanup::prune(&paths.cache_dir, state);
 
-fn maybe_notify_installed(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    enabled: bool,
-) -> Result<()> {
-    if state.status != UpdateStatus::Installed {
-        return Ok(());
-    }
-
-    maybe_notify(
-        state,
-        paths,
-        enabled,
-        "installed",
-        "ChatGPT Desktop updated",
-        "The new package is installed and will be used the next time you open the app.",
-    )
-}
-
-fn maybe_notify_update_ready(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    enabled: bool,
-) -> Result<()> {
-    let version = state
-        .candidate_version
-        .as_deref()
-        .unwrap_or(&state.installed_version);
-    let event_key = format!("ready_to_install:{version}");
-    if !state.notified_events.insert(event_key) {
-        return Ok(());
-    }
-
-    if enabled {
-        let body = if state.auto_install_on_app_exit {
-            "A rebuilt Linux package is ready. Close ChatGPT Desktop to install it, or open ChatGPT Desktop and choose Update."
+    let same_failed_candidate = previous_status == UpdateStatus::Failed
+        && previous_sha256.as_deref() == Some(metadata.sha256.as_str());
+    let failed_candidate_has_package = previous_state
+        .artifact_paths
+        .package_path
+        .as_ref()
+        .is_some_and(|path| path.is_file() && package_matches_candidate(&previous_state));
+    let already_installed = state.installed_upstream_version.as_deref()
+        == Some(metadata.version.as_str())
+        && state.installed_upstream_sha256.as_deref() == Some(metadata.sha256.as_str())
+        && state.candidate_version.is_none();
+    if already_installed
+        || preserves_failed_candidate(
+            same_failed_candidate,
+            retry_failed_candidate,
+            failed_candidate_has_package,
+        )
+    {
+        state.status = if same_failed_candidate {
+            UpdateStatus::Failed
         } else {
-            "A rebuilt Linux package is ready. Open ChatGPT Desktop and choose Update to install it."
+            UpdateStatus::Idle
         };
-        if let Err(error) = notify::send("ChatGPT Desktop update ready", body) {
-            warn!(?error, "failed to send update-ready notification");
+        if same_failed_candidate {
+            state.error_message = previous_error;
         }
+        if already_installed {
+            state.clear_install_auth_retry_block();
+            state.install_after_app_exit_requested = false;
+        }
+        state.save_updater(&paths.state_file)?;
+        return Ok(());
     }
 
-    persist_state(paths, state)?;
-    Ok(())
+    if same_pending_candidate(&previous_state, &metadata.version, &metadata.sha256) {
+        state.status = previous_status;
+        state.error_message = previous_error;
+        state.waiting_for_app_exit_auto_install = previous_waiting_auto_install;
+        return install_ready(config, state, paths, false, restart_on_replacement).await;
+    }
+
+    rollback::record_current_package_as_known_good(state);
+    state.candidate_version = Some(metadata.version.clone());
+    state.candidate_architecture = Some(metadata.architecture.clone());
+    state.candidate_repository_path = Some(metadata.repository_path.clone());
+    state.upstream_package_sha256 = Some(metadata.sha256.clone());
+    state.artifact_paths.package_path = None;
+    state.artifact_paths.package_candidate_sha256 = None;
+    state.clear_install_auth_retry_block();
+    state.install_after_app_exit_requested = false;
+    state.status = UpdateStatus::DownloadingPackage;
+    state.save_updater(&paths.state_file)?;
+
+    let upstream_package = match upstream::download_verified_package(
+        &config.builder_bundle_root,
+        &config.repository_url,
+        &package_cache,
+        &metadata,
+    )
+    .await
+    {
+        Ok(path) => path,
+        Err(error) => return fail_update(config, state, paths, &previous_state, error),
+    };
+    state.artifact_paths.upstream_package_path = Some(upstream_package.clone());
+    if let Err(error) =
+        builder::build_update(config, state, paths, &metadata.version, &upstream_package).await
+    {
+        return fail_update(config, state, paths, &previous_state, error);
+    }
+
+    if config.notifications {
+        let _ = notify::send(
+            "codex-desktop update ready",
+            &format!(
+                "Version {} has been rebuilt from OpenAI's signed Linux package.",
+                metadata.version
+            ),
+        );
+    }
+    install_ready(config, state, paths, false, restart_on_replacement).await
 }
 
-fn maybe_send_notification(enabled: bool, summary: &str, body: &str) {
-    if enabled {
-        let _ = notify::send(summary, body);
+fn preserves_failed_candidate(
+    same_failed_candidate: bool,
+    retry_failed_candidate: bool,
+    failed_candidate_has_package: bool,
+) -> bool {
+    same_failed_candidate && (!retry_failed_candidate || failed_candidate_has_package)
+}
+
+fn package_matches_candidate(state: &PersistedState) -> bool {
+    state
+        .upstream_package_sha256
+        .as_deref()
+        .is_some_and(|candidate_sha256| {
+            state.artifact_paths.package_candidate_sha256.as_deref() == Some(candidate_sha256)
+        })
+}
+
+fn mark_check_started(state: &mut PersistedState) {
+    if !state.install_auth_retry_is_blocked() {
+        state.status = UpdateStatus::CheckingUpstream;
+        state.error_message = None;
+    }
+    state.last_check_at = Some(Utc::now());
+}
+
+fn recover_interrupted_check(state: &mut PersistedState) {
+    if state.status == UpdateStatus::CheckingUpstream && state.install_auth_retry_is_blocked() {
+        state.status = UpdateStatus::ReadyToInstall;
     }
 }
 
-async fn trigger_install(
+fn same_pending_candidate(state: &PersistedState, version: &str, sha256: &str) -> bool {
+    state.candidate_version.as_deref() == Some(version)
+        && state.upstream_package_sha256.as_deref() == Some(sha256)
+        && package_matches_candidate(state)
+        && matches!(
+            state.status,
+            UpdateStatus::ReadyToInstall | UpdateStatus::WaitingForAppExit
+        )
+}
+
+async fn install_ready(
+    config: &RuntimeConfig,
     state: &mut PersistedState,
     paths: &RuntimePaths,
-    workspace_root: &Path,
-    package_path: &Path,
-    notifications: bool,
+    explicit_retry: bool,
+    restart_on_replacement: bool,
 ) -> Result<()> {
-    state.status = UpdateStatus::Installing;
+    install_ready_with_launcher(
+        config,
+        state,
+        paths,
+        explicit_retry,
+        restart_on_replacement,
+        Path::new("/bin/sh"),
+    )
+    .await
+}
+
+async fn install_ready_with_launcher(
+    config: &RuntimeConfig,
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    explicit_retry: bool,
+    restart_on_replacement: bool,
+    launcher_program: &Path,
+) -> Result<()> {
+    if !matches!(
+        state.status,
+        UpdateStatus::ReadyToInstall | UpdateStatus::WaitingForAppExit | UpdateStatus::Failed
+    ) {
+        println!("No rebuilt package is ready to install.");
+        return Ok(());
+    }
+    if state.status == UpdateStatus::Failed && !explicit_retry {
+        return Ok(());
+    }
+    let package = state
+        .artifact_paths
+        .package_path
+        .clone()
+        .context("ready state has no package")?;
+    if !package_matches_candidate(state) {
+        let retry_unbound_candidate = state.artifact_paths.package_candidate_sha256.is_none();
+        let recovery = if retry_unbound_candidate {
+            "it will be rebuilt on the next check"
+        } else {
+            "run check-now to rebuild"
+        };
+        let message = format!(
+            "rebuilt package is not bound to candidate {}; {recovery}",
+            state.candidate_version.as_deref().unwrap_or("unknown"),
+        );
+        state.mark_failed(&message);
+        if retry_unbound_candidate {
+            state.candidate_version = None;
+            state.candidate_architecture = None;
+            state.candidate_repository_path = None;
+            state.upstream_package_sha256 = None;
+        }
+        state.artifact_paths.package_path = None;
+        state.artifact_paths.package_candidate_sha256 = None;
+        state.save_updater(&paths.state_file)?;
+        anyhow::bail!(message);
+    }
+    anyhow::ensure!(
+        package.is_file(),
+        "rebuilt package is missing: {}",
+        package.display()
+    );
+    if explicit_retry {
+        // An explicit install-ready command is the user's confirmation that
+        // any previously ambiguous package transaction has been checked.
+        state.manual_recovery_required = false;
+    }
+    let auth_retry_blocked = state.install_auth_retry_is_blocked();
+    let install_after_app_exit_requested = state.install_after_app_exit_requested;
+    if liveness::is_app_running(config)? {
+        if !explicit_retry && !install_after_app_exit_requested && !config.auto_install_on_app_exit
+        {
+            state.status = UpdateStatus::ReadyToInstall;
+            state.waiting_for_app_exit_auto_install = false;
+            state.save_updater(&paths.state_file)?;
+            return Ok(());
+        }
+        state.clear_install_auth_retry_block();
+        state.status = UpdateStatus::WaitingForAppExit;
+        state.install_after_app_exit_requested = explicit_retry || install_after_app_exit_requested;
+        state.waiting_for_app_exit_auto_install =
+            !state.install_after_app_exit_requested && config.auto_install_on_app_exit;
+        state.save_updater(&paths.state_file)?;
+        println!("Update is ready; close ChatGPT Community to install it.");
+        return Ok(());
+    }
+    if !explicit_retry && auth_retry_blocked {
+        state.status = UpdateStatus::ReadyToInstall;
+        state.waiting_for_app_exit_auto_install = false;
+        state.save_updater(&paths.state_file)?;
+        return Ok(());
+    }
+    if !explicit_retry && !install_after_app_exit_requested && !config.auto_install_on_app_exit {
+        state.status = UpdateStatus::ReadyToInstall;
+        state.save_updater(&paths.state_file)?;
+        return Ok(());
+    }
+
+    let explicit_install = explicit_retry || install_after_app_exit_requested;
+    state.clear_install_auth_retry_block();
+    state.install_after_app_exit_requested = false;
+    let current_exe = std::env::current_exe()?;
+    install_transaction::begin(state, &paths.state_file, &package, InstallOperation::Update)?;
+    let mut command = install::pkexec_command(&current_exe, &package);
+    let output = match install_transaction::run_owned_command_with_launcher(
+        &mut command,
+        state,
+        &paths.state_file,
+        launcher_program,
+    ) {
+        Ok(output) => output,
+        Err(failure) if !failure.mutation_may_have_started => {
+            return fail(
+                state,
+                paths,
+                failure
+                    .error
+                    .context("Failed to launch privileged package install"),
+            );
+        }
+        Err(failure) => {
+            return Err(failure
+                .error
+                .context("Privileged package install outcome is unknown"));
+        }
+    };
+    if !output.status.success() {
+        if pkexec_authentication_was_not_obtained(&output.status) {
+            let mut message = format!("privileged install exited with status {}", output.status);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            if !stderr.is_empty() {
+                message.push_str(": ");
+                message.push_str(stderr);
+            }
+            let error = anyhow::anyhow!(message);
+            state.install_transaction = None;
+            state.status = UpdateStatus::ReadyToInstall;
+            state.waiting_for_app_exit_auto_install = false;
+            state.error_message = Some(format!("{error:#}"));
+            state.block_install_auth_retry();
+            state.install_after_app_exit_requested = explicit_install;
+            state.save_updater(&paths.state_file)?;
+            return Err(error);
+        }
+        // The launch gate has already been released, so a nonzero exit cannot
+        // prove that the package manager made no changes. Keep the durable
+        // Installing transaction intact and let ownership-aware reconciliation
+        // determine whether the package completed, partially applied, or failed.
+        anyhow::bail!(
+            "privileged install exited unsuccessfully after package mutation may have started: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let installed_upstream_version = state.candidate_version.clone();
+    let installed_upstream_sha256 = state.upstream_package_sha256.clone();
+    state.installed_version = install::installed_package_version();
+    state.installed_upstream_version = installed_upstream_version;
+    state.installed_upstream_sha256 = installed_upstream_sha256;
+    state.status = UpdateStatus::Installed;
+    state.install_transaction = None;
+    state
+        .last_known_good_version
+        .get_or_insert_with(|| state.installed_version.clone());
+    state.candidate_version = None;
+    state.candidate_architecture = None;
+    state.candidate_repository_path = None;
     state.waiting_for_app_exit_auto_install = false;
     state.error_message = None;
-    persist_state(paths, state)?;
-
-    maybe_send_notification(
-        notifications,
-        "Installing ChatGPT Desktop update",
-        "Applying the locally rebuilt Linux package.",
-    );
-
-    let current_exe = std::env::current_exe().context("Failed to resolve updater binary path")?;
-    let output = install::pkexec_command(&current_exe, package_path)
-        .output()
-        .context("Failed to launch pkexec for update installation")?;
-    let status = output.status;
-
-    if status.success() {
-        state.status = UpdateStatus::Installed;
-        state.waiting_for_app_exit_auto_install = false;
-        state.installed_version = install::installed_package_version();
-        state.candidate_version = None;
-        clear_rollback_blocked_candidate(state);
-        state.error_message = None;
-        state.notified_events.clear();
-        cache_cleanup::normalize_artifact_workspace_dir(workspace_root, state);
-        persist_state(paths, state)?;
-        let _ = maybe_notify_installed(state, paths, notifications);
-        maybe_prune_workspace_cache(workspace_root, state);
-        return Ok(());
+    state.clear_install_auth_retry_block();
+    state.install_after_app_exit_requested = false;
+    state.save_updater(&paths.state_file)?;
+    let _ = cache_cleanup::prune(&paths.cache_dir, state);
+    if config.notifications {
+        let _ = notify::send(
+            "codex-desktop updated",
+            &format!("Installed {}.", state.installed_version),
+        );
     }
-
-    let stdout = summarize_command_output(&output.stdout);
-    let stderr = summarize_command_output(&output.stderr);
-    error!(
-        status = %status,
-        stdout = stdout.as_deref().unwrap_or(""),
-        stderr = stderr.as_deref().unwrap_or(""),
-        "privileged install failed"
-    );
-
-    let mut message = format!("Privileged install exited with status {status}");
-    if let Some(stderr) = stderr {
-        message.push_str(": ");
-        message.push_str(&stderr);
+    if restart_on_replacement {
+        restart_after_persisted_install(config, paths)?;
     }
-
-    let error = anyhow::anyhow!(message);
-    if pkexec_authentication_was_not_obtained(&status) {
-        defer_install_until_next_app_exit(state, paths, error.to_string())?;
-        return Err(error);
-    }
-
-    mark_failed_and_persist(state, paths, error.to_string())?;
-    let _ = notify::send(
-        "ChatGPT Desktop update failed",
-        "The package could not be installed. Check the updater log for details.",
-    );
-    Err(error)
+    Ok(())
 }
 
 fn pkexec_authentication_was_not_obtained(status: &std::process::ExitStatus) -> bool {
     matches!(status.code(), Some(126 | 127))
 }
 
-fn install_auth_required_event_key(state: &PersistedState) -> Option<String> {
-    state
-        .candidate_version
-        .as_deref()
-        .map(|candidate| format!("install_auth_required:{candidate}"))
-}
-
-fn install_auth_retry_is_blocked(state: &PersistedState) -> bool {
-    install_auth_required_event_key(state)
-        .as_ref()
-        .is_some_and(|event_key| state.notified_events.contains(event_key))
-}
-
-fn manual_install_required_message(package_path: &Path) -> String {
-    format!(
-        "No graphical polkit authentication agent is available for pkexec. Run this from a terminal after closing ChatGPT Desktop: {}",
-        manual_install_command(package_path)
-    )
-}
-
-fn manual_install_command(package_path: &Path) -> String {
-    let subcommand = match install::PackageKind::from_path(package_path) {
-        install::PackageKind::Deb => "install-deb",
-        install::PackageKind::Rpm => "install-rpm",
-        install::PackageKind::Pacman => "install-pacman",
-    };
-    format!(
-        "sudo /usr/bin/codex-update-manager {subcommand} --path {}",
-        shell_quote_path(package_path)
-    )
-}
-
-fn shell_quote_path(path: &Path) -> String {
-    let value = path.to_string_lossy();
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn print_manual_install_required(package_path: &Path) {
-    println!("Manual install required: no graphical polkit authentication agent is available.");
-    println!("Run this from a terminal after closing ChatGPT Desktop:");
-    println!("{}", manual_install_command(package_path));
-}
-
-fn defer_install_for_manual_auth(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    package_path: &Path,
-) -> Result<()> {
-    state.status = UpdateStatus::ReadyToInstall;
-    state.waiting_for_app_exit_auto_install = false;
-    state.error_message = Some(manual_install_required_message(package_path));
-    persist_state(paths, state)
-}
-
-fn maybe_notify_manual_install_required(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    enabled: bool,
-) -> Result<()> {
-    maybe_notify(
-        state,
-        paths,
-        enabled,
-        "manual_install_required",
-        "ChatGPT Desktop update needs manual install",
-        "No graphical authentication agent was found for pkexec. Run codex-update-manager status for details.",
-    )
-}
-
-fn maybe_send_manual_install_required_notification(enabled: bool) {
-    maybe_send_notification(
-        enabled,
-        "ChatGPT Desktop update needs manual install",
-        "No graphical authentication agent was found for pkexec. Run codex-update-manager status for details.",
-    );
-}
-
-fn graphical_polkit_auth_agent_is_likely_available() -> bool {
-    if std::env::var_os("CODEX_UPDATE_MANAGER_ASSUME_NO_POLKIT_AGENT").is_some() {
-        return false;
-    }
-    if std::env::var_os("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT").is_some() {
-        return true;
-    }
-    if !has_user_session_bus_for_polkit() {
-        return false;
-    }
-    polkit_auth_agent_process_is_running()
-}
-
-fn polkit_auth_agent_process_is_running() -> bool {
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return true;
-    };
-
-    for entry in entries.flatten() {
-        let file_name = entry.file_name();
-        if !file_name
-            .to_string_lossy()
-            .chars()
-            .all(|character| character.is_ascii_digit())
-        {
-            continue;
-        }
-        let process_dir = entry.path();
-        let mut process_text = String::new();
-        if let Ok(comm) = fs::read_to_string(process_dir.join("comm")) {
-            process_text.push_str(&comm);
-            process_text.push('\n');
-        }
-        if let Ok(cmdline) = fs::read(process_dir.join("cmdline")) {
-            process_text.push_str(&String::from_utf8_lossy(&cmdline).replace('\0', " "));
-        }
-        let process_environment = process_text
-            .to_ascii_lowercase()
-            .contains(DMS_POLKIT_AGENT_PROCESS_TOKEN)
-            .then(|| fs::read(process_dir.join("environ")).ok())
-            .flatten();
-        if process_matches_polkit_auth_agent(&process_text, process_environment.as_deref()) {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn process_matches_polkit_auth_agent(
-    process_text: &str,
-    process_environment: Option<&[u8]>,
-) -> bool {
-    if !process_text_matches_polkit_auth_agent(process_text) {
-        return false;
-    }
-    let normalized = process_text.to_ascii_lowercase();
-    if normalized.contains(DMS_POLKIT_AGENT_PROCESS_TOKEN)
-        && process_environment.is_some_and(|environment| {
-            environment
-                .split(|byte| *byte == b'\0')
-                .any(|entry| entry == DMS_DISABLE_POLKIT_ENV_ENTRY)
-        })
-    {
-        return false;
-    }
-    true
-}
-
-fn process_text_matches_polkit_auth_agent(process_text: &str) -> bool {
-    let normalized = process_text.to_ascii_lowercase();
-    if normalized.contains("polkitd") || normalized.contains("polkit-agent-helper") {
-        return false;
-    }
-    POLKIT_AUTH_AGENT_PROCESS_TOKENS
-        .iter()
-        .any(|token| normalized.contains(token))
-}
-
-fn clear_install_auth_required_event(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-) -> Result<()> {
-    let Some(event_key) = install_auth_required_event_key(state) else {
-        return Ok(());
-    };
-
-    if state.notified_events.remove(&event_key) {
-        persist_state(paths, state)?;
-    }
-
-    Ok(())
-}
-
-fn defer_install_until_next_app_exit(
-    state: &mut PersistedState,
-    paths: &RuntimePaths,
-    message: String,
-) -> Result<()> {
-    state.status = UpdateStatus::ReadyToInstall;
-    state.waiting_for_app_exit_auto_install = false;
-    state.error_message = Some(message);
-
-    if let Some(event_key) = install_auth_required_event_key(state) {
-        if state.notified_events.insert(event_key) {
-            let _ = notify::send(
-                "ChatGPT Desktop update needs permission",
-                "The ready update will retry after the next app close. Approve the system authentication dialog to install it.",
-            );
-        }
-    }
-
-    persist_state(paths, state)
-}
-
-fn notify_failure(
+fn fail_check<T>(
     config: &RuntimeConfig,
     state: &mut PersistedState,
     paths: &RuntimePaths,
-    error: &anyhow::Error,
+    mut previous_state: PersistedState,
+    error: anyhow::Error,
+) -> Result<T> {
+    if matches!(
+        previous_state.status,
+        UpdateStatus::ReadyToInstall | UpdateStatus::WaitingForAppExit
+    ) {
+        previous_state.last_check_at = state.last_check_at;
+        *state = previous_state;
+        state.save_updater(&paths.state_file)?;
+        return Err(error);
+    }
+    fail_update(config, state, paths, &previous_state, error)
+}
+
+fn fail<T>(state: &mut PersistedState, paths: &RuntimePaths, error: anyhow::Error) -> Result<T> {
+    state.mark_failed(format!("{error:#}"));
+    state.save_updater(&paths.state_file)?;
+    Err(error)
+}
+
+fn fail_update<T>(
+    config: &RuntimeConfig,
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    previous: &PersistedState,
+    error: anyhow::Error,
+) -> Result<T> {
+    fail_update_with(config, state, paths, previous, error, |summary, body| {
+        let _ = notify::send(summary, body);
+    })
+}
+
+/// Persist a failed check before notifying. Repeat failures for the same
+/// candidate stay silent; a new candidate or a recovered updater notifies.
+fn fail_update_with<T>(
+    config: &RuntimeConfig,
+    state: &mut PersistedState,
+    paths: &RuntimePaths,
+    previous: &PersistedState,
+    error: anyhow::Error,
+    send: impl FnOnce(&str, &str),
+) -> Result<T> {
+    let notification = should_notify_failure(config, state, previous).then(|| {
+        format!(
+            "Update check failed{}: {}. Run codex-update-manager diagnose.",
+            state
+                .candidate_version
+                .as_deref()
+                .map(|version| format!(" for {version}"))
+                .unwrap_or_default(),
+            error
+        )
+    });
+    let result = fail(state, paths, error);
+    if let Some(body) = notification {
+        send("codex-desktop update failed", &body);
+    }
+    result
+}
+
+fn should_notify_failure(
+    config: &RuntimeConfig,
+    current: &PersistedState,
+    previous: &PersistedState,
+) -> bool {
+    config.notifications
+        && (previous.status != UpdateStatus::Failed
+            || previous.upstream_package_sha256 != current.upstream_package_sha256)
+}
+
+fn status(state: &PersistedState, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(state)?);
+    } else {
+        println!("status: {:?}", state.status);
+        println!(
+            "manual_recovery_required: {}",
+            state.manual_recovery_required
+        );
+        println!("installed_version: {}", state.installed_version);
+        println!(
+            "installed_upstream_version: {}",
+            state
+                .installed_upstream_version
+                .as_deref()
+                .unwrap_or("unknown")
+        );
+        println!(
+            "candidate_version: {}",
+            state.candidate_version.as_deref().unwrap_or("none")
+        );
+        println!(
+            "candidate_sha256: {}",
+            state.upstream_package_sha256.as_deref().unwrap_or("none")
+        );
+        if let Some(error) = &state.error_message {
+            println!("error: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn diagnose(
+    config: &RuntimeConfig,
+    state: &PersistedState,
+    paths: &RuntimePaths,
+    json: bool,
 ) -> Result<()> {
-    let body = format!("The local rebuild failed: {error}");
-    maybe_notify(
-        state,
-        paths,
-        config.notifications,
-        "build_failed",
-        "ChatGPT Desktop update failed",
-        &body,
-    )
+    let value = serde_json::json!({
+        "repository": config.repository_url,
+        "appExecutable": config.app_executable_path,
+        "builderBundle": config.builder_bundle_root,
+        "stateFile": paths.state_file,
+        "stateSchema": state.schema_version,
+        "manualRecoveryRequired": state.manual_recovery_required,
+        "appRunning": liveness::is_app_running(config)?,
+        "status": state.status,
+    });
+    if json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        println!(
+            "repository: {}\napp: {}\nstatus: {:?}",
+            config.repository_url,
+            config.app_executable_path.display(),
+            state.status
+        );
+    }
+    Ok(())
+}
+
+struct MutationLock(fs::File);
+impl MutationLock {
+    fn try_acquire(path: &Path) -> Result<Option<Self>> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self(file))),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+}
+impl Drop for MutationLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 #[cfg(test)]
-mod tests {
+mod replacement_tests {
     use super::*;
-    use wiremock::{
-        matchers::{method, path},
-        Mock, MockServer, ResponseTemplate,
+    use crate::state::{InstallTransaction, ProcessIdentity};
+    use anyhow::Result;
+    use chrono::Utc;
+    use std::{
+        env,
+        ffi::OsStr,
+        fs::{self, File, OpenOptions},
+        io,
+        os::unix::{
+            ffi::OsStrExt,
+            fs::{OpenOptionsExt, PermissionsExt},
+        },
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
+        thread,
+        time::Duration,
     };
 
-    mod cli_repair_process_tests;
+    #[test]
+    fn explicit_check_retries_the_same_failed_candidate() {
+        assert!(preserves_failed_candidate(true, false, false));
+        assert!(!preserves_failed_candidate(true, true, false));
+        assert!(preserves_failed_candidate(true, true, true));
+        assert!(!preserves_failed_candidate(false, false, false));
+    }
 
-    fn test_paths(root: &std::path::Path) -> RuntimePaths {
+    #[test]
+    fn explicit_check_retries_when_package_belongs_to_an_older_candidate() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let package = dir.path().join("older-candidate.deb");
+        fs::write(&package, b"older candidate")?;
+
+        let mut state = ready_state(package);
+        state.status = UpdateStatus::Failed;
+        state.upstream_package_sha256 = Some("new-candidate-sha256".into());
+        state.artifact_paths.package_candidate_sha256 = Some("older-candidate-sha256".into());
+
+        let failed_candidate_has_package = state
+            .artifact_paths
+            .package_path
+            .as_ref()
+            .is_some_and(|path| path.is_file() && package_matches_candidate(&state));
+        assert!(!failed_candidate_has_package);
+        assert!(!preserves_failed_candidate(
+            true,
+            true,
+            failed_candidate_has_package
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn install_ready_rejects_package_bound_to_an_older_candidate() -> Result<()> {
+        let _env_guard = crate::test_util::env_lock();
+        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
+            "CODEX_UPDATE_MANAGER_TEST_PKEXEC_PATH",
+            "CODEX_UPDATE_MANAGER_TEST_PKEXEC_COUNT",
+            "CODEX_UPDATE_MANAGER_TEST_PKEXEC_EXIT",
+        ]);
+        let temp = tempfile::tempdir()?;
+        let paths = fixture_paths(temp.path());
+        paths.ensure_dirs()?;
+        let package = temp.path().join("older-candidate.deb");
+        fs::write(&package, b"older candidate")?;
+        let fake_pkexec = write_fake_pkexec(temp.path())?;
+        let invocation_count = temp.path().join("pkexec-count");
+        env::set_var("CODEX_UPDATE_MANAGER_TEST_PKEXEC_PATH", fake_pkexec);
+        env::set_var("CODEX_UPDATE_MANAGER_TEST_PKEXEC_COUNT", &invocation_count);
+        env::set_var("CODEX_UPDATE_MANAGER_TEST_PKEXEC_EXIT", "0");
+
+        let mut config = RuntimeConfig::default_with_paths(&paths);
+        config.auto_install_on_app_exit = false;
+        config.notifications = false;
+        config.app_executable_path = temp.path().join("not-running");
+        let mut state = ready_state(package);
+        state.status = UpdateStatus::Failed;
+        state.upstream_package_sha256 = Some("new-candidate-sha256".into());
+        state.artifact_paths.package_candidate_sha256 = Some("older-candidate-sha256".into());
+
+        let runtime = tokio::runtime::Runtime::new()?;
+        let error = runtime
+            .block_on(install_ready_with_launcher(
+                &config,
+                &mut state,
+                &paths,
+                true,
+                false,
+                Path::new("/bin/sh"),
+            ))
+            .expect_err("an artifact from another candidate must be rejected");
+
+        assert!(error.to_string().contains("not bound to candidate"));
+        assert_eq!(state.status, UpdateStatus::Failed);
+        assert_eq!(
+            state.candidate_version.as_deref(),
+            Some("2026.09.10.120000")
+        );
+        assert_eq!(
+            state.upstream_package_sha256.as_deref(),
+            Some("new-candidate-sha256")
+        );
+        assert!(state.artifact_paths.package_path.is_none());
+        assert!(state.artifact_paths.package_candidate_sha256.is_none());
+        assert!(
+            !invocation_count.exists(),
+            "stale artifact must not launch pkexec"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn schema_three_pending_candidates_without_binding_are_rebuilt() -> Result<()> {
+        for status in [
+            UpdateStatus::ReadyToInstall,
+            UpdateStatus::WaitingForAppExit,
+        ] {
+            let temp = tempfile::tempdir()?;
+            let paths = fixture_paths(temp.path());
+            paths.ensure_dirs()?;
+            let package = temp.path().join("legacy-candidate.deb");
+            fs::write(&package, b"legacy candidate")?;
+
+            let mut legacy = PersistedState::new(true);
+            legacy.schema_version = 3;
+            legacy.status = status;
+            legacy.candidate_version = Some("2026.09.10.120000".into());
+            legacy.upstream_package_sha256 = Some("legacy-candidate-sha256".into());
+            legacy.artifact_paths.package_path = Some(package);
+
+            let mut raw = serde_json::to_value(legacy)?;
+            raw.get_mut("artifact_paths")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("artifact paths object")
+                .remove("package_candidate_sha256");
+            fs::write(&paths.state_file, serde_json::to_vec_pretty(&raw)?)?;
+
+            let loaded = PersistedState::load_or_default(&paths.state_file, true)?;
+            assert_eq!(loaded.schema_version, 4);
+            assert!(loaded.artifact_paths.package_candidate_sha256.is_none());
+            assert!(!same_pending_candidate(
+                &loaded,
+                "2026.09.10.120000",
+                "legacy-candidate-sha256"
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn schema_three_pending_candidates_retry_after_metadata_failure_and_reconcile() -> Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
+        for pending_status in [
+            UpdateStatus::ReadyToInstall,
+            UpdateStatus::WaitingForAppExit,
+        ] {
+            let temp = tempfile::tempdir()?;
+            let paths = fixture_paths(temp.path());
+            paths.ensure_dirs()?;
+            let package = temp.path().join("legacy-candidate.deb");
+            fs::write(&package, b"legacy candidate")?;
+
+            let mut legacy = PersistedState::new(true);
+            legacy.schema_version = 3;
+            legacy.status = pending_status.clone();
+            legacy.candidate_version = Some("2026.09.10.120000".into());
+            legacy.candidate_architecture = Some("amd64".into());
+            legacy.candidate_repository_path = Some("pool/chatgpt.deb".into());
+            legacy.upstream_package_sha256 = Some("legacy-candidate-sha256".into());
+            legacy.artifact_paths.package_path = Some(package);
+            legacy.waiting_for_app_exit_auto_install =
+                pending_status == UpdateStatus::WaitingForAppExit;
+
+            let mut raw = serde_json::to_value(legacy)?;
+            raw.get_mut("artifact_paths")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("artifact paths object")
+                .remove("package_candidate_sha256");
+            fs::write(&paths.state_file, serde_json::to_vec_pretty(&raw)?)?;
+
+            let mut state = PersistedState::load_or_default(&paths.state_file, true)?;
+            let previous = state.clone();
+            mark_check_started(&mut state);
+            let config = RuntimeConfig::default_with_paths(&paths);
+            fail_check::<()>(
+                &config,
+                &mut state,
+                &paths,
+                previous,
+                anyhow::anyhow!("transient metadata failure"),
+            )
+            .expect_err("metadata failure should be reported");
+            assert_eq!(state.status, pending_status);
+
+            let mut config = RuntimeConfig::default_with_paths(&paths);
+            config.app_executable_path = temp.path().join("not-running");
+            let reconcile =
+                runtime.block_on(reconcile_pending_install(&config, &mut state, &paths));
+            if pending_status == UpdateStatus::WaitingForAppExit {
+                let error = reconcile.expect_err("unbound waiting artifact must be rejected");
+                assert!(error.to_string().contains("not bound to candidate"));
+                assert_eq!(state.status, UpdateStatus::Failed);
+                assert!(state.candidate_version.is_none());
+                assert!(state.candidate_architecture.is_none());
+                assert!(state.candidate_repository_path.is_none());
+                assert!(state.upstream_package_sha256.is_none());
+            } else {
+                reconcile?;
+            }
+
+            let persisted = PersistedState::load_or_default(&paths.state_file, true)?;
+            let same_failed_candidate = persisted.status == UpdateStatus::Failed
+                && persisted.upstream_package_sha256.as_deref() == Some("legacy-candidate-sha256");
+            let failed_candidate_has_package = persisted
+                .artifact_paths
+                .package_path
+                .as_ref()
+                .is_some_and(|path| path.is_file() && package_matches_candidate(&persisted));
+            assert!(!preserves_failed_candidate(
+                same_failed_candidate,
+                false,
+                failed_candidate_has_package
+            ));
+            assert!(!same_pending_candidate(
+                &persisted,
+                "2026.09.10.120000",
+                "legacy-candidate-sha256"
+            ));
+        }
+        Ok(())
+    }
+
+    fn stale_identity() -> ProcessIdentity {
+        ProcessIdentity {
+            pid: std::process::id(),
+            start_time_ticks: 0,
+            boot_id: Some("stale-boot".into()),
+        }
+    }
+
+    fn fixture_paths(root: &Path) -> RuntimePaths {
         RuntimePaths {
             config_file: root.join("config/config.toml"),
             state_file: root.join("state/state.json"),
@@ -2371,3358 +1218,1216 @@ mod tests {
         }
     }
 
-    fn test_config(root: &std::path::Path) -> RuntimeConfig {
-        RuntimeConfig {
-            dmg_url: "https://example.com/Codex.dmg".to_string(),
-            initial_check_delay_seconds: 1,
-            check_interval_hours: 6,
-            auto_install_on_app_exit: true,
-            notifications: false,
-            workspace_root: root.join("cache"),
-            builder_bundle_root: root.join("builder"),
-            app_executable_path: root.join("not-running-electron"),
-            enable_wrapper_updates: false,
-            wrapper_remote: String::new(),
-            wrapper_branch: "main".to_string(),
-            generated_artifact_cleanup: Default::default(),
-        }
+    fn ready_state(package: PathBuf) -> PersistedState {
+        let mut state = PersistedState::new(true);
+        state.candidate_version = Some("2026.09.10.120000".into());
+        state.upstream_package_sha256 = Some("candidate-sha256".into());
+        state.artifact_paths.package_path = Some(package);
+        state.artifact_paths.package_candidate_sha256 = state.upstream_package_sha256.clone();
+        state.status = UpdateStatus::ReadyToInstall;
+        state
     }
 
-    fn write_installed_build_info(config: &RuntimeConfig, sha256: &str) -> Result<()> {
-        let app_root = config
-            .app_executable_path
-            .parent()
-            .expect("test app executable should have parent");
-        std::fs::create_dir_all(app_root.join(".codex-linux"))?;
-        std::fs::write(
-            app_root.join(".codex-linux/build-info.json"),
-            format!(
-                r#"{{
-  "upstreamDmg": {{
-    "sha256": "{sha256}"
-  }}
-}}
-"#
-            ),
+    fn write_fake_pkexec(root: &Path) -> Result<PathBuf> {
+        let path = root.join("pkexec");
+        fs::write(
+            &path,
+            "#!/bin/sh\nprintf x >> \"$CODEX_UPDATE_MANAGER_TEST_PKEXEC_COUNT\"\nexit \"$CODEX_UPDATE_MANAGER_TEST_PKEXEC_EXIT\"\n",
         )?;
-        Ok(())
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+        Ok(path)
     }
 
-    fn configure_deferred_build_feature(
+    fn abandoned_state(package: PathBuf, installed_version: &str) -> Result<PersistedState> {
+        let package_sha256 = install_transaction::package_sha256(&package)?;
+        let mut state = PersistedState::new(true);
+        state.status = UpdateStatus::Installing;
+        state.installed_version = installed_version.into();
+        state.candidate_version = Some("candidate-upstream".into());
+        state.upstream_package_sha256 = Some("candidate-upstream-sha".into());
+        state.install_transaction = Some(InstallTransaction {
+            package_path: package,
+            package_sha256: Some(package_sha256),
+            package_command: Some(stale_identity()),
+            started_at: Utc::now()
+                - chrono::Duration::seconds(
+                    install_transaction::ABANDONED_INSTALL_GRACE.as_secs() as i64 + 1,
+                ),
+            operation: InstallOperation::Update,
+        });
+        Ok(state)
+    }
+
+    fn write_fake_rpm_recovery_command(
         root: &Path,
-        config: &RuntimeConfig,
-        enabled: bool,
-        auto_build: bool,
+        verification_succeeds: bool,
     ) -> Result<PathBuf> {
-        let settings_path = root.join("settings.json");
-        let enabled_features = if enabled {
-            r#"["deferred-update-build"]"#
+        let path = root.join("rpm-recovery-fixture");
+        let verification = if verification_succeeds {
+            "exit 0"
         } else {
-            "[]"
+            "exit 1"
         };
-        let policy_path = config
-            .builder_bundle_root
-            .join("linux-features/deferred-update-build/updater-policy.json");
-        std::fs::create_dir_all(
-            policy_path
-                .parent()
-                .expect("policy path should have parent"),
-        )?;
-        std::fs::write(
-            policy_path,
-            r#"{"schemaVersion":1,"autoBuildUpdatesSettingKey":"codex-linux-auto-build-updates"}"#,
-        )?;
-        std::fs::write(
-            root.join("linux-features.json"),
-            format!(r#"{{"enabled":{enabled_features}}}"#),
-        )?;
-        std::fs::write(
-            &settings_path,
-            format!(r#"{{"codex-linux-auto-build-updates":{auto_build}}}"#),
-        )?;
-        std::env::set_var("CODEX_LINUX_SETTINGS_FILE", &settings_path);
-        Ok(settings_path)
+        let script = r#"#!/bin/sh
+set -eu
+if [ "$1" = "-V" ]; then
+  [ "$2" = "--noscripts" ]
+  __VERIFY__
+fi
+if [ "$1" = "-q" ] || [ "$1" = "-qp" ]; then
+  if [ "$3" = "%{NAME}" ]; then
+    printf 'codex-desktop\n'
+  elif [ "$3" = "%{VERSION}-%{RELEASE}" ]; then
+    printf '2026.09.06-1.fc42\n'
+  else
+    printf 'codex-desktop\t2026.09.06-1.fc42\tx86_64\n'
+  fi
+  exit 0
+fi
+exit 90
+"#
+        .replace("__VERIFY__", verification);
+        fs::write(&path, script)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+        Ok(path)
     }
 
-    async fn mount_dmg(server: &MockServer, etag: &str, body: &[u8]) {
-        Mock::given(method("HEAD"))
-            .and(path("/Codex.dmg"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("ETag", etag)
-                    .insert_header("Content-Length", body.len().to_string()),
-            )
-            .expect(1)
-            .mount(server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/Codex.dmg"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec()))
-            .expect(1)
-            .mount(server)
-            .await;
-    }
-
-    #[test]
-    fn upstream_check_freshness_respects_configured_interval() {
-        let config = RuntimeConfig {
-            dmg_url: "https://example.com/Codex.dmg".to_string(),
-            initial_check_delay_seconds: 1,
-            check_interval_hours: 6,
-            auto_install_on_app_exit: true,
-            notifications: false,
-            workspace_root: std::path::PathBuf::from("/tmp/cache"),
-            builder_bundle_root: std::path::PathBuf::from("/tmp/builder"),
-            app_executable_path: std::path::PathBuf::from("/tmp/electron"),
-            enable_wrapper_updates: false,
-            wrapper_remote: String::new(),
-            wrapper_branch: "main".to_string(),
-            generated_artifact_cleanup: Default::default(),
-        };
-
-        let mut state = PersistedState::new(true);
-        assert!(!upstream_check_is_fresh(&config, &state));
-
-        state.last_successful_check_at = Some(Utc::now() - ChronoDuration::hours(1));
-        assert!(upstream_check_is_fresh(&config, &state));
-
-        state.last_successful_check_at = Some(Utc::now() - ChronoDuration::hours(7));
-        assert!(!upstream_check_is_fresh(&config, &state));
-    }
-
-    #[test]
-    fn interrupted_preinstall_states_retry_the_update_check() {
-        for status in [
-            UpdateStatus::Failed,
-            UpdateStatus::DownloadingDmg,
-            UpdateStatus::UpdateDetected,
-            UpdateStatus::PreparingWorkspace,
-            UpdateStatus::PatchingApp,
-            UpdateStatus::BuildingPackage,
-        ] {
-            let mut state = PersistedState::new(true);
-            state.status = status.clone();
-            assert!(update_check_should_retry(&state), "status: {status:?}");
-        }
-
-        let mut deferred = PersistedState::new(true);
-        deferred.status = UpdateStatus::UpdateDetected;
-        deferred.deferred_build = true;
-        assert!(!update_check_should_retry(&deferred));
-
-        for status in [
-            UpdateStatus::Idle,
-            UpdateStatus::CheckingUpstream,
-            UpdateStatus::ReadyToInstall,
-            UpdateStatus::WaitingForAppExit,
-            UpdateStatus::Installing,
-            UpdateStatus::Installed,
-        ] {
-            let mut state = PersistedState::new(true);
-            state.status = status.clone();
-            assert!(!update_check_should_retry(&state), "status: {status:?}");
-        }
-    }
-
-    #[test]
-    fn upstream_check_setup_preserves_persisted_retry_intent() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-
-        for status in [
-            UpdateStatus::Failed,
-            UpdateStatus::DownloadingDmg,
-            UpdateStatus::UpdateDetected,
-            UpdateStatus::PreparingWorkspace,
-            UpdateStatus::PatchingApp,
-            UpdateStatus::BuildingPackage,
-        ] {
-            let mut state = PersistedState::new(true);
-            state.status = status.clone();
-            state.error_message = Some("previous failure".to_string());
-
-            assert!(prepare_upstream_check(&mut state, &paths)?);
-            assert_eq!(state.status, status);
-            assert!(state.last_check_at.is_some());
-            assert_eq!(state.error_message, None);
-
-            let persisted = PersistedState::load_or_default(&paths.state_file, true)?;
-            assert_eq!(persisted.status, status);
-        }
-
-        let mut fresh_state = PersistedState::new(true);
-        assert!(!prepare_upstream_check(&mut fresh_state, &paths)?);
-        assert_eq!(fresh_state.status, UpdateStatus::CheckingUpstream);
-        let persisted = PersistedState::load_or_default(&paths.state_file, true)?;
-        assert_eq!(persisted.status, UpdateStatus::CheckingUpstream);
-
-        let mut deferred = PersistedState::new(true);
-        deferred.status = UpdateStatus::UpdateDetected;
-        deferred.deferred_build = true;
-        assert!(!prepare_upstream_check(&mut deferred, &paths)?);
-        assert_eq!(deferred.status, UpdateStatus::UpdateDetected);
-        Ok(())
-    }
-
-    #[test]
-    fn fresh_deferred_candidate_is_stable_for_if_stale_checks() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
-            "CODEX_LINUX_SETTINGS_FILE",
-            "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
-        ]);
-        let runtime = tokio::runtime::Runtime::new()?;
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
-        let mut config = test_config(temp.path());
-        config.dmg_url = "https://invalid.example/Codex.dmg".to_string();
-        configure_deferred_build_feature(temp.path(), &config, true, false)?;
-
-        let dmg_path = temp.path().join("cached-candidate.dmg");
-        std::fs::write(&dmg_path, b"candidate-a")?;
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::UpdateDetected;
-        state.deferred_build = true;
-        state.candidate_version = Some("candidate-a".to_string());
-        state.dmg_sha256 = Some("candidate-a-sha".to_string());
-        state.artifact_paths.dmg_path = Some(dmg_path.clone());
-        state.last_successful_check_at = Some(Utc::now());
-        state.save(&paths.state_file)?;
-
-        runtime.block_on(run_check_now(&config, &mut state, &paths, true))?;
-
-        assert_eq!(state.status, UpdateStatus::UpdateDetected);
-        assert!(state.deferred_build);
-        assert_eq!(state.candidate_version.as_deref(), Some("candidate-a"));
-        assert_eq!(
-            state.artifact_paths.dmg_path.as_deref(),
-            Some(dmg_path.as_path())
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn stale_deferred_candidate_reuses_cached_dmg_after_head() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
-            "CODEX_LINUX_SETTINGS_FILE",
-            "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
-        ]);
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        runtime.block_on(async {
-            let server = MockServer::start().await;
-            let body = b"candidate-a";
-            Mock::given(method("HEAD"))
-                .and(path("/Codex.dmg"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .insert_header("ETag", "\"candidate-a\"")
-                        .insert_header("Content-Length", body.len().to_string()),
-                )
-                .expect(1)
-                .mount(&server)
-                .await;
-
-            let temp = tempfile::tempdir()?;
-            let paths = test_paths(temp.path());
-            paths.ensure_dirs()?;
-            std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
-            let mut config = test_config(temp.path());
-            config.dmg_url = format!("{}/Codex.dmg", server.uri());
-            configure_deferred_build_feature(temp.path(), &config, true, false)?;
-
-            let dmg_path = temp.path().join("cached-candidate.dmg");
-            std::fs::write(&dmg_path, body)?;
-            let mut state = PersistedState::new(true);
-            state.status = UpdateStatus::UpdateDetected;
-            state.deferred_build = true;
-            state.candidate_version = Some("candidate-a".to_string());
-            state.dmg_sha256 = Some("candidate-a-sha".to_string());
-            state.artifact_paths.dmg_path = Some(dmg_path.clone());
-            state.remote_headers_fingerprint = Some(format!(
-                "etag=\"candidate-a\"|last_modified=|content_length={}",
-                body.len()
-            ));
-            state.last_successful_check_at = Some(Utc::now() - ChronoDuration::hours(7));
-            state.save(&paths.state_file)?;
-
-            run_check_now(&config, &mut state, &paths, true).await?;
-
-            assert_eq!(state.status, UpdateStatus::UpdateDetected);
-            assert!(state.deferred_build);
-            assert_eq!(state.candidate_version.as_deref(), Some("candidate-a"));
-            assert_eq!(
-                state.artifact_paths.dmg_path.as_deref(),
-                Some(dmg_path.as_path())
-            );
-            assert_eq!(std::fs::read(&dmg_path)?, body);
-            server.verify().await;
-            let requests = server.received_requests().await.unwrap_or_default();
-            assert_eq!(
-                requests.len(),
-                1,
-                "an unchanged cached candidate needs only HEAD"
-            );
-            assert_eq!(requests[0].method.as_str(), "HEAD");
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn fresh_deferred_candidate_builds_when_automatic_builds_resume() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
-            "CODEX_LINUX_SETTINGS_FILE",
-            "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
-        ]);
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        runtime.block_on(async {
-            let server = MockServer::start().await;
-            let body = b"candidate-a";
-            Mock::given(method("HEAD"))
-                .and(path("/Codex.dmg"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .insert_header("ETag", "\"candidate-a\"")
-                        .insert_header("Content-Length", body.len().to_string()),
-                )
-                .expect(1)
-                .mount(&server)
-                .await;
-
-            let temp = tempfile::tempdir()?;
-            let paths = test_paths(temp.path());
-            paths.ensure_dirs()?;
-            std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
-            let mut config = test_config(temp.path());
-            config.dmg_url = format!("{}/Codex.dmg", server.uri());
-            configure_deferred_build_feature(temp.path(), &config, true, true)?;
-
-            let dmg_path = temp.path().join("cached-candidate.dmg");
-            std::fs::write(&dmg_path, body)?;
-            let mut state = PersistedState::new(true);
-            state.status = UpdateStatus::UpdateDetected;
-            state.deferred_build = true;
-            state.candidate_version = Some("candidate-a".to_string());
-            state.dmg_sha256 = Some("candidate-a-sha".to_string());
-            state.artifact_paths.dmg_path = Some(dmg_path);
-            state.remote_headers_fingerprint = Some(format!(
-                "etag=\"candidate-a\"|last_modified=|content_length={}",
-                body.len()
-            ));
-            state.last_successful_check_at = Some(Utc::now());
-            state.save(&paths.state_file)?;
-
-            let error = run_check_now(&config, &mut state, &paths, true)
-                .await
-                .expect_err("resumed automatic builds should reach the missing test builder");
-
-            assert!(error
-                .to_string()
-                .contains("Required builder bundle path is missing"));
-            assert_eq!(state.status, UpdateStatus::Failed);
-            assert!(!state.deferred_build);
-            server.verify().await;
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn offline_background_checks_preserve_deferred_candidate() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
-            "CODEX_LINUX_SETTINGS_FILE",
-            "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
-        ]);
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        runtime.block_on(async {
-            let server = MockServer::start().await;
-            Mock::given(method("HEAD"))
-                .and(path("/Codex.dmg"))
-                .respond_with(ResponseTemplate::new(503))
-                .expect(2)
-                .mount(&server)
-                .await;
-
-            let temp = tempfile::tempdir()?;
-            let paths = test_paths(temp.path());
-            paths.ensure_dirs()?;
-            std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
-            let mut config = test_config(temp.path());
-            config.dmg_url = format!("{}/Codex.dmg", server.uri());
-            configure_deferred_build_feature(temp.path(), &config, true, false)?;
-
-            let dmg_path = temp.path().join("cached-candidate.dmg");
-            std::fs::write(&dmg_path, b"candidate-a")?;
-            let mut state = PersistedState::new(true);
-            state.status = UpdateStatus::UpdateDetected;
-            state.deferred_build = true;
-            state.candidate_version = Some("candidate-a".to_string());
-            state.dmg_sha256 = Some("candidate-a-sha".to_string());
-            state.artifact_paths.dmg_path = Some(dmg_path.clone());
-            state.remote_headers_fingerprint = Some("candidate-a-fingerprint".to_string());
-            state.last_successful_check_at = Some(Utc::now() - ChronoDuration::hours(7));
-            state.save(&paths.state_file)?;
-
-            run_check_now(&config, &mut state, &paths, true).await?;
-            run_check_cycle_from_disk(&config, &mut state, &paths).await?;
-
-            assert_eq!(state.status, UpdateStatus::UpdateDetected);
-            assert!(state.deferred_build);
-            assert_eq!(state.candidate_version.as_deref(), Some("candidate-a"));
-            assert_eq!(state.dmg_sha256.as_deref(), Some("candidate-a-sha"));
-            assert_eq!(
-                state.artifact_paths.dmg_path.as_deref(),
-                Some(dmg_path.as_path())
-            );
-            assert_eq!(state.error_message, None);
-            server.verify().await;
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn disabled_wrapper_tracking_clears_stale_candidate() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let config = test_config(temp.path());
-
-        let mut state = PersistedState::new(true);
-        state.installed_wrapper_commit = Some("installed".to_string());
-        state.candidate_wrapper_commit = Some("stale".to_string());
-        state.candidate_wrapper_version = Some("0.9.0".to_string());
-        state.wrapper_changelog = Some("old changelog".to_string());
-        state.wrapper_dev_mode = Some(true);
-
-        let found = detect_and_record_wrapper_update(&config, &mut state, &paths)?;
-
-        assert!(!found);
-        assert_eq!(state.installed_wrapper_commit.as_deref(), Some("installed"));
-        assert_eq!(state.candidate_wrapper_commit, None);
-        assert_eq!(state.candidate_wrapper_version, None);
-        assert_eq!(state.wrapper_changelog, None);
-        assert_eq!(state.wrapper_dev_mode, None);
-
-        let persisted = PersistedState::load_or_default(&paths.state_file, true)?;
-        assert_eq!(persisted.candidate_wrapper_commit, None);
-        assert_eq!(persisted.wrapper_changelog, None);
-        assert_eq!(persisted.wrapper_dev_mode, None);
-        Ok(())
-    }
-
-    #[test]
-    fn no_wrapper_update_clears_stale_candidate() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let mut config = test_config(temp.path());
-        config.enable_wrapper_updates = true;
-        std::fs::create_dir_all(&config.builder_bundle_root)?;
-
-        let mut state = PersistedState::new(true);
-        state.installed_wrapper_commit = Some("old-installed".to_string());
-        state.candidate_wrapper_commit = Some("stale".to_string());
-        state.candidate_wrapper_version = Some("0.9.0".to_string());
-        state.wrapper_changelog = Some("old changelog".to_string());
-        state.wrapper_dev_mode = Some(true);
-
-        let found = detect_and_record_wrapper_update(&config, &mut state, &paths)?;
-
-        assert!(!found);
-        assert_eq!(state.installed_wrapper_commit, None);
-        assert_eq!(state.installed_wrapper_version, None);
-        assert_eq!(state.candidate_wrapper_commit, None);
-        assert_eq!(state.candidate_wrapper_version, None);
-        assert_eq!(state.wrapper_changelog, None);
-        assert_eq!(state.wrapper_dev_mode, None);
-
-        let persisted = PersistedState::load_or_default(&paths.state_file, true)?;
-        assert_eq!(persisted.installed_wrapper_commit, None);
-        assert_eq!(persisted.candidate_wrapper_commit, None);
-        assert_eq!(persisted.wrapper_changelog, None);
-        assert_eq!(persisted.wrapper_dev_mode, None);
-        Ok(())
-    }
-
-    #[test]
-    fn unknown_wrapper_detection_clears_stale_candidate_but_records_installed_metadata(
-    ) -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let mut config = test_config(temp.path());
-        config.enable_wrapper_updates = true;
-        std::fs::create_dir_all(config.builder_bundle_root.join(".codex-linux"))?;
-        std::fs::write(
-            config
-                .builder_bundle_root
-                .join(".codex-linux/source-info.json"),
-            r#"{
-  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "version": "0.8.1"
-}
-"#,
-        )?;
-
-        let mut state = PersistedState::new(true);
-        state.candidate_wrapper_commit = Some("stale".to_string());
-        state.candidate_wrapper_version = Some("0.9.0".to_string());
-        state.wrapper_changelog = Some("old changelog".to_string());
-        state.wrapper_dev_mode = Some(true);
-
-        let found = detect_and_record_wrapper_update(&config, &mut state, &paths)?;
-
-        assert!(!found);
-        assert_eq!(
-            state.installed_wrapper_commit.as_deref(),
-            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        );
-        assert_eq!(state.installed_wrapper_version.as_deref(), Some("0.8.1"));
-        assert_eq!(state.candidate_wrapper_commit, None);
-        assert_eq!(state.candidate_wrapper_version, None);
-        assert_eq!(state.wrapper_changelog, None);
-        assert_eq!(state.wrapper_dev_mode, None);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn pending_dmg_update_still_clears_stale_wrapper_candidate() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let config = test_config(temp.path());
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::ReadyToInstall;
-        state.candidate_wrapper_commit = Some("stale".to_string());
-        state.candidate_wrapper_version = Some("0.9.0".to_string());
-        state.wrapper_changelog = Some("old changelog".to_string());
-        state.wrapper_dev_mode = Some(true);
-
-        run_check_cycle(&config, &mut state, &paths).await?;
-
-        assert_eq!(state.status, UpdateStatus::ReadyToInstall);
-        assert_eq!(state.candidate_wrapper_commit, None);
-        assert_eq!(state.candidate_wrapper_version, None);
-        assert_eq!(state.wrapper_changelog, None);
-        assert_eq!(state.wrapper_dev_mode, None);
-        let persisted = PersistedState::load_or_default(&paths.state_file, true)?;
-        assert_eq!(persisted.candidate_wrapper_commit, None);
-        assert_eq!(persisted.wrapper_changelog, None);
-        assert_eq!(persisted.wrapper_dev_mode, None);
-        Ok(())
-    }
-
-    #[test]
-    fn fresh_check_now_still_clears_stale_wrapper_candidate() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let runtime = tokio::runtime::Runtime::new()?;
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let config = test_config(temp.path());
-        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
-            "HOME",
-            "PATH",
-            "NVM_DIR",
-            "XDG_CONFIG_HOME",
-            "CODEX_CLI_PATH",
-            "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
-        ]);
-        std::env::set_var("HOME", temp.path());
-        std::env::set_var("PATH", temp.path().join("missing-bin"));
-        std::env::remove_var("NVM_DIR");
-        std::env::remove_var("XDG_CONFIG_HOME");
-        std::env::remove_var("CODEX_CLI_PATH");
-        std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
-
-        let mut state = PersistedState::new(true);
-        state.last_successful_check_at = Some(Utc::now());
-        state.candidate_wrapper_commit = Some("stale".to_string());
-        state.candidate_wrapper_version = Some("0.9.0".to_string());
-        state.wrapper_changelog = Some("old changelog".to_string());
-        state.wrapper_dev_mode = Some(true);
-        state.save(&paths.state_file)?;
-
-        runtime.block_on(run_check_now(&config, &mut state, &paths, true))?;
-
-        assert_eq!(state.status, UpdateStatus::Idle);
-        assert_eq!(state.candidate_wrapper_commit, None);
-        assert_eq!(state.candidate_wrapper_version, None);
-        assert_eq!(state.wrapper_changelog, None);
-        assert_eq!(state.wrapper_dev_mode, None);
-        let persisted = PersistedState::load_or_default(&paths.state_file, true)?;
-        assert_eq!(persisted.candidate_wrapper_commit, None);
-        assert_eq!(persisted.wrapper_changelog, None);
-        assert_eq!(persisted.wrapper_dev_mode, None);
-        Ok(())
-    }
-
-    #[test]
-    fn plain_status_reports_update_error() {
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::Failed;
-        state.error_message = Some("install.sh failed during local rebuild".to_string());
-
-        assert_eq!(
-            update_error_status_line(&state),
-            "update_error: install.sh failed during local rebuild"
-        );
-
-        state.error_message = None;
-        assert_eq!(update_error_status_line(&state), "update_error: none");
-    }
-
-    #[tokio::test]
-    async fn failed_state_with_existing_deb_stays_failed() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-
-        let package_path = temp.path().join("dist/codex.deb");
-        std::fs::create_dir_all(
-            package_path
-                .parent()
-                .expect("package path should have parent"),
-        )?;
-        std::fs::write(&package_path, b"deb")?;
-
-        let config = RuntimeConfig {
-            dmg_url: "https://example.com/Codex.dmg".to_string(),
-            initial_check_delay_seconds: 1,
-            check_interval_hours: 6,
-            auto_install_on_app_exit: false,
-            notifications: false,
-            workspace_root: temp.path().join("cache"),
-            builder_bundle_root: temp.path().join("builder"),
-            app_executable_path: temp.path().join("not-running-electron"),
-            enable_wrapper_updates: false,
-            wrapper_remote: String::new(),
-            wrapper_branch: "main".to_string(),
-            generated_artifact_cleanup: Default::default(),
-        };
-
-        let mut state = PersistedState::new(false);
-        state.status = UpdateStatus::Failed;
-        state.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
-        state.error_message = Some("previous failure".to_string());
-        state.artifact_paths.package_path = Some(package_path);
-
-        reconcile_pending_install(&config, &mut state, &paths).await?;
-
-        assert_eq!(state.status, UpdateStatus::Failed);
-        assert_eq!(state.error_message.as_deref(), Some("previous failure"));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn run_check_cycle_skips_when_update_is_already_pending() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-
-        let config = RuntimeConfig {
-            dmg_url: "https://invalid.example/Codex.dmg".to_string(),
-            initial_check_delay_seconds: 1,
-            check_interval_hours: 6,
-            auto_install_on_app_exit: true,
-            notifications: false,
-            workspace_root: temp.path().join("cache"),
-            builder_bundle_root: temp.path().join("builder"),
-            app_executable_path: temp.path().join("not-running-electron"),
-            enable_wrapper_updates: false,
-            wrapper_remote: String::new(),
-            wrapper_branch: "main".to_string(),
-            generated_artifact_cleanup: Default::default(),
-        };
-
-        for status in [
-            UpdateStatus::ReadyToInstall,
-            UpdateStatus::WaitingForAppExit,
-            UpdateStatus::Installing,
-        ] {
-            let mut state = PersistedState::new(true);
-            state.status = status.clone();
-
-            run_check_cycle(&config, &mut state, &paths).await?;
-
-            assert_eq!(state.status, status);
-            assert_eq!(state.last_check_at, None);
-        }
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn daemon_check_cycle_reloads_pending_state_written_by_another_process() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let mut config = test_config(temp.path());
-        config.dmg_url = "https://invalid.example/Codex.dmg".to_string();
-
-        let mut on_disk = PersistedState::new(true);
-        on_disk.status = UpdateStatus::WaitingForAppExit;
-        on_disk.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
-        on_disk.waiting_for_app_exit_auto_install = true;
-        on_disk.save(&paths.state_file)?;
-
-        let mut stale_daemon_state = PersistedState::new(true);
-        stale_daemon_state.status = UpdateStatus::Idle;
-
-        run_check_cycle_from_disk(&config, &mut stale_daemon_state, &paths).await?;
-
-        assert_eq!(stale_daemon_state.status, UpdateStatus::WaitingForAppExit);
-        assert!(stale_daemon_state.waiting_for_app_exit_auto_install);
-        assert_eq!(stale_daemon_state.last_check_at, None);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn run_check_cycle_ignores_downloaded_dmg_already_installed() -> Result<()> {
-        let server = MockServer::start().await;
-        let body = b"codex-dmg-test-payload";
-        let sha256 = "678cd508ffe0071e217020a7a4eecbebe25362c022ac78c13a5ae87b7a3a0c92";
-
-        Mock::given(method("HEAD"))
-            .and(path("/Codex.dmg"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("ETag", "\"same-dmg\"")
-                    .insert_header("Content-Length", body.len().to_string()),
-            )
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/Codex.dmg"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec()))
-            .mount(&server)
-            .await;
-
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let mut config = test_config(temp.path());
-        config.dmg_url = format!("{}/Codex.dmg", server.uri());
-        write_installed_build_info(&config, sha256)?;
-
-        let mut state = PersistedState::new(true);
-        run_check_cycle(&config, &mut state, &paths).await?;
-
-        let expected_dmg_path = config
-            .workspace_root
-            .join(format!("downloads/Codex-{sha256}.dmg"));
-        assert_eq!(state.status, UpdateStatus::Idle);
-        assert_eq!(state.candidate_version, None);
-        assert_eq!(state.dmg_sha256.as_deref(), Some(sha256));
-        assert_eq!(
-            state.artifact_paths.dmg_path.as_deref(),
-            Some(expected_dmg_path.as_path())
-        );
-        assert_eq!(state.artifact_paths.package_path, None);
-        assert_eq!(state.artifact_paths.workspace_dir, None);
-        assert_eq!(state.error_message, None);
-        assert!(state.last_successful_check_at.is_some());
-        Ok(())
-    }
-
-    #[test]
-    fn deferred_candidate_is_revalidated_before_explicit_build() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
-            "CODEX_LINUX_SETTINGS_FILE",
-            "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
-        ]);
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        runtime.block_on(async {
-            let server = MockServer::start().await;
-            let candidate_a = b"candidate-a";
-            let candidate_b = b"candidate-b";
-            mount_dmg(&server, "\"candidate-a\"", candidate_a).await;
-
-            let temp = tempfile::tempdir()?;
-            let paths = test_paths(temp.path());
-            paths.ensure_dirs()?;
-            std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
-
-            let mut config = test_config(temp.path());
-            config.dmg_url = format!("{}/Codex.dmg", server.uri());
-            configure_deferred_build_feature(temp.path(), &config, true, false)?;
-            let mut state = PersistedState::new(true);
-
-            state.save(&paths.state_file)?;
-            run_check_cycle_with_options(
-                &config,
-                &mut state,
-                &paths,
-                CheckCycleOptions {
-                    lock_behavior: CheckLockBehavior::SkipIfBusy,
-                    if_stale: false,
-                    recover_entrypoint_state: false,
-                    reconcile_after_check: false,
-                    explicit_build: false,
-                },
-            )
-            .await?;
-            assert_eq!(state.status, UpdateStatus::UpdateDetected);
-            assert!(state.deferred_build);
-            assert!(state.candidate_version.is_some());
-            let candidate_a_path = state
-                .artifact_paths
-                .dmg_path
-                .clone()
-                .context("deferred candidate should retain its DMG")?;
-            assert_eq!(std::fs::read(&candidate_a_path)?, candidate_a);
-            assert_eq!(state.artifact_paths.workspace_dir, None);
-            assert_eq!(state.artifact_paths.package_path, None);
-
-            server.verify().await;
-            server.reset().await;
-            mount_dmg(&server, "\"candidate-b\"", candidate_b).await;
-
-            let error = run_check_now(&config, &mut state, &paths, false)
-                .await
-                .expect_err("an explicit check should enter the intentionally missing builder");
-            assert!(error
-                .to_string()
-                .contains("Required builder bundle path is missing"));
-            assert_eq!(state.status, UpdateStatus::Failed);
-            assert!(!state.deferred_build);
-            let candidate_b_path = state
-                .artifact_paths
-                .dmg_path
-                .as_deref()
-                .context("explicit build should retain the revalidated DMG")?;
-            assert_ne!(candidate_b_path, candidate_a_path);
-            assert_eq!(std::fs::read(candidate_b_path)?, candidate_b);
-            server.verify().await;
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn explicit_check_redownloads_a_deleted_deferred_dmg() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
-            "CODEX_LINUX_SETTINGS_FILE",
-            "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
-        ]);
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        runtime.block_on(async {
-            let server = MockServer::start().await;
-            let body = b"candidate-a";
-            mount_dmg(&server, "\"candidate-a\"", body).await;
-            let temp = tempfile::tempdir()?;
-            let paths = test_paths(temp.path());
-            paths.ensure_dirs()?;
-            std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
-            let mut config = test_config(temp.path());
-            config.dmg_url = format!("{}/Codex.dmg", server.uri());
-            configure_deferred_build_feature(temp.path(), &config, true, false)?;
-            let mut state = PersistedState::new(true);
-            state.save(&paths.state_file)?;
-
-            run_check_cycle_with_options(
-                &config,
-                &mut state,
-                &paths,
-                CheckCycleOptions {
-                    lock_behavior: CheckLockBehavior::SkipIfBusy,
-                    if_stale: false,
-                    recover_entrypoint_state: false,
-                    reconcile_after_check: false,
-                    explicit_build: false,
-                },
-            )
-            .await?;
-            let dmg_path = state
-                .artifact_paths
-                .dmg_path
-                .clone()
-                .context("deferred candidate should retain its DMG")?;
-            std::fs::remove_file(&dmg_path)?;
-
-            server.verify().await;
-            server.reset().await;
-            mount_dmg(&server, "\"candidate-a\"", body).await;
-            let error = run_check_now(&config, &mut state, &paths, false)
-                .await
-                .expect_err("the redownload should reach the intentionally missing builder");
-            assert!(error
-                .to_string()
-                .contains("Required builder bundle path is missing"));
-            assert_eq!(std::fs::read(&dmg_path)?, body);
-            assert!(!state.deferred_build);
-            server.verify().await;
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn disabling_feature_builds_a_persisted_deferred_candidate() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
-            "CODEX_LINUX_SETTINGS_FILE",
-            "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
-        ]);
-        let runtime = tokio::runtime::Runtime::new()?;
-
-        runtime.block_on(async {
-            let server = MockServer::start().await;
-            let body = b"candidate-a";
-            mount_dmg(&server, "\"candidate-a\"", body).await;
-            let temp = tempfile::tempdir()?;
-            let paths = test_paths(temp.path());
-            paths.ensure_dirs()?;
-            std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
-            let mut config = test_config(temp.path());
-            config.dmg_url = format!("{}/Codex.dmg", server.uri());
-            configure_deferred_build_feature(temp.path(), &config, true, false)?;
-            let mut state = PersistedState::new(true);
-            state.save(&paths.state_file)?;
-
-            run_check_cycle_with_options(
-                &config,
-                &mut state,
-                &paths,
-                CheckCycleOptions {
-                    lock_behavior: CheckLockBehavior::SkipIfBusy,
-                    if_stale: false,
-                    recover_entrypoint_state: false,
-                    reconcile_after_check: false,
-                    explicit_build: false,
-                },
-            )
-            .await?;
-            assert!(state.deferred_build);
-
-            let mut persisted = serde_json::to_value(&state)?;
-            persisted["status"] = serde_json::Value::String("update_available".to_string());
-            persisted
-                .as_object_mut()
-                .expect("state should serialize as an object")
-                .remove("deferred_build");
-            std::fs::write(&paths.state_file, serde_json::to_vec_pretty(&persisted)?)?;
-            std::fs::write(temp.path().join("linux-features.json"), r#"{"enabled":[]}"#)?;
-            server.verify().await;
-            server.reset().await;
-            mount_dmg(&server, "\"candidate-a\"", body).await;
-
-            let error = run_check_cycle_with_options(
-                &config,
-                &mut state,
-                &paths,
-                CheckCycleOptions {
-                    lock_behavior: CheckLockBehavior::SkipIfBusy,
-                    if_stale: false,
-                    recover_entrypoint_state: false,
-                    reconcile_after_check: false,
-                    explicit_build: false,
-                },
-            )
-            .await
-            .expect_err("disabling the feature should restore automatic builds");
-            assert!(error
-                .to_string()
-                .contains("Required builder bundle path is missing"));
-            assert!(!state.deferred_build);
-            server.verify().await;
-            Ok(())
-        })
-    }
-
-    #[tokio::test]
-    async fn interrupted_download_with_cached_hash_reaches_build_path() -> Result<()> {
-        let server = MockServer::start().await;
-        let body = b"codex-dmg-test-payload";
-        let sha256 = "678cd508ffe0071e217020a7a4eecbebe25362c022ac78c13a5ae87b7a3a0c92";
-        let headers_fingerprint = format!(
-            "etag=\"same-dmg\"|last_modified=|content_length={}",
-            body.len()
-        );
-
-        Mock::given(method("HEAD"))
-            .and(path("/Codex.dmg"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("ETag", "\"same-dmg\"")
-                    .insert_header("Content-Length", body.len().to_string()),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/Codex.dmg"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.to_vec()))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let mut config = test_config(temp.path());
-        config.dmg_url = format!("{}/Codex.dmg", server.uri());
-        write_installed_build_info(
-            &config,
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )?;
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::DownloadingDmg;
-        state.remote_headers_fingerprint = Some(headers_fingerprint);
-        state.dmg_sha256 = Some(sha256.to_string());
-
-        let error = run_check_cycle(&config, &mut state, &paths)
-            .await
-            .expect_err("retry should reach the intentionally missing builder bundle");
-        server.verify().await;
-
-        assert!(error
-            .to_string()
-            .contains("Required builder bundle path is missing"));
-        assert_eq!(state.status, UpdateStatus::Failed);
-        assert!(state.candidate_version.is_some());
-        assert_eq!(state.dmg_sha256.as_deref(), Some(sha256));
-        assert!(state.artifact_paths.workspace_dir.is_some());
-        assert!(state
-            .error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("Required builder bundle path is missing")));
-        assert!(state.last_successful_check_at.is_some());
-        Ok(())
-    }
-
-    #[test]
-    fn check_lock_file_without_kernel_lock_does_not_block_acquire() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-        let lock_path = paths.state_dir.join("check.lock");
-        std::fs::write(&lock_path, b"stale-pid")?;
-
-        let lock = try_acquire_check_lock(&paths)?;
-
-        assert!(lock.is_some());
-        assert_eq!(
-            std::fs::read_to_string(&lock_path)?.trim(),
-            std::process::id().to_string()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn held_check_lock_blocks_second_acquire_until_drop() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-
-        let first_lock =
-            try_acquire_check_lock(&paths)?.expect("first lock acquisition should succeed");
-        let second_lock = try_acquire_check_lock(&paths)?;
-
-        assert!(second_lock.is_none());
-        drop(second_lock);
-        drop(first_lock);
-
-        let mut reacquired_lock = None;
-        for _ in 0..20 {
-            reacquired_lock = try_acquire_check_lock(&paths)?;
-            if reacquired_lock.is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        assert!(reacquired_lock.is_some());
-        Ok(())
-    }
-
-    #[test]
-    fn forced_check_now_waits_for_startup_maintenance_lock_then_checks_upstream() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(async {
-            let server = MockServer::start().await;
-            let body_len = 42;
-            Mock::given(method("HEAD"))
-                .and(path("/Codex.dmg"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .insert_header("ETag", "\"unchanged\"")
-                        .insert_header("Content-Length", body_len.to_string()),
-                )
-                .expect(1)
-                .mount(&server)
-                .await;
-
-            let temp = tempfile::tempdir()?;
-            let paths = test_paths(temp.path());
-            paths.ensure_dirs()?;
-            let mut config = test_config(temp.path());
-            config.dmg_url = format!("{}/Codex.dmg", server.uri());
-            let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
-                "HOME",
-                "PATH",
-                "NVM_DIR",
-                "XDG_CONFIG_HOME",
-                "CODEX_CLI_PATH",
-                "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
-            ]);
-            std::env::set_var("HOME", temp.path());
-            std::env::set_var("PATH", temp.path().join("missing-bin"));
-            std::env::remove_var("NVM_DIR");
-            std::env::remove_var("XDG_CONFIG_HOME");
-            std::env::remove_var("CODEX_CLI_PATH");
-            std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
-
-            let mut persisted_state = PersistedState::new(true);
-            persisted_state.remote_headers_fingerprint = Some(format!(
-                "etag=\"unchanged\"|last_modified=|content_length={body_len}"
-            ));
-            persisted_state.dmg_sha256 = Some("cached-dmg".to_string());
-            persisted_state.last_successful_check_at = Some(Utc::now());
-            persisted_state.save(&paths.state_file)?;
-
-            let active_maintenance =
-                try_acquire_check_lock(&paths)?.expect("startup maintenance should hold the lock");
-            let started = tokio::time::Instant::now();
-            let release_maintenance = async move {
-                time::sleep(Duration::from_millis(100)).await;
-                drop(active_maintenance);
-            };
-            let mut stale_state = PersistedState::new(true);
-            let forced_check = run_check_now(&config, &mut stale_state, &paths, false);
-
-            let (check_result, ()) = tokio::join!(forced_check, release_maintenance);
-            check_result?;
-            server.verify().await;
-
-            assert!(started.elapsed() >= Duration::from_millis(75));
-            assert!(stale_state.last_check_at.is_some());
-            assert_eq!(stale_state.status, UpdateStatus::Idle);
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn daemon_startup_does_not_persist_stale_state_or_prune_while_check_is_active() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let config = test_config(temp.path());
-        let workspace = config.workspace_root.join("workspaces/active-build");
-        std::fs::create_dir_all(workspace.join("builder"))?;
-        std::fs::write(workspace.join("builder/install.sh"), b"#!/bin/sh\n")?;
-
-        let mut persisted_state = PersistedState::new(true);
-        persisted_state.status = UpdateStatus::PatchingApp;
-        persisted_state.candidate_version = Some("2999.07.23.010927+05a76850".to_string());
-        persisted_state.artifact_paths.workspace_dir = Some(workspace.clone());
-        persisted_state.save(&paths.state_file)?;
-
-        let _active_check =
-            try_acquire_check_lock(&paths)?.expect("active check should acquire the lock");
-        let mut stale_state = PersistedState::new(true);
-        stale_state.installed_version = "stale-entrypoint-snapshot".to_string();
-
-        run_daemon_startup_maintenance(&config, &mut stale_state, &paths)?;
-
-        let after = PersistedState::load_or_default(&paths.state_file, true)?;
-        assert_eq!(after.status, UpdateStatus::PatchingApp);
-        assert_eq!(
-            after.candidate_version.as_deref(),
-            Some("2999.07.23.010927+05a76850")
-        );
-        assert_eq!(
-            after.artifact_paths.workspace_dir.as_deref(),
-            Some(workspace.as_path())
-        );
-        assert!(workspace.join("builder/install.sh").exists());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn daemon_reconcile_does_not_persist_stale_state_while_check_is_active() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let config = test_config(temp.path());
-        let workspace = config.workspace_root.join("workspaces/active-build");
-        std::fs::create_dir_all(workspace.join("builder"))?;
-
-        let mut persisted_state = PersistedState::new(true);
-        persisted_state.status = UpdateStatus::BuildingPackage;
-        persisted_state.candidate_version = Some("2999.07.23.010927+05a76850".to_string());
-        persisted_state.artifact_paths.workspace_dir = Some(workspace.clone());
-        persisted_state.save(&paths.state_file)?;
-
-        let _active_check =
-            try_acquire_check_lock(&paths)?.expect("active check should acquire the lock");
-        let mut stale_state = PersistedState::new(true);
-
-        reconcile_pending_install_from_disk(&config, &mut stale_state, &paths).await?;
-
-        let after = PersistedState::load_or_default(&paths.state_file, true)?;
-        assert_eq!(after.status, UpdateStatus::BuildingPackage);
-        assert_eq!(
-            after.artifact_paths.workspace_dir.as_deref(),
-            Some(workspace.as_path())
-        );
-        Ok(())
-    }
-
-    fn process_test_paths(root: &Path) -> RuntimePaths {
-        let config_dir = root.join("xdg-config/codex-update-manager");
-        let state_dir = root.join("xdg-state/codex-update-manager");
-        RuntimePaths {
-            config_file: config_dir.join("config.toml"),
-            state_file: state_dir.join("state.json"),
-            log_file: state_dir.join("service.log"),
-            cache_dir: root.join("xdg-cache/codex-update-manager"),
-            state_dir,
-            config_dir,
-        }
-    }
-
-    fn configure_process_test_command(
-        command: &mut std::process::Command,
+    fn write_fake_pacman_recovery_command(
         root: &Path,
-        role: &str,
-    ) {
-        use std::os::unix::process::CommandExt;
-
-        command
-            .arg("--exact")
-            .arg("app::tests::updater_flow_process_child")
-            .arg("--nocapture")
-            .env("CODEX_UPDATE_MANAGER_TEST_PROCESS_ROLE", role)
-            .env("HOME", root.join("home"))
-            .env("XDG_CONFIG_HOME", root.join("xdg-config"))
-            .env("XDG_STATE_HOME", root.join("xdg-state"))
-            .env("XDG_CACHE_HOME", root.join("xdg-cache"))
-            .env(
-                "CODEX_LINUX_SETTINGS_FILE",
-                root.join("missing-settings.json"),
-            )
-            .env_remove("CODEX_UPDATE_MANAGER_ASSUME_NO_POLKIT_AGENT")
-            .env("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT", "1")
-            .env_remove("CODEX_CLI_PATH")
-            .env_remove("FNM_DIR")
-            .env_remove("FNM_MULTISHELL_PATH")
-            .env_remove("HOMEBREW_PREFIX")
-            .env_remove("NVM_DIR")
-            .env_remove("XDG_DATA_HOME");
-        command.process_group(0);
-    }
-
-    struct ProcessTestChild {
-        child: Option<std::process::Child>,
-        release_paths: Vec<PathBuf>,
-        role: String,
-    }
-
-    impl ProcessTestChild {
-        fn process_group(&self) -> i32 {
-            self.child
-                .as_ref()
-                .expect("process test child should be present")
-                .id() as i32
-        }
-
-        fn wait(mut self) -> Result<()> {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            loop {
-                let status = self
-                    .child
-                    .as_mut()
-                    .expect("process test child should be present")
-                    .try_wait()
-                    .with_context(|| {
-                        format!(
-                            "Failed to wait for updater process test child {}",
-                            self.role
-                        )
-                    })?;
-                if let Some(status) = status {
-                    self.child.take();
-                    anyhow::ensure!(
-                        status.success(),
-                        "Updater process test child {} exited with {status}",
-                        self.role
-                    );
-                    return Ok(());
-                }
-                if std::time::Instant::now() >= deadline {
-                    self.terminate();
-                    anyhow::bail!("Updater process test child {} timed out", self.role);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        }
-
-        fn terminate(&mut self) {
-            for path in &self.release_paths {
-                let _ = std::fs::write(path, b"cleanup");
-            }
-
-            let Some(child) = self.child.as_mut() else {
-                return;
-            };
-            let process_group = child.id() as i32;
-            // SAFETY: each test child is spawned as the leader of a dedicated
-            // process group, so signaling the negative child pid cannot target
-            // the cargo test runner or an unrelated process.
-            unsafe {
-                let _ = libc::kill(-process_group, libc::SIGTERM);
-            }
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-            while std::time::Instant::now() < deadline {
-                if child.try_wait().ok().flatten().is_some() {
-                    self.child.take();
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-
-            // SAFETY: the same dedicated process-group invariant applies.
-            unsafe {
-                let _ = libc::kill(-process_group, libc::SIGKILL);
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-            self.child.take();
-        }
-    }
-
-    impl Drop for ProcessTestChild {
-        fn drop(&mut self) {
-            self.terminate();
-        }
-    }
-
-    fn spawn_process_test_child(
-        root: &Path,
-        role: &str,
-        env: &[(&str, &Path)],
-        release_paths: &[&Path],
-    ) -> Result<ProcessTestChild> {
-        let mut command = std::process::Command::new(std::env::current_exe()?);
-        configure_process_test_command(&mut command, root, role);
-        for (key, value) in env {
-            command.env(key, value);
-        }
-        let child = command
-            .spawn()
-            .with_context(|| format!("Failed to spawn updater process test child {role}"))?;
-        Ok(ProcessTestChild {
-            child: Some(child),
-            release_paths: release_paths
-                .iter()
-                .map(|path| path.to_path_buf())
-                .collect(),
-            role: role.to_string(),
-        })
-    }
-
-    fn wait_for_process_test_path(path: &Path, description: &str) -> Result<()> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !path.exists() {
-            anyhow::ensure!(
-                std::time::Instant::now() < deadline,
-                "Timed out waiting for {description}: {}",
-                path.display()
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        Ok(())
-    }
-
-    fn prepare_process_install_fixture(root: &Path) -> Result<(RuntimePaths, PathBuf, PathBuf)> {
-        let paths = process_test_paths(root);
-        paths.ensure_dirs()?;
-        std::fs::create_dir_all(root.join("home"))?;
-
-        let mut config = test_config(root);
-        config.workspace_root = paths.cache_dir.clone();
-        std::fs::write(&paths.config_file, toml::to_string(&config)?)?;
-
-        let package_path = root.join("dist/codex.deb");
-        std::fs::create_dir_all(
-            package_path
-                .parent()
-                .expect("package path should have parent"),
-        )?;
-        std::fs::write(&package_path, b"deb")?;
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::WaitingForAppExit;
-        state.installed_version = "stale-entrypoint-snapshot".to_string();
-        state.candidate_version = Some("2999.07.24.010203+deadbeef".to_string());
-        state.waiting_for_app_exit_auto_install = true;
-        state.artifact_paths.package_path = Some(package_path);
-        state.save(&paths.state_file)?;
-
-        let install_log = root.join("install.log");
-        let fake_pkexec = root.join("pkexec");
-        std::fs::write(
-            &fake_pkexec,
-            "#!/bin/sh\n\
-             printf 'install\\n' >> \"$CODEX_UPDATE_MANAGER_TEST_INSTALL_LOG\"\n\
-             if [ -n \"${CODEX_UPDATE_MANAGER_TEST_INSTALL_STARTED:-}\" ]; then\n\
-               /bin/touch \"$CODEX_UPDATE_MANAGER_TEST_INSTALL_STARTED\"\n\
-             fi\n\
-             if [ -n \"${CODEX_UPDATE_MANAGER_TEST_INSTALL_RELEASE:-}\" ]; then\n\
-               while [ ! -e \"$CODEX_UPDATE_MANAGER_TEST_INSTALL_RELEASE\" ]; do\n\
-                 /bin/sleep 0.01\n\
-               done\n\
-             fi\n",
-        )?;
-        let mut permissions = std::fs::metadata(&fake_pkexec)?.permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&fake_pkexec, permissions)?;
-        Ok((paths, fake_pkexec, install_log))
-    }
-
-    #[test]
-    fn updater_flow_process_child() -> Result<()> {
-        let Some(role) = std::env::var_os("CODEX_UPDATE_MANAGER_TEST_PROCESS_ROLE") else {
-            return Ok(());
-        };
-        let role = role.to_string_lossy();
-        let runtime = tokio::runtime::Runtime::new()?;
-        match role.as_ref() {
-            "install-ready" => runtime.block_on(run(Cli {
-                command: Commands::InstallReady,
-            })),
-            "daemon-reconcile" => {
-                let paths = RuntimePaths::detect()?;
-                let config = RuntimeConfig::load_or_default(&paths)?;
-                let mut state = PersistedState::load_or_default(
-                    &paths.state_file,
-                    effective_auto_install(&config),
-                )?;
-                runtime.block_on(reconcile_pending_install_from_disk(
-                    &config, &mut state, &paths,
-                ))
-            }
-            "cli-preflight" => {
-                let cli_path = std::env::var_os("CODEX_UPDATE_MANAGER_TEST_CLI_PATH")
-                    .map(PathBuf::from)
-                    .context("missing process test CLI path")?;
-                runtime.block_on(run(Cli {
-                    command: Commands::CliPreflight {
-                        cli_path: Some(cli_path),
-                        print_path: false,
-                        allow_install_missing: false,
-                    },
-                }))
-            }
-            "cli-preflight-install-missing" => runtime.block_on(run(Cli {
-                command: Commands::CliPreflight {
-                    cli_path: None,
-                    print_path: false,
-                    allow_install_missing: true,
-                },
-            })),
-            "cli-status" => runtime.block_on(run(Cli {
-                command: Commands::Status { json: true },
-            })),
-            "repair-cli" => runtime.block_on(run(Cli {
-                command: Commands::RepairCli,
-            })),
-            "diagnose" => runtime.block_on(run(Cli {
-                command: Commands::Diagnose { json: false },
-            })),
-            other => anyhow::bail!("Unknown updater process test role {other}"),
-        }
-    }
-
-    #[test]
-    fn process_test_child_drop_releases_and_reaps_install_group() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let temp = tempfile::tempdir()?;
-        let (_paths, fake_pkexec, install_log) = prepare_process_install_fixture(temp.path())?;
-        let install_started = temp.path().join("install.started");
-        let install_release = temp.path().join("install.release");
-        let daemon_reconcile = spawn_process_test_child(
-            temp.path(),
-            "daemon-reconcile",
-            &[
-                ("CODEX_UPDATE_MANAGER_TEST_PKEXEC_PATH", &fake_pkexec),
-                ("CODEX_UPDATE_MANAGER_TEST_INSTALL_LOG", &install_log),
-                (
-                    "CODEX_UPDATE_MANAGER_TEST_INSTALL_STARTED",
-                    &install_started,
-                ),
-                (
-                    "CODEX_UPDATE_MANAGER_TEST_INSTALL_RELEASE",
-                    &install_release,
-                ),
-            ],
-            &[&install_release],
-        )?;
-        wait_for_process_test_path(&install_started, "blocked daemon reconciliation install")?;
-        let process_group = daemon_reconcile.process_group();
-
-        drop(daemon_reconcile);
-
-        assert!(install_release.exists());
-        // SAFETY: signal 0 only probes the dedicated process group and does not
-        // deliver a signal. Drop must have reaped every process in that group.
-        let probe = unsafe { libc::kill(-process_group, 0) };
-        assert_eq!(probe, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn install_ready_entrypoint_does_not_overwrite_active_install_state() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let temp = tempfile::tempdir()?;
-        let (paths, fake_pkexec, install_log) = prepare_process_install_fixture(temp.path())?;
-        let entrypoint_loaded = temp.path().join("entrypoint.loaded");
-        let entrypoint_continue = temp.path().join("entrypoint.continue");
-        let pre_dispatch = temp.path().join("entrypoint.pre-dispatch");
-        let install_started = temp.path().join("install.started");
-        let install_release = temp.path().join("install.release");
-
-        let install_ready = spawn_process_test_child(
-            temp.path(),
-            "install-ready",
-            &[
-                (
-                    "CODEX_UPDATE_MANAGER_TEST_ENTRYPOINT_LOADED",
-                    &entrypoint_loaded,
-                ),
-                (
-                    "CODEX_UPDATE_MANAGER_TEST_ENTRYPOINT_CONTINUE",
-                    &entrypoint_continue,
-                ),
-                (
-                    "CODEX_UPDATE_MANAGER_TEST_ENTRYPOINT_PRE_DISPATCH",
-                    &pre_dispatch,
-                ),
-                ("CODEX_UPDATE_MANAGER_TEST_PKEXEC_PATH", &fake_pkexec),
-                ("CODEX_UPDATE_MANAGER_TEST_INSTALL_LOG", &install_log),
-            ],
-            &[&entrypoint_continue],
-        )?;
-        wait_for_process_test_path(&entrypoint_loaded, "install-ready state load")?;
-
-        let daemon_reconcile = spawn_process_test_child(
-            temp.path(),
-            "daemon-reconcile",
-            &[
-                ("CODEX_UPDATE_MANAGER_TEST_PKEXEC_PATH", &fake_pkexec),
-                ("CODEX_UPDATE_MANAGER_TEST_INSTALL_LOG", &install_log),
-                (
-                    "CODEX_UPDATE_MANAGER_TEST_INSTALL_STARTED",
-                    &install_started,
-                ),
-                (
-                    "CODEX_UPDATE_MANAGER_TEST_INSTALL_RELEASE",
-                    &install_release,
-                ),
-            ],
-            &[&install_release],
-        )?;
-        wait_for_process_test_path(&install_started, "daemon reconciliation install")?;
-
-        std::fs::write(&entrypoint_continue, b"continue")?;
-        wait_for_process_test_path(&pre_dispatch, "install-ready pre-dispatch boundary")?;
-        let state_while_installing = PersistedState::load_or_default(&paths.state_file, true)?;
-
-        std::fs::write(&install_release, b"continue")?;
-        daemon_reconcile.wait()?;
-        install_ready.wait()?;
-
-        assert_eq!(state_while_installing.status, UpdateStatus::Installing);
-        let final_state = PersistedState::load_or_default(&paths.state_file, true)?;
-        assert_eq!(final_state.status, UpdateStatus::Installed);
-        assert_eq!(std::fs::read_to_string(&install_log)?.lines().count(), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn concurrent_install_ready_entrypoints_launch_only_one_install() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let temp = tempfile::tempdir()?;
-        let (paths, fake_pkexec, install_log) = prepare_process_install_fixture(temp.path())?;
-        let first_loaded = temp.path().join("first.loaded");
-        let second_loaded = temp.path().join("second.loaded");
-        let entrypoint_continue = temp.path().join("entrypoint.continue");
-        let first_reloaded = temp.path().join("first.reloaded");
-        let second_reloaded = temp.path().join("second.reloaded");
-        let first_lock_busy = temp.path().join("first.lock-busy");
-        let second_lock_busy = temp.path().join("second.lock-busy");
-        let reload_continue = temp.path().join("reload.continue");
-
-        let common_env = [
-            (
-                "CODEX_UPDATE_MANAGER_TEST_ENTRYPOINT_CONTINUE",
-                entrypoint_continue.as_path(),
-            ),
-            (
-                "CODEX_UPDATE_MANAGER_TEST_INSTALL_READY_CONTINUE",
-                reload_continue.as_path(),
-            ),
-            (
-                "CODEX_UPDATE_MANAGER_TEST_PKEXEC_PATH",
-                fake_pkexec.as_path(),
-            ),
-            (
-                "CODEX_UPDATE_MANAGER_TEST_INSTALL_LOG",
-                install_log.as_path(),
-            ),
-        ];
-        let mut first_env = common_env.to_vec();
-        first_env.extend([
-            (
-                "CODEX_UPDATE_MANAGER_TEST_ENTRYPOINT_LOADED",
-                first_loaded.as_path(),
-            ),
-            (
-                "CODEX_UPDATE_MANAGER_TEST_INSTALL_READY_RELOADED",
-                first_reloaded.as_path(),
-            ),
-            (
-                "CODEX_UPDATE_MANAGER_TEST_CHECK_LOCK_BUSY",
-                first_lock_busy.as_path(),
-            ),
-        ]);
-        let mut second_env = common_env.to_vec();
-        second_env.extend([
-            (
-                "CODEX_UPDATE_MANAGER_TEST_ENTRYPOINT_LOADED",
-                second_loaded.as_path(),
-            ),
-            (
-                "CODEX_UPDATE_MANAGER_TEST_INSTALL_READY_RELOADED",
-                second_reloaded.as_path(),
-            ),
-            (
-                "CODEX_UPDATE_MANAGER_TEST_CHECK_LOCK_BUSY",
-                second_lock_busy.as_path(),
-            ),
-        ]);
-
-        let first = spawn_process_test_child(
-            temp.path(),
-            "install-ready",
-            &first_env,
-            &[&entrypoint_continue, &reload_continue],
-        )?;
-        let second = spawn_process_test_child(
-            temp.path(),
-            "install-ready",
-            &second_env,
-            &[&entrypoint_continue, &reload_continue],
-        )?;
-        wait_for_process_test_path(&first_loaded, "first install-ready state load")?;
-        wait_for_process_test_path(&second_loaded, "second install-ready state load")?;
-
-        std::fs::write(&entrypoint_continue, b"continue")?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !((first_reloaded.exists() && second_lock_busy.exists())
-            || (second_reloaded.exists() && first_lock_busy.exists()))
-        {
-            anyhow::ensure!(
-                std::time::Instant::now() < deadline,
-                "Timed out waiting for one install-ready process to hold the lock and the other to block"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let reloads_before_release =
-            usize::from(first_reloaded.exists()) + usize::from(second_reloaded.exists());
-
-        std::fs::write(&reload_continue, b"continue")?;
-        first.wait()?;
-        second.wait()?;
-
-        assert_eq!(
-            reloads_before_release, 1,
-            "only the lock holder may reload state before serialization is released"
-        );
-        let final_state = PersistedState::load_or_default(&paths.state_file, true)?;
-        assert_eq!(final_state.status, UpdateStatus::Installed);
-        assert_eq!(std::fs::read_to_string(&install_log)?.lines().count(), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn daemon_startup_reloads_active_workspace_state_after_locking() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let config = test_config(temp.path());
-        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
-            "HOME",
-            "PATH",
-            "NVM_DIR",
-            "XDG_CONFIG_HOME",
-            "CODEX_CLI_PATH",
-            "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
-        ]);
-        std::env::set_var("HOME", temp.path());
-        std::env::set_var("PATH", temp.path().join("missing-bin"));
-        std::env::remove_var("NVM_DIR");
-        std::env::remove_var("XDG_CONFIG_HOME");
-        std::env::remove_var("CODEX_CLI_PATH");
-        std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
-
-        let workspace = config.workspace_root.join("workspaces/active-build");
-        std::fs::create_dir_all(workspace.join("builder"))?;
-        std::fs::write(workspace.join("builder/install.sh"), b"#!/bin/sh\n")?;
-
-        let mut persisted_state = PersistedState::new(true);
-        persisted_state.status = UpdateStatus::PatchingApp;
-        persisted_state.artifact_paths.workspace_dir = Some(workspace.clone());
-        persisted_state.save(&paths.state_file)?;
-
-        let mut stale_state = PersistedState::new(true);
-        run_daemon_startup_maintenance(&config, &mut stale_state, &paths)?;
-
-        assert_eq!(stale_state.status, UpdateStatus::PatchingApp);
-        assert_eq!(
-            stale_state.artifact_paths.workspace_dir.as_deref(),
-            Some(workspace.as_path())
-        );
-        assert!(workspace.join("builder/install.sh").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn daemon_startup_check_lock_failure_is_fail_soft() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let config = test_config(temp.path());
-        let workspace = config.workspace_root.join("workspaces/unreferenced");
-        std::fs::create_dir_all(workspace.join("builder"))?;
-        std::fs::write(workspace.join("builder/install.sh"), b"#!/bin/sh\n")?;
-        std::fs::create_dir(paths.state_dir.join("check.lock"))?;
-        let mut state = PersistedState::new(true);
-
-        run_daemon_startup_maintenance(&config, &mut state, &paths)?;
-
-        assert!(workspace.join("builder/install.sh").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn daemon_startup_state_reload_failure_is_fail_soft() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let config = test_config(temp.path());
-        let workspace = config.workspace_root.join("workspaces/unreferenced");
-        std::fs::create_dir_all(workspace.join("builder"))?;
-        std::fs::write(workspace.join("builder/install.sh"), b"#!/bin/sh\n")?;
-        std::fs::write(&paths.state_file, b"not json")?;
-        let mut state = PersistedState::new(true);
-
-        run_daemon_startup_maintenance(&config, &mut state, &paths)?;
-
-        assert!(workspace.join("builder/install.sh").exists());
-        assert_eq!(std::fs::read(&paths.state_file)?, b"not json");
-        Ok(())
-    }
-
-    #[test]
-    fn std_file_try_lock_reports_would_block_for_second_holder() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let lock_path = temp.path().join("check.lock");
-        let first_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)?;
-        let second_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)?;
-
-        first_file.try_lock()?;
-        let second_attempt = second_file.try_lock();
-
-        assert!(matches!(
-            second_attempt,
-            Err(std::fs::TryLockError::WouldBlock)
-        ));
-        first_file.unlock()?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn missing_pending_package_marks_state_failed() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-
-        let config = RuntimeConfig {
-            dmg_url: "https://example.com/Codex.dmg".to_string(),
-            initial_check_delay_seconds: 1,
-            check_interval_hours: 6,
-            auto_install_on_app_exit: true,
-            notifications: false,
-            workspace_root: temp.path().join("cache"),
-            builder_bundle_root: temp.path().join("builder"),
-            app_executable_path: temp.path().join("not-running-electron"),
-            enable_wrapper_updates: false,
-            wrapper_remote: String::new(),
-            wrapper_branch: "main".to_string(),
-            generated_artifact_cleanup: Default::default(),
-        };
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::ReadyToInstall;
-        state.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
-        state.artifact_paths.package_path = Some(temp.path().join("missing/codex.deb"));
-
-        reconcile_pending_install(&config, &mut state, &paths).await?;
-
-        assert_eq!(state.status, UpdateStatus::Failed);
-        assert!(state
-            .error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("Pending package artifact is missing")));
-        Ok(())
-    }
-
-    #[test]
-    fn ready_update_waits_for_explicit_install_ready_when_auto_install_is_off() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let runtime = tokio::runtime::Runtime::new()?;
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-        let settings_path = temp.path().join("settings.json");
-        let previous_settings_file = std::env::var_os("CODEX_LINUX_SETTINGS_FILE");
-        std::env::set_var("CODEX_LINUX_SETTINGS_FILE", &settings_path);
-        std::fs::write(
-            &settings_path,
-            r#"{"codex-linux-auto-update-on-exit": false}"#,
-        )?;
-
-        let package_path = temp.path().join("dist/codex.deb");
-        std::fs::create_dir_all(
-            package_path
-                .parent()
-                .expect("package path should have parent"),
-        )?;
-        std::fs::write(&package_path, b"deb")?;
-
-        let config = RuntimeConfig {
-            dmg_url: "https://example.com/Codex.dmg".to_string(),
-            initial_check_delay_seconds: 1,
-            check_interval_hours: 6,
-            auto_install_on_app_exit: false,
-            notifications: false,
-            workspace_root: temp.path().join("cache"),
-            builder_bundle_root: temp.path().join("builder"),
-            app_executable_path: temp.path().join("not-running-electron"),
-            enable_wrapper_updates: false,
-            wrapper_remote: String::new(),
-            wrapper_branch: "main".to_string(),
-            generated_artifact_cleanup: Default::default(),
-        };
-
-        let mut state = PersistedState::new(false);
-        state.status = UpdateStatus::ReadyToInstall;
-        state.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
-        state.artifact_paths.package_path = Some(package_path);
-
-        let result = runtime.block_on(reconcile_pending_install(&config, &mut state, &paths));
-
-        if let Some(value) = previous_settings_file {
-            std::env::set_var("CODEX_LINUX_SETTINGS_FILE", value);
+        verification_succeeds: bool,
+    ) -> Result<PathBuf> {
+        let path = root.join("pacman-recovery-fixture");
+        let verification = if verification_succeeds {
+            "exit 0"
         } else {
-            std::env::remove_var("CODEX_LINUX_SETTINGS_FILE");
-        }
-
-        result?;
-        assert_eq!(state.status, UpdateStatus::ReadyToInstall);
-        assert_eq!(state.error_message, None);
-        Ok(())
-    }
-
-    #[test]
-    fn ready_update_auto_install_waits_for_app_exit_when_app_is_running() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let runtime = tokio::runtime::Runtime::new()?;
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
+            "exit 1"
         };
-        paths.ensure_dirs()?;
-        let settings_path = temp.path().join("settings.json");
-        let previous_settings_file = std::env::var_os("CODEX_LINUX_SETTINGS_FILE");
-        let previous_assume_agent = std::env::var_os("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT");
-        std::env::set_var("CODEX_LINUX_SETTINGS_FILE", &settings_path);
-        std::env::set_var("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT", "1");
-        std::fs::write(
-            &settings_path,
-            r#"{"codex-linux-auto-update-on-exit": true}"#,
-        )?;
-
-        let package_path = temp.path().join("dist/codex.deb");
-        std::fs::create_dir_all(
-            package_path
-                .parent()
-                .expect("package path should have parent"),
-        )?;
-        std::fs::write(&package_path, b"deb")?;
-
-        let config = RuntimeConfig {
-            dmg_url: "https://example.com/Codex.dmg".to_string(),
-            initial_check_delay_seconds: 1,
-            check_interval_hours: 6,
-            auto_install_on_app_exit: true,
-            notifications: false,
-            workspace_root: temp.path().join("cache"),
-            builder_bundle_root: temp.path().join("builder"),
-            app_executable_path: std::env::current_exe()?,
-            enable_wrapper_updates: false,
-            wrapper_remote: String::new(),
-            wrapper_branch: "main".to_string(),
-            generated_artifact_cleanup: Default::default(),
-        };
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::ReadyToInstall;
-        state.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
-        state.artifact_paths.package_path = Some(package_path);
-        state
-            .notified_events
-            .insert("install_auth_required:2999.03.25.010203+deadbeef".to_string());
-
-        let result = runtime.block_on(reconcile_pending_install(&config, &mut state, &paths));
-
-        if let Some(value) = previous_settings_file {
-            std::env::set_var("CODEX_LINUX_SETTINGS_FILE", value);
-        } else {
-            std::env::remove_var("CODEX_LINUX_SETTINGS_FILE");
-        }
-        if let Some(value) = previous_assume_agent {
-            std::env::set_var("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT", value);
-        } else {
-            std::env::remove_var("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT");
-        }
-
-        result?;
-        assert_eq!(state.status, UpdateStatus::WaitingForAppExit);
-        assert!(state.waiting_for_app_exit_auto_install);
-        assert!(!install_auth_retry_is_blocked(&state));
-        Ok(())
-    }
-
-    #[test]
-    fn daemon_reconcile_reloads_waiting_state_written_by_another_process() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
-            "CODEX_UPDATE_MANAGER_ASSUME_NO_POLKIT_AGENT",
-            "CODEX_LINUX_SETTINGS_FILE",
-        ]);
-        let runtime = tokio::runtime::Runtime::new()?;
-        std::env::set_var("CODEX_UPDATE_MANAGER_ASSUME_NO_POLKIT_AGENT", "1");
-
-        let temp = tempfile::tempdir()?;
-        std::env::set_var(
-            "CODEX_LINUX_SETTINGS_FILE",
-            temp.path().join("isolated-settings.json"),
-        );
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let config = test_config(temp.path());
-
-        let package_path = temp.path().join("dist/codex.deb");
-        std::fs::create_dir_all(
-            package_path
-                .parent()
-                .expect("package path should have parent"),
-        )?;
-        std::fs::write(&package_path, b"deb")?;
-
-        let mut on_disk = PersistedState::new(true);
-        on_disk.status = UpdateStatus::WaitingForAppExit;
-        on_disk.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
-        on_disk.waiting_for_app_exit_auto_install = true;
-        on_disk.artifact_paths.package_path = Some(package_path);
-        on_disk.save(&paths.state_file)?;
-
-        let mut stale_daemon_state = PersistedState::new(true);
-        stale_daemon_state.status = UpdateStatus::Idle;
-
-        let result = runtime.block_on(reconcile_pending_install_from_disk(
-            &config,
-            &mut stale_daemon_state,
-            &paths,
-        ));
-
-        result?;
-        assert_eq!(stale_daemon_state.status, UpdateStatus::ReadyToInstall);
-        assert!(!stale_daemon_state.waiting_for_app_exit_auto_install);
-        assert!(stale_daemon_state
-            .error_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("No graphical polkit authentication agent"));
-
-        let persisted = PersistedState::load_or_default(&paths.state_file, true)?;
-        assert_eq!(persisted.status, UpdateStatus::ReadyToInstall);
-        assert!(!persisted.waiting_for_app_exit_auto_install);
-        Ok(())
-    }
-
-    #[test]
-    fn waiting_for_app_exit_auto_install_cancelled_when_setting_turns_off() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let runtime = tokio::runtime::Runtime::new()?;
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-        let settings_path = temp.path().join("settings.json");
-        let previous_settings_file = std::env::var_os("CODEX_LINUX_SETTINGS_FILE");
-        std::env::set_var("CODEX_LINUX_SETTINGS_FILE", &settings_path);
-        std::fs::write(
-            &settings_path,
-            r#"{"codex-linux-auto-update-on-exit": false}"#,
-        )?;
-
-        let package_path = temp.path().join("dist/codex.deb");
-        std::fs::create_dir_all(
-            package_path
-                .parent()
-                .expect("package path should have parent"),
-        )?;
-        std::fs::write(&package_path, b"deb")?;
-
-        let config = RuntimeConfig {
-            dmg_url: "https://example.com/Codex.dmg".to_string(),
-            initial_check_delay_seconds: 1,
-            check_interval_hours: 6,
-            auto_install_on_app_exit: true,
-            notifications: false,
-            workspace_root: temp.path().join("cache"),
-            builder_bundle_root: temp.path().join("builder"),
-            app_executable_path: std::env::current_exe()?,
-            enable_wrapper_updates: false,
-            wrapper_remote: String::new(),
-            wrapper_branch: "main".to_string(),
-            generated_artifact_cleanup: Default::default(),
-        };
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::WaitingForAppExit;
-        state.waiting_for_app_exit_auto_install = true;
-        state.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
-        state.artifact_paths.package_path = Some(package_path);
-
-        let result = runtime.block_on(reconcile_pending_install(&config, &mut state, &paths));
-
-        if let Some(value) = previous_settings_file {
-            std::env::set_var("CODEX_LINUX_SETTINGS_FILE", value);
-        } else {
-            std::env::remove_var("CODEX_LINUX_SETTINGS_FILE");
-        }
-
-        result?;
-        assert_eq!(state.status, UpdateStatus::ReadyToInstall);
-        assert!(!state.auto_install_on_app_exit);
-        assert!(!state.waiting_for_app_exit_auto_install);
-        assert_eq!(state.error_message, None);
-        assert!(state.artifact_paths.package_path.is_some());
-        Ok(())
-    }
-
-    #[test]
-    fn waiting_for_app_exit_manual_install_survives_auto_toggle_off() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let runtime = tokio::runtime::Runtime::new()?;
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-        let settings_path = temp.path().join("settings.json");
-        let previous_settings_file = std::env::var_os("CODEX_LINUX_SETTINGS_FILE");
-        let previous_assume_agent = std::env::var_os("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT");
-        std::env::set_var("CODEX_LINUX_SETTINGS_FILE", &settings_path);
-        std::env::set_var("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT", "1");
-        std::fs::write(
-            &settings_path,
-            r#"{"codex-linux-auto-update-on-exit": false}"#,
-        )?;
-
-        let package_path = temp.path().join("dist/codex.deb");
-        std::fs::create_dir_all(
-            package_path
-                .parent()
-                .expect("package path should have parent"),
-        )?;
-        std::fs::write(&package_path, b"deb")?;
-
-        let config = RuntimeConfig {
-            dmg_url: "https://example.com/Codex.dmg".to_string(),
-            initial_check_delay_seconds: 1,
-            check_interval_hours: 6,
-            auto_install_on_app_exit: true,
-            notifications: false,
-            workspace_root: temp.path().join("cache"),
-            builder_bundle_root: temp.path().join("builder"),
-            app_executable_path: std::env::current_exe()?,
-            enable_wrapper_updates: false,
-            wrapper_remote: String::new(),
-            wrapper_branch: "main".to_string(),
-            generated_artifact_cleanup: Default::default(),
-        };
-
-        let mut state = PersistedState::new(false);
-        state.status = UpdateStatus::WaitingForAppExit;
-        state.waiting_for_app_exit_auto_install = false;
-        state.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
-        state.artifact_paths.package_path = Some(package_path);
-
-        let result = runtime.block_on(reconcile_pending_install(&config, &mut state, &paths));
-
-        if let Some(value) = previous_settings_file {
-            std::env::set_var("CODEX_LINUX_SETTINGS_FILE", value);
-        } else {
-            std::env::remove_var("CODEX_LINUX_SETTINGS_FILE");
-        }
-        if let Some(value) = previous_assume_agent {
-            std::env::set_var("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT", value);
-        } else {
-            std::env::remove_var("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT");
-        }
-
-        result?;
-        assert_eq!(state.status, UpdateStatus::WaitingForAppExit);
-        assert!(!state.auto_install_on_app_exit);
-        assert!(!state.waiting_for_app_exit_auto_install);
-        assert_eq!(state.error_message, None);
-        Ok(())
-    }
-
-    #[test]
-    fn reconcile_reloads_auto_install_setting_override() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let runtime = tokio::runtime::Runtime::new()?;
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-        let settings_path = temp.path().join("settings.json");
-
-        let previous_settings_file = std::env::var_os("CODEX_LINUX_SETTINGS_FILE");
-        std::env::set_var("CODEX_LINUX_SETTINGS_FILE", &settings_path);
-
-        let config = RuntimeConfig {
-            dmg_url: "https://example.com/Codex.dmg".to_string(),
-            initial_check_delay_seconds: 1,
-            check_interval_hours: 6,
-            auto_install_on_app_exit: true,
-            notifications: false,
-            workspace_root: temp.path().join("cache"),
-            builder_bundle_root: temp.path().join("builder"),
-            app_executable_path: temp.path().join("not-running-electron"),
-            enable_wrapper_updates: false,
-            wrapper_remote: String::new(),
-            wrapper_branch: "main".to_string(),
-            generated_artifact_cleanup: Default::default(),
-        };
-
-        let mut state = PersistedState::new(true);
-
-        std::fs::write(
-            &settings_path,
-            r#"{"codex-linux-auto-update-on-exit": false}"#,
-        )?;
-        let first_result = runtime.block_on(reconcile_pending_install(&config, &mut state, &paths));
-        assert!(!state.auto_install_on_app_exit);
-
-        std::fs::write(
-            &settings_path,
-            r#"{"codex-linux-auto-update-on-exit": true}"#,
-        )?;
-        let second_result =
-            runtime.block_on(reconcile_pending_install(&config, &mut state, &paths));
-
-        if let Some(value) = previous_settings_file {
-            std::env::set_var("CODEX_LINUX_SETTINGS_FILE", value);
-        } else {
-            std::env::remove_var("CODEX_LINUX_SETTINGS_FILE");
-        }
-
-        first_result?;
-        second_result?;
-        assert!(state.auto_install_on_app_exit);
-        Ok(())
-    }
-
-    #[test]
-    fn install_ready_waits_when_app_is_running() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let runtime = tokio::runtime::Runtime::new()?;
-        let previous_assume_agent = std::env::var_os("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT");
-        std::env::set_var("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT", "1");
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-
-        let package_path = temp.path().join("dist/codex.deb");
-        std::fs::create_dir_all(
-            package_path
-                .parent()
-                .expect("package path should have parent"),
-        )?;
-        std::fs::write(&package_path, b"deb")?;
-
-        let config = RuntimeConfig {
-            dmg_url: "https://example.com/Codex.dmg".to_string(),
-            initial_check_delay_seconds: 1,
-            check_interval_hours: 6,
-            auto_install_on_app_exit: false,
-            notifications: false,
-            workspace_root: temp.path().join("cache"),
-            builder_bundle_root: temp.path().join("builder"),
-            app_executable_path: std::env::current_exe()?,
-            enable_wrapper_updates: false,
-            wrapper_remote: String::new(),
-            wrapper_branch: "main".to_string(),
-            generated_artifact_cleanup: Default::default(),
-        };
-
-        let mut state = PersistedState::new(false);
-        state.status = UpdateStatus::ReadyToInstall;
-        state.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
-        state.artifact_paths.package_path = Some(package_path);
-        state
-            .notified_events
-            .insert("install_auth_required:2999.03.25.010203+deadbeef".to_string());
-
-        let result = runtime.block_on(run_install_ready_locked(&config, &mut state, &paths));
-
-        if let Some(value) = previous_assume_agent {
-            std::env::set_var("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT", value);
-        } else {
-            std::env::remove_var("CODEX_UPDATE_MANAGER_ASSUME_POLKIT_AGENT");
-        }
-
-        result?;
-
-        assert_eq!(state.status, UpdateStatus::WaitingForAppExit);
-        assert!(!state.waiting_for_app_exit_auto_install);
-        assert!(!install_auth_retry_is_blocked(&state));
-        Ok(())
-    }
-
-    #[test]
-    fn install_ready_stays_open_when_no_polkit_agent_is_available() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let runtime = tokio::runtime::Runtime::new()?;
-        let previous_no_agent = std::env::var_os("CODEX_UPDATE_MANAGER_ASSUME_NO_POLKIT_AGENT");
-        std::env::set_var("CODEX_UPDATE_MANAGER_ASSUME_NO_POLKIT_AGENT", "1");
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-
-        let package_path = temp.path().join("dist/codex desktop.pkg.tar.zst");
-        std::fs::create_dir_all(
-            package_path
-                .parent()
-                .expect("package path should have parent"),
-        )?;
-        std::fs::write(&package_path, b"pkg")?;
-
-        let config = RuntimeConfig {
-            dmg_url: "https://example.com/Codex.dmg".to_string(),
-            initial_check_delay_seconds: 1,
-            check_interval_hours: 6,
-            auto_install_on_app_exit: false,
-            notifications: false,
-            workspace_root: temp.path().join("cache"),
-            builder_bundle_root: temp.path().join("builder"),
-            app_executable_path: std::env::current_exe()?,
-            enable_wrapper_updates: false,
-            wrapper_remote: String::new(),
-            wrapper_branch: "main".to_string(),
-            generated_artifact_cleanup: Default::default(),
-        };
-
-        let mut state = PersistedState::new(false);
-        state.status = UpdateStatus::ReadyToInstall;
-        state.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
-        state.artifact_paths.package_path = Some(package_path);
-
-        let result = runtime.block_on(run_install_ready_locked(&config, &mut state, &paths));
-
-        if let Some(value) = previous_no_agent {
-            std::env::set_var("CODEX_UPDATE_MANAGER_ASSUME_NO_POLKIT_AGENT", value);
-        } else {
-            std::env::remove_var("CODEX_UPDATE_MANAGER_ASSUME_NO_POLKIT_AGENT");
-        }
-
-        result?;
-        assert_eq!(state.status, UpdateStatus::ReadyToInstall);
-        assert!(!state.waiting_for_app_exit_auto_install);
-        let message = state.error_message.as_deref().unwrap_or("");
-        assert!(message.contains("No graphical polkit authentication agent"));
-        assert!(message.contains("sudo /usr/bin/codex-update-manager install-pacman"));
-        assert!(message.contains("codex desktop.pkg.tar.zst'"));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn install_ready_marks_missing_artifact_failed() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-
-        let config = RuntimeConfig {
-            dmg_url: "https://example.com/Codex.dmg".to_string(),
-            initial_check_delay_seconds: 1,
-            check_interval_hours: 6,
-            auto_install_on_app_exit: false,
-            notifications: false,
-            workspace_root: temp.path().join("cache"),
-            builder_bundle_root: temp.path().join("builder"),
-            app_executable_path: temp.path().join("not-running-electron"),
-            enable_wrapper_updates: false,
-            wrapper_remote: String::new(),
-            wrapper_branch: "main".to_string(),
-            generated_artifact_cleanup: Default::default(),
-        };
-
-        let mut state = PersistedState::new(false);
-        state.status = UpdateStatus::ReadyToInstall;
-        state.candidate_version = Some("2999.03.25.010203+deadbeef".to_string());
-        state.artifact_paths.package_path = Some(temp.path().join("missing/codex.deb"));
-
-        run_install_ready_locked(&config, &mut state, &paths).await?;
-
-        assert_eq!(state.status, UpdateStatus::Failed);
-        assert!(state
-            .error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("Pending package artifact is missing")));
-        Ok(())
+        let script = r#"#!/bin/sh
+set -eu
+if [ "$1" = "-Q" ] && [ "$2" = "codex-desktop" ]; then
+  printf 'codex-desktop 2026.09.06-1\n'
+  exit 0
+fi
+if [ "$1" = "-Qip" ] || [ "$1" = "-Qi" ]; then
+  printf 'Name            : codex-desktop\n'
+  printf 'Version         : 2026.09.06-1\n'
+  printf 'Architecture    : x86_64\n'
+  exit 0
+fi
+if [ "$1" = "-Qkk" ]; then
+  __VERIFY__
+fi
+exit 90
+"#
+        .replace("__VERIFY__", verification);
+        fs::write(&path, script)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+        Ok(path)
     }
 
     #[test]
     fn pkexec_authentication_failures_are_retryable() -> Result<()> {
         for code in [126, 127] {
-            let status = std::process::Command::new("/bin/sh")
+            let status = Command::new("/bin/sh")
                 .arg("-c")
                 .arg(format!("exit {code}"))
                 .status()?;
             assert!(pkexec_authentication_was_not_obtained(&status));
         }
 
-        let status = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("exit 1")
-            .status()?;
+        let status = Command::new("/bin/sh").arg("-c").arg("exit 1").status()?;
         assert!(!pkexec_authentication_was_not_obtained(&status));
         Ok(())
     }
 
     #[test]
-    fn polkit_agent_process_matching_ignores_daemon_and_matches_agents() {
-        assert!(process_text_matches_polkit_auth_agent(
-            "/usr/lib/polkit-kde-authentication-agent-1"
-        ));
-        assert!(process_text_matches_polkit_auth_agent(
-            "/usr/lib/polkit-gnome-authentication-agent-1"
-        ));
-        assert!(process_text_matches_polkit_auth_agent("cosmic-osd"));
-        assert!(process_text_matches_polkit_auth_agent(
-            "gnome-shell --wayland"
-        ));
-        assert!(process_text_matches_polkit_auth_agent(
-            "qs -p /usr/share/quickshell/dms"
-        ));
-        assert!(!process_text_matches_polkit_auth_agent(
-            "qs -p /usr/share/quickshell/other-shell"
-        ));
-        assert!(!process_text_matches_polkit_auth_agent(
-            "/usr/lib/polkit-1/polkitd --no-debug"
-        ));
-        assert!(!process_text_matches_polkit_auth_agent(
-            "/usr/bin/ssh-agent -D"
-        ));
-        let process_text = "qs -p /usr/share/quickshell/dms";
-        assert!(process_matches_polkit_auth_agent(
-            process_text,
-            Some(b"PATH=/usr/bin\0")
-        ));
-        assert!(!process_matches_polkit_auth_agent(
-            process_text,
-            Some(b"PATH=/usr/bin\0DMS_DISABLE_POLKIT=1\0")
-        ));
-        assert!(process_matches_polkit_auth_agent(
-            process_text,
-            Some(b"DMS_DISABLE_POLKIT=0\0")
-        ));
-        assert!(process_matches_polkit_auth_agent(
-            "gnome-shell --wayland",
-            Some(b"DMS_DISABLE_POLKIT=1\0")
-        ));
-    }
-
-    #[test]
-    fn user_session_bus_for_polkit_allows_user_service_env_without_display() {
+    fn auth_cancel_retries_only_after_another_app_exit() -> Result<()> {
         let _env_guard = crate::test_util::env_lock();
         let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
-            "DISPLAY",
-            "WAYLAND_DISPLAY",
-            "DBUS_SESSION_BUS_ADDRESS",
-            "XDG_RUNTIME_DIR",
+            "CODEX_UPDATE_MANAGER_TEST_PKEXEC_PATH",
+            "CODEX_UPDATE_MANAGER_TEST_PKEXEC_COUNT",
+            "CODEX_UPDATE_MANAGER_TEST_PKEXEC_EXIT",
         ]);
-
-        std::env::remove_var("DISPLAY");
-        std::env::remove_var("WAYLAND_DISPLAY");
-        std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus");
-        std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
-
-        assert!(has_user_session_bus_for_polkit());
-    }
-
-    #[test]
-    fn manual_install_command_selects_package_kind_and_quotes_path() {
-        assert_eq!(
-            manual_install_command(Path::new("/tmp/codex update.pkg.tar.zst")),
-            "sudo /usr/bin/codex-update-manager install-pacman --path '/tmp/codex update.pkg.tar.zst'"
-        );
-        assert_eq!(
-            manual_install_command(Path::new("/tmp/codex'update.deb")),
-            "sudo /usr/bin/codex-update-manager install-deb --path '/tmp/codex'\\''update.deb'"
-        );
-    }
-
-    #[test]
-    fn command_lookup_requires_executable_file() -> Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?;
         let temp = tempfile::tempdir()?;
-        let candidate = temp.path().join("zenity");
-        std::fs::write(&candidate, b"#!/bin/sh\n")?;
-
-        let mut permissions = std::fs::metadata(&candidate)?.permissions();
-        permissions.set_mode(0o644);
-        std::fs::set_permissions(&candidate, permissions)?;
-
-        assert!(!is_executable_file(&candidate));
-
-        let mut permissions = std::fs::metadata(&candidate)?.permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&candidate, permissions)?;
-
-        assert!(is_executable_file(&candidate));
-        Ok(())
-    }
-
-    #[test]
-    fn prompt_install_cli_does_not_treat_non_executable_file_as_installed() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
-        let temp = tempfile::tempdir()?;
-        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
+        let paths = fixture_paths(temp.path());
         paths.ensure_dirs()?;
+        let package = temp.path().join("codex-desktop.deb");
+        fs::write(&package, b"package")?;
+        let fake_pkexec = write_fake_pkexec(temp.path())?;
+        let invocation_count = temp.path().join("pkexec-count");
+        env::set_var("CODEX_UPDATE_MANAGER_TEST_PKEXEC_PATH", fake_pkexec);
+        env::set_var("CODEX_UPDATE_MANAGER_TEST_PKEXEC_COUNT", &invocation_count);
+        env::set_var("CODEX_UPDATE_MANAGER_TEST_PKEXEC_EXIT", "126");
 
-        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
-            "DISPLAY",
-            "WAYLAND_DISPLAY",
-            "DBUS_SESSION_BUS_ADDRESS",
-            "XDG_RUNTIME_DIR",
-            "PATH",
-            "HOME",
-            "NVM_DIR",
-            "CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP",
-        ]);
+        let mut config = RuntimeConfig::default_with_paths(&paths);
+        config.auto_install_on_app_exit = false;
+        config.notifications = false;
+        config.app_executable_path = temp.path().join("not-running");
+        let mut state = ready_state(package);
 
-        std::env::remove_var("DISPLAY");
-        std::env::remove_var("WAYLAND_DISPLAY");
-        std::env::remove_var("DBUS_SESSION_BUS_ADDRESS");
-        std::env::remove_var("XDG_RUNTIME_DIR");
-        std::env::set_var("PATH", temp.path().join("missing-bin"));
-        std::env::set_var("HOME", temp.path());
-        std::env::remove_var("NVM_DIR");
-        std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
+        let error = runtime
+            .block_on(install_ready_with_launcher(
+                &config,
+                &mut state,
+                &paths,
+                true,
+                false,
+                Path::new("/bin/sh"),
+            ))
+            .expect_err("authentication cancellation should be reported");
+        assert!(error.to_string().contains("status exit status: 126"));
+        assert_eq!(state.status, UpdateStatus::ReadyToInstall);
+        assert!(state.install_transaction.is_none());
+        assert!(state.install_auth_retry_is_blocked());
+        assert!(state.install_after_app_exit_requested);
+        assert_eq!(fs::read_to_string(&invocation_count)?, "x");
 
-        let invalid_cli_path = temp.path().join("codex.txt");
-        std::fs::write(&invalid_cli_path, b"not executable")?;
-
-        let mut state = PersistedState::new(true);
-        state.cli_path = Some(invalid_cli_path);
-
-        let outcome = prompt_install_cli(&mut state, &paths, None)?;
-
-        assert_eq!(outcome, PromptInstallCliOutcome::NoBackend);
-        Ok(())
-    }
-
-    #[test]
-    fn install_auth_retry_block_is_scoped_to_candidate() {
-        let mut state = PersistedState::new(true);
-        state.candidate_version = Some("2026.04.28.082247+abcdef12".to_string());
-
-        assert!(!install_auth_retry_is_blocked(&state));
-
-        state
-            .notified_events
-            .insert("install_auth_required:2026.04.28.082247+abcdef12".to_string());
-        assert!(install_auth_retry_is_blocked(&state));
-
-        state.candidate_version = Some("2026.04.29.010203+abcdef12".to_string());
-        assert!(!install_auth_retry_is_blocked(&state));
-    }
-
-    #[test]
-    fn clear_install_auth_required_event_keeps_unrelated_notifications() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-
-        let mut state = PersistedState::new(true);
-        state.candidate_version = Some("2026.04.28.082247+abcdef12".to_string());
-        state
-            .notified_events
-            .insert("install_auth_required:2026.04.28.082247+abcdef12".to_string());
-        state
-            .notified_events
-            .insert("installed:2026.04.25.054929+12345678".to_string());
-
-        clear_install_auth_required_event(&mut state, &paths)?;
-
-        assert!(!install_auth_retry_is_blocked(&state));
-        assert!(state
-            .notified_events
-            .contains("installed:2026.04.25.054929+12345678"));
-        Ok(())
-    }
-
-    #[test]
-    fn in_progress_same_dmg_update_is_cleared_as_current() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let config = test_config(temp.path());
-        let sha256 = "51eeeba58394c4747cbc9d9fee7aa613500253fedd7ad5b114f48dfcb89a6cbb";
-        write_installed_build_info(&config, sha256)?;
-
-        let package_path = temp
-            .path()
-            .join("cache/workspaces/2026.06.12.120204+51eeeba5/dist/codex.pkg.tar.zst");
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::PatchingApp;
-        state.installed_version = "2026.06.12.094134-1".to_string();
-        state.candidate_version = Some("2026.06.12.120204+51eeeba5".to_string());
-        state.dmg_sha256 = Some(sha256.to_string());
-        state.artifact_paths.package_path = Some(package_path);
-        state.artifact_paths.workspace_dir = Some(
-            temp.path()
-                .join("cache/workspaces/2026.06.12.120204+51eeeba5"),
-        );
-        state.error_message = Some("interrupted rebuild".to_string());
-        state
-            .notified_events
-            .insert("update_detected:2026.06.12.120204+51eeeba5".to_string());
-
-        assert!(complete_current_dmg_update_if_already_installed(
-            &config, &mut state, &paths
-        )?);
-
-        assert_eq!(state.status, UpdateStatus::Idle);
-        assert_eq!(state.candidate_version, None);
-        assert_eq!(state.dmg_sha256.as_deref(), Some(sha256));
-        assert_eq!(state.artifact_paths.package_path, None);
-        assert_eq!(state.artifact_paths.workspace_dir, None);
-        assert_eq!(state.error_message, None);
-        assert!(state.notified_events.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn in_progress_different_dmg_update_is_not_cleared() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let config = test_config(temp.path());
-        write_installed_build_info(
+        let mut daemon_state = PersistedState::new(false);
+        assert!(prepare_mutation_state(&config, &mut daemon_state, &paths)?);
+        runtime.block_on(reconcile_pending_install(
             &config,
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )?;
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::PatchingApp;
-        state.candidate_version = Some("2026.06.12.120204+51eeeba5".to_string());
-        state.dmg_sha256 =
-            Some("51eeeba58394c4747cbc9d9fee7aa613500253fedd7ad5b114f48dfcb89a6cbb".to_string());
-        state
-            .notified_events
-            .insert("update_detected:2026.06.12.120204+51eeeba5".to_string());
-
-        assert!(!complete_current_dmg_update_if_already_installed(
-            &config, &mut state, &paths
-        )?);
-
-        assert_eq!(state.status, UpdateStatus::PatchingApp);
-        assert_eq!(
-            state.candidate_version.as_deref(),
-            Some("2026.06.12.120204+51eeeba5")
-        );
-        assert!(state
-            .notified_events
-            .contains("update_detected:2026.06.12.120204+51eeeba5"));
-        Ok(())
-    }
-
-    #[test]
-    fn same_dmg_recovery_keeps_ready_wrapper_update_package() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-        let config = test_config(temp.path());
-        let sha256 = "51eeeba58394c4747cbc9d9fee7aa613500253fedd7ad5b114f48dfcb89a6cbb";
-        write_installed_build_info(&config, sha256)?;
-
-        let package_path = temp.path().join("dist/codex-desktop-wrapper.deb");
-        let workspace_dir = temp
-            .path()
-            .join("cache/workspaces/2026.06.12.120204+51eeeba5");
-        let wrapper_commit = "b".repeat(40);
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::ReadyToInstall;
-        state.dmg_sha256 = Some(sha256.to_string());
-        state.candidate_wrapper_commit = Some(wrapper_commit.clone());
-        state.candidate_wrapper_version = Some("0.9.0".to_string());
-        state.artifact_paths.package_path = Some(package_path.clone());
-        state.artifact_paths.workspace_dir = Some(workspace_dir.clone());
-
-        assert!(!complete_current_dmg_update_if_already_installed(
-            &config, &mut state, &paths
-        )?);
-
+            &mut daemon_state,
+            &paths,
+        ))?;
+        state = daemon_state;
         assert_eq!(state.status, UpdateStatus::ReadyToInstall);
-        assert_eq!(state.candidate_version, None);
-        assert_eq!(state.dmg_sha256.as_deref(), Some(sha256));
-        assert_eq!(
-            state.candidate_wrapper_commit.as_deref(),
-            Some(wrapper_commit.as_str())
-        );
-        assert_eq!(state.candidate_wrapper_version.as_deref(), Some("0.9.0"));
-        assert_eq!(state.artifact_paths.package_path, Some(package_path));
-        assert_eq!(state.artifact_paths.workspace_dir, Some(workspace_dir));
+        assert!(state.install_auth_retry_is_blocked());
+        assert!(state.install_after_app_exit_requested);
+        assert_eq!(fs::read_to_string(&invocation_count)?, "x");
+
+        runtime
+            .block_on(install_ready_with_launcher(
+                &config,
+                &mut state,
+                &paths,
+                true,
+                false,
+                Path::new("/bin/sh"),
+            ))
+            .expect_err("an explicit retry should bypass the authentication block");
+        assert_eq!(state.status, UpdateStatus::ReadyToInstall);
+        assert!(state.install_transaction.is_none());
+        assert!(state.install_auth_retry_is_blocked());
+        assert!(state.install_after_app_exit_requested);
+        assert_eq!(fs::read_to_string(&invocation_count)?, "xx");
+
+        config.app_executable_path = env::current_exe()?;
+        runtime.block_on(reconcile_pending_install(&config, &mut state, &paths))?;
+        assert_eq!(state.status, UpdateStatus::WaitingForAppExit);
+        assert!(!state.install_auth_retry_is_blocked());
+        assert!(state.install_after_app_exit_requested);
+        assert_eq!(fs::read_to_string(&invocation_count)?, "xx");
+
+        runtime.block_on(install_ready_with_launcher(
+            &config,
+            &mut state,
+            &paths,
+            false,
+            false,
+            Path::new("/bin/sh"),
+        ))?;
+        assert_eq!(state.status, UpdateStatus::WaitingForAppExit);
+        assert!(!state.waiting_for_app_exit_auto_install);
+        assert_eq!(fs::read_to_string(&invocation_count)?, "xx");
+
+        config.app_executable_path = temp.path().join("not-running");
+        runtime
+            .block_on(reconcile_pending_install(&config, &mut state, &paths))
+            .expect_err("the next app exit should permit one retry");
+        assert_eq!(state.status, UpdateStatus::ReadyToInstall);
+        assert!(state.install_transaction.is_none());
+        assert!(state.install_auth_retry_is_blocked());
+        assert!(state.install_after_app_exit_requested);
+        assert_eq!(fs::read_to_string(&invocation_count)?, "xxx");
         Ok(())
     }
 
     #[test]
-    fn pending_install_becomes_installed_when_candidate_is_already_present() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::ReadyToInstall;
-        state.installed_version = "2026.04.28.082247-abcdef12.fc43".to_string();
-        state.candidate_version = Some("2026.04.28.082247+abcdef12".to_string());
-        state.rollback_blocked_candidate_version = Some("2026.04.20.120000".to_string());
-        state.rollback_blocked_dmg_sha256 = Some("rolled-back-dmg-sha256".to_string());
-        state.error_message = Some("authentication was not obtained".to_string());
-        state
-            .notified_events
-            .insert("install_auth_required:2026.04.28.082247+abcdef12".to_string());
-
-        assert_eq!(
-            complete_pending_install_if_already_installed(&mut state, &paths)?,
-            PendingInstallRecovery::CandidateInstalled
-        );
-
-        assert_eq!(state.status, UpdateStatus::Installed);
-        assert_eq!(state.candidate_version, None);
-        assert_eq!(state.rollback_blocked_candidate_version, None);
-        assert_eq!(state.rollback_blocked_dmg_sha256, None);
-        assert_eq!(state.error_message, None);
-        assert!(state.notified_events.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn pending_install_is_cleared_when_installed_version_is_newer() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::ReadyToInstall;
-        state.installed_version = "2026.05.01.010203-99999999.fc43".to_string();
-        state.candidate_version = Some("2026.04.28.082247+abcdef12".to_string());
-        state.error_message = Some("authentication was not obtained".to_string());
-        let superseded_package_path = temp.path().join("superseded.deb");
-        std::fs::write(&superseded_package_path, b"deb")?;
-        state.artifact_paths.package_path = Some(superseded_package_path);
-        state.artifact_paths.workspace_dir = Some(
-            temp.path()
-                .join("cache/workspaces/2026.04.28.082247+abcdef12"),
-        );
-
-        assert_eq!(
-            complete_pending_install_if_already_installed(&mut state, &paths)?,
-            PendingInstallRecovery::SupersededByInstalledVersion
-        );
-
-        assert_eq!(state.status, UpdateStatus::Installed);
-        assert_eq!(state.candidate_version, None);
-        assert_eq!(state.artifact_paths.package_path, None);
-        assert_eq!(state.artifact_paths.workspace_dir, None);
-        assert_eq!(state.error_message, None);
-        crate::rollback::record_current_package_as_known_good(&mut state);
-        assert_eq!(state.artifact_paths.rollback_package_path, None);
-        Ok(())
-    }
-
-    #[test]
-    fn matching_pending_install_recovery_records_installed_notification_event() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::ReadyToInstall;
-        state.installed_version = "2026.04.28.082247-abcdef12.fc43".to_string();
-        state.candidate_version = Some("2026.04.28.082247+abcdef12".to_string());
-
-        let recovery = complete_pending_install_if_already_installed(&mut state, &paths)?;
-        if recovery.should_notify_installed() {
-            maybe_notify_installed(&mut state, &paths, false)?;
-        }
-
-        assert_eq!(state.status, UpdateStatus::Installed);
-        assert_eq!(state.candidate_version, None);
-        assert!(state
-            .notified_events
-            .contains("installed:2026.04.28.082247-abcdef12.fc43"));
-        Ok(())
-    }
-
-    #[test]
-    fn superseded_pending_install_recovery_skips_installed_notification_event() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = test_paths(temp.path());
-        paths.ensure_dirs()?;
-
-        let package_path = temp.path().join("superseded.pkg.tar.zst");
-        std::fs::write(&package_path, b"package")?;
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::ReadyToInstall;
-        state.installed_version = "2026.06.24.051729-1".to_string();
-        state.candidate_version = Some("2026.06.24.050316+4bb552bf".to_string());
-        state.artifact_paths.package_path = Some(package_path);
-        state
-            .notified_events
-            .insert("ready_to_install:2026.06.24.050316+4bb552bf".to_string());
-
-        let recovery = complete_pending_install_if_already_installed(&mut state, &paths)?;
-        if recovery.should_notify_installed() {
-            maybe_notify_installed(&mut state, &paths, false)?;
-        }
-
-        assert_eq!(state.status, UpdateStatus::Installed);
-        assert_eq!(state.candidate_version, None);
-        assert!(!state
-            .notified_events
-            .iter()
-            .any(|event| event.starts_with("installed:")));
-        Ok(())
-    }
-
-    #[test]
-    fn status_clears_superseded_ready_update() -> Result<()> {
+    fn non_authentication_install_failure_preserves_recovery_transaction() -> Result<()> {
         let _env_guard = crate::test_util::env_lock();
+        let _restore_env = crate::test_util::EnvRestoreGuard::capture(&[
+            "CODEX_UPDATE_MANAGER_TEST_PKEXEC_PATH",
+            "CODEX_UPDATE_MANAGER_TEST_PKEXEC_COUNT",
+            "CODEX_UPDATE_MANAGER_TEST_PKEXEC_EXIT",
+        ]);
+        let runtime = tokio::runtime::Runtime::new()?;
         let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
+        let paths = fixture_paths(temp.path());
         paths.ensure_dirs()?;
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::ReadyToInstall;
-        state.installed_version = "2026.05.01.010203".to_string();
-        state.candidate_version = Some("2026.04.28.082247+abcdef12".to_string());
-        let superseded_package_path = temp.path().join("superseded-status.deb");
-        std::fs::write(&superseded_package_path, b"deb")?;
-        state.artifact_paths.package_path = Some(superseded_package_path);
-        state.artifact_paths.workspace_dir = Some(
-            temp.path()
-                .join("cache/workspaces/2026.04.28.082247+abcdef12"),
+        let package = temp.path().join("codex-desktop.deb");
+        fs::write(&package, b"package")?;
+        env::set_var(
+            "CODEX_UPDATE_MANAGER_TEST_PKEXEC_PATH",
+            write_fake_pkexec(temp.path())?,
         );
-        state.save(&paths.state_file)?;
+        env::set_var(
+            "CODEX_UPDATE_MANAGER_TEST_PKEXEC_COUNT",
+            temp.path().join("pkexec-count"),
+        );
+        env::set_var("CODEX_UPDATE_MANAGER_TEST_PKEXEC_EXIT", "1");
 
-        let original_home = std::env::var_os("HOME");
-        let original_path = std::env::var_os("PATH");
-        let original_nvm_dir = std::env::var_os("NVM_DIR");
-        let original_codex_cli_path = std::env::var_os("CODEX_CLI_PATH");
-        let original_skip_system_cli_lookup =
-            std::env::var_os("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP");
-        std::env::set_var("HOME", temp.path());
-        std::env::set_var("PATH", temp.path().join("missing-bin"));
-        std::env::remove_var("NVM_DIR");
-        std::env::remove_var("CODEX_CLI_PATH");
-        std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
+        let mut config = RuntimeConfig::default_with_paths(&paths);
+        config.notifications = false;
+        config.app_executable_path = temp.path().join("not-running");
+        let mut state = ready_state(package);
 
-        let config = test_config(temp.path());
-        let result = run_status(&config, &mut state, &paths, true);
-
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        if let Some(path) = original_path {
-            std::env::set_var("PATH", path);
-        } else {
-            std::env::remove_var("PATH");
-        }
-        if let Some(nvm_dir) = original_nvm_dir {
-            std::env::set_var("NVM_DIR", nvm_dir);
-        } else {
-            std::env::remove_var("NVM_DIR");
-        }
-        if let Some(cli_path) = original_codex_cli_path {
-            std::env::set_var("CODEX_CLI_PATH", cli_path);
-        } else {
-            std::env::remove_var("CODEX_CLI_PATH");
-        }
-        if let Some(value) = original_skip_system_cli_lookup {
-            std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", value);
-        } else {
-            std::env::remove_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP");
-        }
-
-        result?;
-
-        assert_eq!(state.status, UpdateStatus::Installed);
-        assert_eq!(state.candidate_version, None);
-        assert_eq!(state.artifact_paths.package_path, None);
-        assert_eq!(state.artifact_paths.workspace_dir, None);
+        runtime
+            .block_on(install_ready_with_launcher(
+                &config,
+                &mut state,
+                &paths,
+                true,
+                false,
+                Path::new("/bin/sh"),
+            ))
+            .expect_err("ordinary post-gate install failure should remain recoverable");
+        assert_eq!(state.status, UpdateStatus::Installing);
+        assert!(state.install_transaction.is_some());
+        assert!(!state.install_auth_retry_is_blocked());
+        assert!(!state.install_after_app_exit_requested);
         Ok(())
     }
 
     #[test]
-    fn status_preserves_cli_reconciliation_failure() -> Result<()> {
-        let _env_guard = crate::test_util::env_lock();
+    fn failed_check_preserves_pending_auth_retry_state() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
+        let paths = fixture_paths(temp.path());
         paths.ensure_dirs()?;
+        let package = temp.path().join("codex-desktop.deb");
+        fs::write(&package, b"package")?;
 
-        let bin_dir = temp.path().join("bin");
-        fs::create_dir_all(&bin_dir)?;
-        fs::set_permissions(&bin_dir, fs::Permissions::from_mode(0o755))?;
-        let codex_path = bin_dir.join("codex");
-        fs::write(
-            &codex_path,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ] || [ \"$1\" = \"version\" ]; then\n  echo 'codex-cli v0.42.0'\n  exit 0\nfi\nexit 1\n",
-        )?;
-        let mut permissions = fs::metadata(&codex_path)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&codex_path, permissions)?;
+        let mut previous = ready_state(package);
+        previous.error_message = Some("authentication was not obtained".into());
+        previous.block_install_auth_retry();
+        let mut checking = previous.clone();
+        checking.status = UpdateStatus::CheckingUpstream;
+        checking.last_check_at = Some(Utc::now());
 
-        let npm_path = bin_dir.join("npm");
-        fs::write(
-            &npm_path,
-            "#!/bin/sh\nif [ \"$1\" = \"view\" ] && [ \"$2\" = \"@openai/codex\" ] && [ \"$3\" = \"version\" ]; then\n  echo '0.42.1'\n  exit 0\nfi\nexit 1\n",
-        )?;
-        let mut permissions = fs::metadata(&npm_path)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&npm_path, permissions)?;
-        let node_path = bin_dir.join("node");
-        fs::write(&node_path, "#!/bin/sh\nexec /bin/sh \"$@\"\n")?;
-        fs::set_permissions(node_path, fs::Permissions::from_mode(0o755))?;
+        fail_check::<()>(
+            &RuntimeConfig::default_with_paths(&paths),
+            &mut checking,
+            &paths,
+            previous,
+            anyhow::anyhow!("temporary repository failure"),
+        )
+        .expect_err("the check error should still be reported");
 
-        let original_home = std::env::var_os("HOME");
-        let original_path = std::env::var_os("PATH");
-        let original_nvm_dir = std::env::var_os("NVM_DIR");
-        let original_codex_cli_path = std::env::var_os("CODEX_CLI_PATH");
-        let original_skip_system_cli_lookup =
-            std::env::var_os("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP");
-        std::env::set_var("HOME", temp.path());
-        std::env::set_var("PATH", std::env::join_paths([bin_dir])?);
-        std::env::remove_var("NVM_DIR");
-        std::env::remove_var("CODEX_CLI_PATH");
-        std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
-
-        let config = test_config(temp.path());
-        let mut state = PersistedState::new(true);
-        state.cli_path = Some(codex_path);
-        let result = run_status(&config, &mut state, &paths, true);
-
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        if let Some(path) = original_path {
-            std::env::set_var("PATH", path);
-        } else {
-            std::env::remove_var("PATH");
-        }
-        if let Some(nvm_dir) = original_nvm_dir {
-            std::env::set_var("NVM_DIR", nvm_dir);
-        } else {
-            std::env::remove_var("NVM_DIR");
-        }
-        if let Some(cli_path) = original_codex_cli_path {
-            std::env::set_var("CODEX_CLI_PATH", cli_path);
-        } else {
-            std::env::remove_var("CODEX_CLI_PATH");
-        }
-        if let Some(value) = original_skip_system_cli_lookup {
-            std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", value);
-        } else {
-            std::env::remove_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP");
-        }
-
-        assert!(result.is_err());
-        assert_eq!(state.cli_status, CliStatus::Failed);
-        assert!(state
-            .cli_error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("npm")));
-        Ok(())
-    }
-
-    #[test]
-    fn status_json_keeps_legacy_cli_latest_version_alias() -> Result<()> {
-        let mut state = PersistedState::new(true);
-        state.cli_official_latest_version = Some("0.42.1".to_string());
-        state.cli_package_manager_latest_version = Some("0.42.0-1".to_string());
-
-        let value = status_json_value(&state)?;
-
-        assert_eq!(value["cli_latest_version"], "0.42.1");
-        assert_eq!(value["cli_official_latest_version"], "0.42.1");
-        assert_eq!(value["cli_package_manager_latest_version"], "0.42.0-1");
-        Ok(())
-    }
-
-    #[test]
-    fn generated_versions_compare_by_timestamp_segments() {
+        assert_eq!(checking.status, UpdateStatus::ReadyToInstall);
+        assert!(checking.install_auth_retry_is_blocked());
         assert_eq!(
-            compare_generated_versions("2026.04.01.035152", "2026.03.27.025604+1086e799"),
-            Some(std::cmp::Ordering::Greater)
+            checking.error_message.as_deref(),
+            Some("authentication was not obtained")
         );
+        assert!(checking.last_check_at.is_some());
+        let loaded = PersistedState::load_or_default(&paths.state_file, true)?;
+        assert!(loaded.install_auth_retry_is_blocked());
+        Ok(())
     }
 
     #[test]
-    fn generated_versions_ignore_package_release_suffixes() {
-        assert_eq!(
-            compare_generated_versions(
-                "2026.04.25.054929-90dd7716x11.fc43",
-                "2026.04.25.054929+90dd7716",
-            ),
-            Some(std::cmp::Ordering::Equal)
-        );
-    }
-
-    #[test]
-    fn generated_version_comparison_rejects_non_generated_versions() {
-        assert_eq!(compare_generated_versions("0.34.1", "0.35.0"), None);
-    }
-
-    #[test]
-    fn rollback_blocks_same_dmg_hash_at_a_different_timestamp() {
-        let mut state = PersistedState::new(true);
-        state.rollback_blocked_candidate_version = Some("2026.05.04.131500+badcafe0".to_string());
-        state.rollback_blocked_dmg_sha256 = Some("same-full-sha256".to_string());
-
-        assert!(rollback_blocks_candidate(
-            &state,
-            "same-full-sha256",
-            "2026.05.05.090000+badcafe0"
-        ));
-    }
-
-    #[test]
-    fn rollback_hash_mismatch_is_not_overridden_by_legacy_version_match() {
-        let mut state = PersistedState::new(true);
-        state.rollback_blocked_candidate_version = Some("2026.05.04.131500".to_string());
-        state.rollback_blocked_dmg_sha256 = Some("rolled-back-sha256".to_string());
-
-        assert!(!rollback_blocks_candidate(
-            &state,
-            "different-sha256",
-            "2026.05.04.131500+different"
-        ));
-    }
-
-    #[test]
-    fn rollback_legacy_version_fallback_applies_only_without_recorded_hash() {
-        let mut state = PersistedState::new(true);
-        state.rollback_blocked_candidate_version = Some("2026.05.04.131500".to_string());
-
-        assert!(rollback_blocks_candidate(
-            &state,
-            "unrecorded-sha256",
-            "2026.05.04.131500+newhash00"
-        ));
-    }
-
-    #[test]
-    fn successful_install_clears_both_rollback_block_identifiers() {
-        let mut state = PersistedState::new(true);
-        state.rollback_blocked_candidate_version = Some("2026.05.04.131500".to_string());
-        state.rollback_blocked_dmg_sha256 = Some("rolled-back-sha256".to_string());
-
-        clear_rollback_blocked_candidate(&mut state);
-
-        assert_eq!(state.rollback_blocked_candidate_version, None);
-        assert_eq!(state.rollback_blocked_dmg_sha256, None);
-    }
-
-    #[tokio::test]
-    async fn interrupted_install_becomes_installed_when_candidate_is_already_present() -> Result<()>
-    {
+    fn failure_transition_notifies_once_per_candidate() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
+        let paths = fixture_paths(temp.path());
         paths.ensure_dirs()?;
+        let mut config = RuntimeConfig::default_with_paths(&paths);
+        config.notifications = true;
+        let mut notifications = Vec::new();
 
-        let package_path = temp.path().join("dist/codex.deb");
-        std::fs::create_dir_all(
-            package_path
-                .parent()
-                .expect("package path should have parent"),
-        )?;
-        std::fs::write(&package_path, b"deb")?;
+        let previous = PersistedState::new(true);
+        let mut checking = previous.clone();
+        checking.status = UpdateStatus::DownloadingPackage;
+        checking.candidate_version = Some("2026.09.18.2691531945".into());
+        checking.upstream_package_sha256 = Some("first-sha".into());
+        fail_update_with::<()>(
+            &config,
+            &mut checking,
+            &paths,
+            &previous,
+            anyhow::anyhow!("build failed"),
+            |_, body| notifications.push(body.to_owned()),
+        )
+        .expect_err("build failure should be reported");
+        assert_eq!(checking.status, UpdateStatus::Failed);
+        assert_eq!(
+            PersistedState::load_or_default(&paths.state_file, true)?.status,
+            UpdateStatus::Failed
+        );
+        assert_eq!(notifications.len(), 1);
+        assert!(notifications[0].contains("build failed"));
+
+        let failed = checking.clone();
+        fail_update_with::<()>(
+            &config,
+            &mut checking,
+            &paths,
+            &failed,
+            anyhow::anyhow!("build failed again"),
+            |_, body| notifications.push(body.to_owned()),
+        )
+        .expect_err("repeat failure should be reported");
+        assert_eq!(notifications.len(), 1, "same candidate stays silent");
+
+        let previous = checking.clone();
+        checking.status = UpdateStatus::DownloadingPackage;
+        checking.candidate_version = Some("2026.09.20.100000".into());
+        checking.upstream_package_sha256 = Some("second-sha".into());
+        fail_update_with::<()>(
+            &config,
+            &mut checking,
+            &paths,
+            &previous,
+            anyhow::anyhow!("new candidate failed"),
+            |_, body| notifications.push(body.to_owned()),
+        )
+        .expect_err("new candidate failure should be reported");
+        assert_eq!(notifications.len(), 2);
+        assert!(notifications[1].contains("2026.09.20.100000"));
+
+        let mut recovered = checking.clone();
+        recovered.status = UpdateStatus::Idle;
+        fail_update_with::<()>(
+            &config,
+            &mut checking,
+            &paths,
+            &recovered,
+            anyhow::anyhow!("failure after recovery"),
+            |_, body| notifications.push(body.to_owned()),
+        )
+        .expect_err("failure after recovery should be reported");
+        assert_eq!(notifications.len(), 3);
+
+        config.notifications = false;
+        fail_update_with::<()>(
+            &config,
+            &mut checking,
+            &paths,
+            &recovered,
+            anyhow::anyhow!("notifications disabled"),
+            |_, body| notifications.push(body.to_owned()),
+        )
+        .expect_err("failure should be reported even with notifications disabled");
+        assert_eq!(notifications.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn interrupted_check_keeps_auth_retry_suppressed() {
+        let mut state = ready_state(Path::new("/tmp/codex-desktop.deb").to_path_buf());
+        state.block_install_auth_retry();
+        state.status = UpdateStatus::CheckingUpstream;
+        state.error_message = None;
+
+        recover_interrupted_check(&mut state);
+        let previous_status = state.status.clone();
+        mark_check_started(&mut state);
+
+        assert_eq!(previous_status, UpdateStatus::ReadyToInstall);
+        assert!(same_pending_candidate(
+            &state,
+            "2026.09.10.120000",
+            "candidate-sha256"
+        ));
+        assert_eq!(state.status, UpdateStatus::ReadyToInstall);
+        assert!(state.install_auth_retry_is_blocked());
+        assert!(state.last_check_at.is_some());
+    }
+
+    #[test]
+    fn live_install_transaction_blocks_mutation_without_replacement_detection() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths = fixture_paths(dir.path());
+        paths.ensure_dirs()?;
+        let config = RuntimeConfig::default_with_paths(&paths);
+        let current = crate::install_transaction::test_current_process_identity()?;
 
         let mut state = PersistedState::new(true);
         state.status = UpdateStatus::Installing;
-        state.installed_version = "2026.04.01.035152".to_string();
-        state.candidate_version = Some("2026.03.27.025604+1086e799".to_string());
-        state.rollback_blocked_candidate_version = Some("2026.03.20.120000".to_string());
-        state.rollback_blocked_dmg_sha256 = Some("rolled-back-dmg-sha256".to_string());
-        state.artifact_paths.package_path = Some(package_path);
-        state.artifact_paths.workspace_dir = Some(
-            temp.path()
-                .join("cache/workspaces/2026.03.27.025604+1086e799"),
-        );
+        state.install_transaction = Some(InstallTransaction {
+            package_path: dir.path().join("candidate.deb"),
+            package_sha256: Some("fixture".into()),
+            package_command: Some(current),
+            started_at: Utc::now(),
+            operation: InstallOperation::Update,
+        });
+        state.save_updater(&paths.state_file)?;
 
-        recover_interrupted_install(&mut state, &paths)?;
-
-        assert_eq!(state.status, UpdateStatus::Installed);
-        assert_eq!(state.candidate_version, None);
-        assert_eq!(state.rollback_blocked_candidate_version, None);
-        assert_eq!(state.rollback_blocked_dmg_sha256, None);
-        assert_eq!(state.artifact_paths.package_path, None);
-        assert_eq!(state.artifact_paths.workspace_dir, None);
-        assert_eq!(state.error_message, None);
+        assert!(!prepare_mutation_state(&config, &mut state, &paths)?);
+        assert_eq!(state.status, UpdateStatus::Installing);
+        assert!(state.install_transaction.is_some());
         Ok(())
     }
 
-    #[tokio::test]
-    async fn interrupted_install_returns_to_ready_when_package_still_exists() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
+    #[test]
+    fn legacy_install_owner_migrates_to_manual_recovery() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths = fixture_paths(dir.path());
         paths.ensure_dirs()?;
-
-        let package_path = temp.path().join("dist/codex.deb");
-        std::fs::create_dir_all(
-            package_path
-                .parent()
-                .expect("package path should have parent"),
-        )?;
-        std::fs::write(&package_path, b"deb")?;
+        let config = RuntimeConfig::default_with_paths(&paths);
+        let current = install_transaction::test_current_process_identity()?;
 
         let mut state = PersistedState::new(true);
+        state.schema_version = 2;
         state.status = UpdateStatus::Installing;
-        state.installed_version = "2026.03.24.120000".to_string();
-        state.candidate_version = Some("2026.03.27.025604+1086e799".to_string());
-        state.artifact_paths.package_path = Some(package_path);
+        state.install_transaction = Some(InstallTransaction {
+            package_path: dir.path().join("candidate.deb"),
+            package_sha256: Some("fixture".into()),
+            package_command: Some(ProcessIdentity {
+                pid: current.pid,
+                start_time_ticks: current.start_time_ticks,
+                // This models a persisted owner from before boot identity was
+                // available, which cannot be classified safely now.
+                boot_id: None,
+            }),
+            started_at: Utc::now()
+                - chrono::Duration::seconds(
+                    install_transaction::ABANDONED_INSTALL_GRACE.as_secs() as i64 + 1,
+                ),
+            operation: InstallOperation::Update,
+        });
+        state.save_updater(&paths.state_file)?;
 
-        recover_interrupted_install(&mut state, &paths)?;
-
-        assert_eq!(state.status, UpdateStatus::ReadyToInstall);
+        assert!(!prepare_mutation_state(&config, &mut state, &paths)?);
+        assert_eq!(state.schema_version, 4);
+        assert_eq!(state.status, UpdateStatus::Failed);
+        assert!(state.manual_recovery_required);
+        assert!(state.install_transaction.is_none());
         assert!(state
             .error_message
             .as_deref()
-            .is_some_and(|message| message.contains("interrupted")));
+            .is_some_and(|message| message.contains("reboot-safe process identity")));
+
+        assert!(prepare_explicit_mutation_state(
+            &config, &mut state, &paths
+        )?);
+        assert!(state.manual_recovery_required);
         Ok(())
     }
 
     #[test]
-    fn notification_events_are_deduplicated() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
+    fn unknown_install_owner_becomes_manual_after_recovery_grace() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths = fixture_paths(dir.path());
         paths.ensure_dirs()?;
-
+        let config = RuntimeConfig::default_with_paths(&paths);
+        let current = install_transaction::test_current_process_identity()?;
         let mut state = PersistedState::new(true);
-        state.candidate_version = Some("2026.03.24+abcd1234".to_string());
-        maybe_notify(
-            &mut state,
-            &paths,
-            false,
-            "ready_to_install",
-            "ChatGPT Desktop update ready",
-            "An update is ready to install.",
-        )?;
-        let notified_count = state.notified_events.len();
-        maybe_notify(
-            &mut state,
-            &paths,
-            false,
-            "ready_to_install",
-            "ChatGPT Desktop update ready",
-            "An update is ready to install.",
-        )?;
+        state.status = UpdateStatus::Installing;
+        state.install_transaction = Some(InstallTransaction {
+            package_path: dir.path().join("candidate.deb"),
+            package_sha256: Some("fixture".into()),
+            package_command: Some(ProcessIdentity {
+                // This value cannot be represented by pid_t on Linux. The
+                // resulting classification is deliberately Unknown, rather
+                // than treating an unreadable owner as definitely exited.
+                pid: u32::MAX,
+                start_time_ticks: current.start_time_ticks,
+                boot_id: current.boot_id,
+            }),
+            started_at: Utc::now()
+                - chrono::Duration::seconds(
+                    install_transaction::ABANDONED_INSTALL_GRACE.as_secs() as i64 + 1,
+                ),
+            operation: InstallOperation::Update,
+        });
+        state.save_updater(&paths.state_file)?;
 
-        assert_eq!(state.notified_events.len(), notified_count);
-        Ok(())
-    }
-
-    #[test]
-    fn installed_notifications_are_deduplicated_after_recovery() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
-        paths.ensure_dirs()?;
-
-        let mut state = PersistedState::new(true);
-        state.status = UpdateStatus::Installed;
-        state.installed_version = "2026.04.16.120000".to_string();
-
-        maybe_notify_installed(&mut state, &paths, false)?;
-        let notified_count = state.notified_events.len();
-        maybe_notify_installed(&mut state, &paths, false)?;
-
-        assert_eq!(state.notified_events.len(), notified_count);
+        assert!(!prepare_mutation_state(&config, &mut state, &paths)?);
+        assert_eq!(state.status, UpdateStatus::Failed);
+        assert!(state.manual_recovery_required);
+        assert!(state.install_transaction.is_none());
         assert!(state
-            .notified_events
-            .contains("installed:2026.04.16.120000"));
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("could not be classified safely")));
         Ok(())
     }
 
     #[test]
-    fn cli_missing_notifications_are_deduplicated() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
+    fn ownerless_installing_state_converges_to_failed_without_replacement_detection() -> Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+        let paths = fixture_paths(dir.path());
         paths.ensure_dirs()?;
+        let config = RuntimeConfig::default_with_paths(&paths);
+        let mut state = PersistedState::new(true);
+        state.status = UpdateStatus::Installing;
+        state.install_transaction = None;
+        state.save_updater(&paths.state_file)?;
+
+        assert!(prepare_mutation_state(&config, &mut state, &paths)?);
+        assert_eq!(state.status, UpdateStatus::Failed);
+        assert!(state.install_transaction.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn abandoned_rpm_install_reconciles_after_verified_payload() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths = fixture_paths(dir.path());
+        paths.ensure_dirs()?;
+        let package = dir.path().join("codex-desktop.rpm");
+        fs::write(&package, b"rpm fixture")?;
+        let fake_rpm = write_fake_rpm_recovery_command(dir.path(), true)?;
+        let _package_manager_paths = install::test_program_path_overrides(Some(&fake_rpm), None);
+
+        let config = RuntimeConfig::default_with_paths(&paths);
+        let mut state = abandoned_state(package, "2026.09.05-1.fc42")?;
+        state.save_updater(&paths.state_file)?;
+
+        assert!(prepare_mutation_state(&config, &mut state, &paths)?);
+        assert_eq!(state.status, UpdateStatus::Installed);
+        assert_eq!(state.installed_version, "2026.09.06-1.fc42");
+        assert!(state.install_transaction.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn abandoned_rpm_install_rejects_unverified_payload() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths = fixture_paths(dir.path());
+        paths.ensure_dirs()?;
+        let package = dir.path().join("codex-desktop.rpm");
+        fs::write(&package, b"rpm fixture")?;
+        let fake_rpm = write_fake_rpm_recovery_command(dir.path(), false)?;
+        let _package_manager_paths = install::test_program_path_overrides(Some(&fake_rpm), None);
+
+        let config = RuntimeConfig::default_with_paths(&paths);
+        let mut state = abandoned_state(package, "2026.09.05-1.fc42")?;
+        state.save_updater(&paths.state_file)?;
+
+        assert!(prepare_mutation_state(&config, &mut state, &paths)?);
+        assert_eq!(state.status, UpdateStatus::Failed);
+        assert!(state.install_transaction.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn abandoned_pacman_install_reconciles_after_verified_payload() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths = fixture_paths(dir.path());
+        paths.ensure_dirs()?;
+        let package = dir
+            .path()
+            .join("codex-desktop-2026.09.06-1-x86_64.pkg.tar.zst");
+        fs::write(&package, b"pacman fixture")?;
+        let fake_pacman = write_fake_pacman_recovery_command(dir.path(), true)?;
+        let _package_manager_paths = install::test_program_path_overrides(None, Some(&fake_pacman));
+
+        let config = RuntimeConfig::default_with_paths(&paths);
+        let mut state = abandoned_state(package, "2026.09.05-1")?;
+        state.save_updater(&paths.state_file)?;
+
+        assert!(prepare_mutation_state(&config, &mut state, &paths)?);
+        assert_eq!(state.status, UpdateStatus::Installed);
+        assert_eq!(state.installed_version, "2026.09.06-1");
+        assert!(state.install_transaction.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn abandoned_pacman_install_rejects_unverified_payload() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths = fixture_paths(dir.path());
+        paths.ensure_dirs()?;
+        let package = dir
+            .path()
+            .join("codex-desktop-2026.09.06-1-x86_64.pkg.tar.zst");
+        fs::write(&package, b"pacman fixture")?;
+        let fake_pacman = write_fake_pacman_recovery_command(dir.path(), false)?;
+        let _package_manager_paths = install::test_program_path_overrides(None, Some(&fake_pacman));
+
+        let config = RuntimeConfig::default_with_paths(&paths);
+        let mut state = abandoned_state(package, "2026.09.05-1")?;
+        state.save_updater(&paths.state_file)?;
+
+        assert!(prepare_mutation_state(&config, &mut state, &paths)?);
+        assert_eq!(state.status, UpdateStatus::Failed);
+        assert!(state.install_transaction.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_prelaunch_install_does_not_leave_daemon_blocked_in_installing() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths = fixture_paths(dir.path());
+        paths.ensure_dirs()?;
+        let mut config = RuntimeConfig::default_with_paths(&paths);
+        config.app_executable_path = dir.path().join("app-not-running");
+
+        let package = dir.path().join("candidate.deb");
+        fs::write(&package, b"fixture package")?;
 
         let mut state = PersistedState::new(true);
-        state.cli_status = CliStatus::NotInstalled;
-        state.cli_error_message = Some(
-            "Codex CLI is required but not currently installed. Open the app to retry the automatic install flow, or install it manually with npm.".to_string(),
+        state.status = UpdateStatus::ReadyToInstall;
+        state.candidate_version = Some("fixture".into());
+        state.upstream_package_sha256 = Some("fixture-sha256".into());
+        state.artifact_paths.package_path = Some(package);
+        state.artifact_paths.package_candidate_sha256 = state.upstream_package_sha256.clone();
+        state.save_updater(&paths.state_file)?;
+
+        let missing_launcher = dir.path().join("missing-gated-launcher");
+        let result = install_ready_with_launcher(
+            &config,
+            &mut state,
+            &paths,
+            true,
+            false,
+            &missing_launcher,
+        )
+        .await;
+
+        assert!(result.is_err(), "forced gated-launcher spawn must fail");
+
+        let persisted =
+            PersistedState::load_or_default(&paths.state_file, config.auto_install_on_app_exit)?;
+        assert_eq!(persisted.status, UpdateStatus::Failed);
+        assert!(
+            persisted.install_transaction.is_none(),
+            "pre-launch failure must clear durable install ownership"
         );
 
-        maybe_notify_cli_missing(&mut state, &paths, false)?;
-        let notified_count = state.notified_events.len();
-        maybe_notify_cli_missing(&mut state, &paths, false)?;
+        let mut daemon_state = persisted;
+        assert!(
+            prepare_mutation_state(&config, &mut daemon_state, &paths)?,
+            "a still-running daemon must not remain blocked after a pre-launch failure"
+        );
+        assert_ne!(daemon_state.status, UpdateStatus::Installing);
+        Ok(())
+    }
 
-        assert_eq!(state.notified_events.len(), notified_count);
-        assert!(state.notified_events.contains("cli_missing"));
+    #[tokio::test]
+    async fn nonzero_exit_after_gate_release_preserves_install_recovery_evidence() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths = fixture_paths(dir.path());
+        paths.ensure_dirs()?;
+        let mut config = RuntimeConfig::default_with_paths(&paths);
+        config.app_executable_path = dir.path().join("app-not-running");
+
+        let package = dir.path().join("candidate.deb");
+        fs::write(&package, b"fixture package")?;
+
+        let launcher = dir.path().join("released-then-fails");
+        fs::write(
+            &launcher,
+            "#!/bin/sh\nIFS= read -r state || exit 125\n[ \"$state\" = go ] || exit 125\nexit 42\n",
+        )?;
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755))?;
+
+        let mut state = PersistedState::new(true);
+        state.status = UpdateStatus::ReadyToInstall;
+        state.candidate_version = Some("fixture".into());
+        state.upstream_package_sha256 = Some("fixture-sha256".into());
+        state.artifact_paths.package_path = Some(package);
+        state.artifact_paths.package_candidate_sha256 = state.upstream_package_sha256.clone();
+        state.save_updater(&paths.state_file)?;
+
+        let result =
+            install_ready_with_launcher(&config, &mut state, &paths, true, false, &launcher).await;
+
+        assert!(
+            result.is_err(),
+            "forced post-release command failure must surface"
+        );
+        let persisted =
+            PersistedState::load_or_default(&paths.state_file, config.auto_install_on_app_exit)?;
+        assert_eq!(
+            persisted.status,
+            UpdateStatus::Installing,
+            "once the gate is released, a nonzero package-command exit cannot prove that mutation did not occur"
+        );
+        assert!(
+            persisted.install_transaction.is_some(),
+            "post-release failure must preserve durable recovery evidence"
+        );
         Ok(())
     }
 
     #[test]
-    fn cli_missing_notification_marker_is_cleared_after_recovery() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let paths = RuntimePaths {
-            config_file: temp.path().join("config/config.toml"),
-            state_file: temp.path().join("state/state.json"),
-            log_file: temp.path().join("state/service.log"),
-            cache_dir: temp.path().join("cache"),
-            state_dir: temp.path().join("state"),
-            config_dir: temp.path().join("config"),
-        };
+    fn abandoned_install_state_is_reconciled_without_replacement_detection() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths = fixture_paths(dir.path());
         paths.ensure_dirs()?;
-
+        let config = RuntimeConfig::default_with_paths(&paths);
         let mut state = PersistedState::new(true);
-        state.notified_events.insert("cli_missing".to_string());
-        state.cli_path = Some(temp.path().join("codex"));
-        state.cli_installed_version = Some("0.42.0".to_string());
-        state.cli_error_message = None;
+        state.status = UpdateStatus::Installing;
+        state.install_transaction = Some(InstallTransaction {
+            package_path: dir.path().join("missing.deb"),
+            package_sha256: Some("fixture".into()),
+            package_command: Some(stale_identity()),
+            started_at: Utc::now()
+                - chrono::Duration::seconds(
+                    install_transaction::ABANDONED_INSTALL_GRACE.as_secs() as i64 + 1,
+                ),
+            operation: InstallOperation::Update,
+        });
+        state.save_updater(&paths.state_file)?;
 
-        maybe_notify_cli_missing(&mut state, &paths, false)?;
-
-        assert!(!state.notified_events.contains("cli_missing"));
+        assert!(prepare_mutation_state(&config, &mut state, &paths)?);
+        assert_eq!(state.status, UpdateStatus::Failed);
+        assert!(state.install_transaction.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn reconciled_update_matches_successful_install_state_bookkeeping() {
+        let package = PathBuf::from("/tmp/candidate.deb");
+        let mut state = PersistedState::new(true);
+        state.status = UpdateStatus::Installing;
+        state.installed_version = "old-local".into();
+        state.candidate_version = Some("new-upstream".into());
+        state.candidate_architecture = Some("amd64".into());
+        state.candidate_repository_path = Some("pool/codex.deb".into());
+        state.upstream_package_sha256 = Some("new-sha".into());
+        state.artifact_paths.package_candidate_sha256 = Some("new-sha".into());
+        state.waiting_for_app_exit_auto_install = true;
+        let transaction = InstallTransaction {
+            package_path: package,
+            package_sha256: Some("fixture".into()),
+            package_command: Some(stale_identity()),
+            started_at: Utc::now(),
+            operation: InstallOperation::Update,
+        };
+        state.install_transaction = Some(transaction.clone());
+
+        apply_reconciled_install(&mut state, transaction, "new-local".into());
+
+        assert_eq!(state.status, UpdateStatus::Installed);
+        assert_eq!(state.install_transaction, None);
+        assert_eq!(state.installed_version, "new-local");
+        assert_eq!(
+            state.installed_upstream_version.as_deref(),
+            Some("new-upstream")
+        );
+        assert_eq!(state.installed_upstream_sha256.as_deref(), Some("new-sha"));
+        assert_eq!(state.last_known_good_version.as_deref(), Some("new-local"));
+        assert_eq!(state.candidate_version, None);
+        assert_eq!(state.candidate_architecture, None);
+        assert_eq!(state.candidate_repository_path, None);
+        assert!(!state.waiting_for_app_exit_auto_install);
+        assert_eq!(state.error_message, None);
+    }
+
+    #[test]
+    fn schema_three_install_recovery_does_not_invent_upstream_identity() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths = fixture_paths(dir.path());
+        paths.ensure_dirs()?;
+        let state_path = paths.state_file.clone();
+        let workspace = dir.path().join("workspaces/new-upstream");
+        let package = workspace.join("dist/legacy-candidate.deb");
+        fs::create_dir_all(package.parent().expect("package parent"))?;
+        fs::write(&package, b"legacy candidate")?;
+
+        let mut legacy = PersistedState::new(true);
+        legacy.schema_version = 3;
+        legacy.status = UpdateStatus::Installing;
+        legacy.installed_version = "old-local".into();
+        legacy.candidate_version = Some("new-upstream".into());
+        legacy.upstream_package_sha256 = Some("unproven-candidate-sha".into());
+        legacy.artifact_paths.package_path = Some(package.clone());
+        legacy.install_transaction = Some(InstallTransaction {
+            package_path: package.clone(),
+            package_sha256: Some("verified-package-sha".into()),
+            package_command: Some(stale_identity()),
+            started_at: Utc::now(),
+            operation: InstallOperation::Update,
+        });
+        let mut raw = serde_json::to_value(legacy)?;
+        raw.get_mut("artifact_paths")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("artifact paths object")
+            .remove("package_candidate_sha256");
+        fs::write(&state_path, serde_json::to_vec_pretty(&raw)?)?;
+
+        let mut loaded = PersistedState::load_or_default(&state_path, true)?;
+        let transaction = loaded
+            .install_transaction
+            .clone()
+            .expect("legacy installing transaction");
+        apply_reconciled_install(&mut loaded, transaction, "installed-local".into());
+
+        assert_eq!(loaded.status, UpdateStatus::Installed);
+        assert_eq!(loaded.installed_version, "installed-local");
+        assert_eq!(loaded.installed_upstream_version, None);
+        assert_eq!(loaded.installed_upstream_sha256, None);
+        assert_eq!(loaded.artifact_paths.package_candidate_sha256, None);
+        assert_eq!(loaded.candidate_version, None);
+        assert_eq!(
+            loaded.upstream_package_sha256.as_deref(),
+            Some("unproven-candidate-sha")
+        );
+
+        rollback::record_current_package_as_known_good(&mut loaded);
+        assert_eq!(
+            loaded.artifact_paths.rollback_package_path,
+            Some(package.clone())
+        );
+        rollback::preserve_before_workspace_cleanup(&mut loaded, &paths, &workspace)?;
+        let retained = loaded
+            .artifact_paths
+            .rollback_package_path
+            .clone()
+            .expect("retained rollback package");
+        fs::remove_dir_all(&workspace)?;
+        assert!(!package.exists());
+        assert!(retained.is_file());
+        assert_eq!(fs::read(&retained)?, b"legacy candidate");
+        Ok(())
+    }
+
+    #[test]
+    fn reconciled_rollback_matches_successful_rollback_bookkeeping() {
+        let package = PathBuf::from("/tmp/known-good.deb");
+        let mut state = PersistedState::new(true);
+        state.status = UpdateStatus::Installing;
+        state.installed_version = "bad-local".into();
+        state.installed_upstream_version = Some("bad-upstream".into());
+        state.installed_upstream_sha256 = Some("bad-installed-sha".into());
+        state.candidate_version = Some("bad-candidate".into());
+        state.upstream_package_sha256 = Some("bad-candidate-sha".into());
+        state.last_known_good_upstream_version = Some("good-upstream".into());
+        state.last_known_good_upstream_sha256 = Some("good-sha".into());
+        let transaction = InstallTransaction {
+            package_path: package.clone(),
+            package_sha256: Some("fixture".into()),
+            package_command: Some(stale_identity()),
+            started_at: Utc::now(),
+            operation: InstallOperation::Rollback,
+        };
+        state.install_transaction = Some(transaction.clone());
+
+        apply_reconciled_install(&mut state, transaction, "good-local".into());
+
+        assert_eq!(state.status, UpdateStatus::Installed);
+        assert_eq!(state.install_transaction, None);
+        assert_eq!(state.installed_version, "good-local");
+        assert_eq!(
+            state.installed_upstream_version.as_deref(),
+            Some("good-upstream")
+        );
+        assert_eq!(state.installed_upstream_sha256.as_deref(), Some("good-sha"));
+        assert_eq!(
+            state.rollback_blocked_candidate_version.as_deref(),
+            Some("bad-candidate")
+        );
+        assert_eq!(
+            state.rollback_blocked_package_sha256.as_deref(),
+            Some("bad-candidate-sha")
+        );
+        assert_eq!(state.artifact_paths.package_path.as_ref(), Some(&package));
+        assert_eq!(
+            state.artifact_paths.rollback_package_path.as_ref(),
+            Some(&package)
+        );
+        assert_eq!(state.last_known_good_version.as_deref(), Some("good-local"));
+        assert_eq!(state.candidate_version, None);
+        assert_eq!(state.error_message, None);
+    }
+
+    #[test]
+    fn installing_state_preserves_pre_transaction_installed_version_for_recovery() {
+        let mut state = PersistedState::new(true);
+        state.status = UpdateStatus::Installing;
+        state.installed_version = "pre-rollback-local".into();
+
+        if state.status != UpdateStatus::Installing {
+            state.installed_version = "post-rollback-local".into();
+        }
+
+        assert_eq!(state.installed_version, "pre-rollback-local");
+    }
+
+    fn stage_executable(source: &Path, destination: &Path) -> Result<()> {
+        let staging = destination.with_extension(format!(
+            "stage-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+
+        let mut input = File::open(source)
+            .with_context(|| format!("fixture: open source executable {}", source.display()))?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o755)
+            .open(&staging)
+            .with_context(|| format!("fixture: create staged executable {}", staging.display()))?;
+        io::copy(&mut input, &mut output)
+            .with_context(|| format!("fixture: copy executable to {}", staging.display()))?;
+        output
+            .sync_all()
+            .with_context(|| format!("fixture: sync staged executable {}", staging.display()))?;
+        drop(output);
+        drop(input);
+
+        fs::rename(&staging, destination).with_context(|| {
+            format!(
+                "fixture: publish staged executable {} -> {}",
+                staging.display(),
+                destination.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn install_ready_replacement_process_fixture() -> Result<()> {
+        let Some(mode) = env::var_os("CODEX_INSTALL_READY_FIXTURE_MODE") else {
+            return Ok(());
+        };
+        let root = PathBuf::from(
+            env::var_os("CODEX_INSTALL_READY_FIXTURE_ROOT").expect("fixture root path is required"),
+        );
+
+        match mode.to_string_lossy().as_ref() {
+            "install" => {
+                let paths = RuntimePaths {
+                    config_file: root.join("config/config.toml"),
+                    state_file: root.join("state/state.json"),
+                    log_file: root.join("state/service.log"),
+                    cache_dir: root.join("cache"),
+                    state_dir: root.join("state"),
+                    config_dir: root.join("config"),
+                };
+                paths.ensure_dirs()?;
+
+                let package = root.join("candidate.deb");
+                let mut config = RuntimeConfig::default_with_paths(&paths);
+                config.auto_install_on_app_exit = true;
+                config.notifications = false;
+                config.app_executable_path = root.join("missing-chatgpt");
+
+                let mut state = PersistedState::new(true);
+                state.status = UpdateStatus::ReadyToInstall;
+                state.candidate_version = Some("fixture-upstream".into());
+                state.upstream_package_sha256 = Some("fixture-sha256".into());
+                state.artifact_paths.package_path = Some(package);
+                state.artifact_paths.package_candidate_sha256 =
+                    state.upstream_package_sha256.clone();
+                state.save_updater(&paths.state_file)?;
+
+                install_ready(&config, &mut state, &paths, true, true).await?;
+            }
+            "report" => {
+                fs::write(
+                    root.join("new-exe"),
+                    env::current_exe()?.as_os_str().as_bytes(),
+                )?;
+            }
+            other => panic!("unknown install-ready fixture mode: {other}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn successful_self_replacement_restarts_on_new_binary_and_next_build_uses_it() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let source = env::current_exe()?;
+        let installed = temp.path().join("codex-update-manager");
+        let replacement = temp.path().join("codex-update-manager.new");
+        let package = temp.path().join("candidate.deb");
+        let fake_pkexec = temp.path().join("fake-pkexec");
+        let install_started = temp.path().join("install-started");
+        let install_release = temp.path().join("install-release");
+        let state_file = temp.path().join("state/state.json");
+
+        stage_executable(&source, &installed)?;
+        fs::write(&package, b"fixture package")?;
+        fs::write(
+            &fake_pkexec,
+            "#!/bin/sh\nset -eu\n: > \"$CODEX_TEST_INSTALL_STARTED\"\nwhile [ ! -e \"$CODEX_TEST_INSTALL_RELEASE\" ]; do sleep 0.01; done\nexit 0\n",
+        )?;
+        fs::set_permissions(&fake_pkexec, fs::Permissions::from_mode(0o755))?;
+
+        let mut old = Command::new(&installed)
+            .args([
+                "app::replacement_tests::install_ready_replacement_process_fixture",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("CODEX_INSTALL_READY_FIXTURE_MODE", "install")
+            .env("CODEX_INSTALL_READY_FIXTURE_ROOT", temp.path())
+            .env("CODEX_UPDATE_MANAGER_TEST_PKEXEC_PATH", &fake_pkexec)
+            .env("CODEX_TEST_INSTALL_STARTED", &install_started)
+            .env("CODEX_TEST_INSTALL_RELEASE", &install_release)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("fixture: spawn installed updater")?;
+
+        for _ in 0..500 {
+            if install_started.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            install_started.exists(),
+            "production install_ready fixture did not launch its package command"
+        );
+
+        let installing = PersistedState::load_or_default(&state_file, true)?;
+        assert_eq!(installing.status, UpdateStatus::Installing);
+        assert!(
+            installing
+                .install_transaction
+                .as_ref()
+                .and_then(|transaction| transaction.package_command.as_ref())
+                .is_some(),
+            "install_ready must durably publish the package-command owner"
+        );
+
+        stage_executable(&source, &replacement)?;
+        fs::rename(&replacement, &installed)
+            .context("fixture: rename replacement over installed")?;
+        fs::write(&install_release, b"go")?;
+
+        assert_eq!(
+            old.wait()?.code(),
+            Some(restart::REPLACEMENT_RESTART_EXIT_CODE),
+            "install_ready must persist Installed, read it back, then exit for replacement"
+        );
+
+        let installed_state = PersistedState::load_or_default(&state_file, true)?;
+        assert_eq!(installed_state.status, UpdateStatus::Installed);
+        assert_eq!(installed_state.install_transaction, None);
+        assert_eq!(
+            installed_state.installed_upstream_version.as_deref(),
+            Some("fixture-upstream")
+        );
+        assert_eq!(
+            installed_state.installed_upstream_sha256.as_deref(),
+            Some("fixture-sha256")
+        );
+
+        let restarted = Command::new(&installed)
+            .args([
+                "app::replacement_tests::install_ready_replacement_process_fixture",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("CODEX_INSTALL_READY_FIXTURE_MODE", "report")
+            .env("CODEX_INSTALL_READY_FIXTURE_ROOT", temp.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("fixture: spawn replacement updater")?;
+        assert!(restarted.success(), "replacement updater failed to start");
+
+        let restarted_exe =
+            PathBuf::from(OsStr::from_bytes(&fs::read(temp.path().join("new-exe"))?));
+        assert_eq!(restarted_exe, installed);
+        assert_eq!(
+            install::resolve_updater_binary_for_build(&restarted_exe),
+            installed,
+            "the next rebuild must source the live replacement updater"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn self_replacement_requires_installed_state_readback_before_exit() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let source = env::current_exe()?;
+        let installed = temp.path().join("codex-update-manager");
+        let replacement = temp.path().join("codex-update-manager.new");
+        let package = temp.path().join("candidate.deb");
+        let fake_pkexec = temp.path().join("fake-pkexec");
+        let install_started = temp.path().join("install-started");
+        let install_release = temp.path().join("install-release");
+        let before_readback = temp.path().join("before-readback");
+        let release_readback = temp.path().join("release-readback");
+        let state_file = temp.path().join("state/state.json");
+
+        stage_executable(&source, &installed)?;
+        fs::write(&package, b"fixture package")?;
+        fs::write(
+            &fake_pkexec,
+            "#!/bin/sh\nset -eu\n: > \"$CODEX_TEST_INSTALL_STARTED\"\nwhile [ ! -e \"$CODEX_TEST_INSTALL_RELEASE\" ]; do sleep 0.01; done\nexit 0\n",
+        )?;
+        fs::set_permissions(&fake_pkexec, fs::Permissions::from_mode(0o755))?;
+
+        let mut old = Command::new(&installed)
+            .args([
+                "app::replacement_tests::install_ready_replacement_process_fixture",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("CODEX_INSTALL_READY_FIXTURE_MODE", "install")
+            .env("CODEX_INSTALL_READY_FIXTURE_ROOT", temp.path())
+            .env("CODEX_UPDATE_MANAGER_TEST_PKEXEC_PATH", &fake_pkexec)
+            .env("CODEX_TEST_INSTALL_STARTED", &install_started)
+            .env("CODEX_TEST_INSTALL_RELEASE", &install_release)
+            .env("CODEX_TEST_BEFORE_RESTART_READBACK", &before_readback)
+            .env("CODEX_TEST_RELEASE_RESTART_READBACK", &release_readback)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("fixture: spawn installed updater")?;
+
+        for _ in 0..500 {
+            if install_started.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            install_started.exists(),
+            "production install_ready fixture did not launch its package command"
+        );
+
+        stage_executable(&source, &replacement)?;
+        fs::rename(&replacement, &installed)
+            .context("fixture: rename replacement over installed")?;
+        fs::write(&install_release, b"go")?;
+
+        for _ in 0..500 {
+            if before_readback.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            before_readback.exists(),
+            "install_ready did not reach the persisted-state readback boundary"
+        );
+
+        let mut persisted = PersistedState::load_or_default(&state_file, true)?;
+        assert_eq!(
+            persisted.status,
+            UpdateStatus::Installed,
+            "Installed must be durably saved before the readback boundary"
+        );
+        persisted.status = UpdateStatus::Failed;
+        persisted.error_message = Some("readback tamper fixture".into());
+        persisted.save_updater(&state_file)?;
+        fs::write(&release_readback, b"go")?;
+
+        assert_eq!(
+            old.wait()?.code(),
+            Some(0),
+            "replacement exit must be refused when Installed cannot be read back"
+        );
+
+        let after = PersistedState::load_or_default(&state_file, true)?;
+        assert_eq!(after.status, UpdateStatus::Failed);
+        assert_eq!(
+            after.error_message.as_deref(),
+            Some("readback tamper fixture")
+        );
+        Ok(())
+    }
+    #[test]
+    fn ambiguous_preinstall_version_is_not_sufficient_recovery_evidence() {
+        fn transition_observed(previous: &str, verified: Option<&str>) -> bool {
+            previous != "unknown" && verified.is_some_and(|installed| installed != previous)
+        }
+
+        assert!(!transition_observed("2026.09.06", Some("2026.09.06")));
+        assert!(!transition_observed("unknown", Some("2026.09.07")));
+        assert!(transition_observed("2026.09.06", Some("2026.09.07")));
     }
 }

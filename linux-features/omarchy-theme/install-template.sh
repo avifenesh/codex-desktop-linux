@@ -35,7 +35,7 @@ elif [ ! -f "$target_path" ]; then
         warn "could not install Omarchy template at $target_path"
         exit 0
     fi
-    echo "Installed Omarchy Codex Desktop theme template at $target_path" >&2
+    echo "Installed Omarchy ChatGPT Community theme template at $target_path" >&2
 fi
 
 if [ -s "$generated_path" ]; then

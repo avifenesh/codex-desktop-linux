@@ -1,162 +1,143 @@
-# Linux Features Architecture
+# Linux features architecture
 
-`linux-features/` is the extension boundary for optional Linux integrations.
-Core keeps a small generic loader; feature-specific behavior lives in feature
-directories and is disabled by default.
+`linux-features/` is the only extension boundary for optional integrations.
+Repository features live in `linux-features/<id>/`; private local features live
+in the gitignored `linux-features/local/<id>/`. Every feature requires adjacent
+`feature.json` and `README.md` files.
 
-## Layout
+Features are always disabled by default. Enable them only in the gitignored
+configuration:
 
-Repository features live directly under `linux-features/<feature-id>/`.
+```json
+{
+  "enabled": ["read-aloud"],
+  "settings": {
+    "read-aloud": { "example": "value" }
+  }
+}
+```
 
-User-local features live under `linux-features/local/<feature-id>/`. The
-`linux-features/local/` directory is ignored by git, so a user can keep private
-or experimental integrations in the checkout without accidentally committing
-them.
+`make setup-native` is the interactive editor for this configuration;
+`make install-native` is the separate build/package/install step. A feature
+remains enabled for updater rebuilds because its validated snapshot is included
+in the custom package's minimal update-builder.
 
-Every feature needs a `feature.json` manifest and a neighboring `README.md`.
-The README is required for both repository features and git-ignored local
-features, and should describe what the feature does, how to test it, and known
-support risks.
+Known retired IDs are discarded during config loading. Other unknown IDs,
+duplicate IDs, malformed settings, default-enabled manifests, unmet
+requirements, and conflicts are errors.
+
+## Manifest
 
 ```json
 {
   "id": "my-feature",
   "title": "My Feature",
   "description": "Optional Linux integration.",
-  "defaultEnabled": false
-}
-```
-
-Feature ids must match `^[a-z0-9][a-z0-9-]*$`. Repository and local features
-share one id namespace; local features cannot shadow repository features.
-`defaultEnabled: true` is rejected. Enabling always happens through the
-git-ignored `linux-features/features.json` file:
-
-```json
-{
-  "enabled": ["my-feature"]
-}
-```
-
-Feature developers can also define user-overridable settings. Keep shipped
-defaults in tracked `feature.json`, and read user-specific overrides from the
-git-ignored `features.json` file under `settings.<feature-id>`:
-
-```json
-{
-  "enabled": ["my-feature"],
-  "settings": {
-    "my-feature": {
-      "option": "local value"
-    }
-  }
-}
-```
-
-Patch descriptors receive this object as `context.feature.settings`. Treat it
-as optional, validate the shape inside the feature, warn on invalid values, and
-fall back to manifest defaults rather than failing the build.
-
-## Lifecycle
-
-The build pipeline loads enabled features in these phases:
-
-1. ASAR patching: patch descriptors modify extracted upstream app files.
-2. App staging: declarative resources and runtime hooks are copied into
-   `codex-app/`.
-3. Legacy staging: optional `stage.sh` hooks run for features that still need
-   custom install-time logic.
-4. Native packaging: declarative package resources and dependencies are added
-   to `.deb`, `.rpm`, or pacman payloads, then optional package hooks can mutate
-   the staging root.
-5. Runtime: the launcher consumes staged environment files, prelaunch hooks,
-   Electron args, and cold-start hooks.
-
-Native packages copy the configured feature root into the packaged
-`update-builder` bundle, including `linux-features/local/`, and write a
-sanitized `features.json` containing the enabled ids plus settings for enabled
-features. Local auto-updates therefore rebuild with the same opt-in features
-and user-specific feature settings.
-
-Declarative staged files are tracked in
-`.codex-linux/linux-features-staged.json`. On the next install, the framework
-removes the previously tracked declarative resources and runtime hooks before
-staging the currently enabled set, so disabling a feature removes its
-framework-owned runtime hooks. Legacy `stage.sh` hooks are not tracked by this
-manifest and must clean up any feature-owned files themselves.
-
-## Manifest Keys
-
-`entrypoints` declares optional feature code hooks. Feature patching uses only
-`patchDescriptors`; features that only stage resources, runtime hooks, package
-resources, package dependencies, package hooks, or `stageHook` are still valid
-without any patch entrypoint.
-
-```json
-{
+  "defaultEnabled": false,
   "entrypoints": {
     "patchDescriptors": "./patch.js",
     "stageHook": "./stage.sh"
-  }
+  },
+  "resources": [],
+  "runtimeHooks": {},
+  "packageResources": [],
+  "packageDependencies": {},
+  "packageHooks": [],
+  "requires": [],
+  "conflicts": []
 }
 ```
 
-Patch descriptor modules may export an array directly or `{ "descriptors": [] }`
-from JavaScript. The old `entrypoints.patches`, `entrypoints.mainBundlePatch`,
-`.patches` module export, and `.default` descriptor aliases are not part of the
-contract. Feature descriptor ids are reported as
-`feature:<feature-id>:<descriptor-id>` and are optional in CI by default.
-Supported patch phases are `main-bundle`, `extracted-app:pre-webview`,
-`webview-asset`, and `extracted-app:post-webview`; `order` is sorted only
-inside each phase.
+Use `stageHook` only when the operation cannot be represented declaratively.
+Feature patching supports only `entrypoints.patchDescriptors`; removed legacy
+entrypoint aliases are rejected.
 
-When a feature extends a completed core transform in the same asset, its
-descriptor may declare `composesPatches: ["linux-core-patch-id"]`. The runner
-uses this metadata to authorize one active feature descriptor to replace the
-core completion marker with a delegated marker. The owner must be an existing
-core descriptor in the same phase. Descriptors excluded by `appliesTo` or
-`enabled` do not participate, and multiple active delegates for one owner are
-rejected. The feature descriptor must run after an active owner. Core still
-owns its generic completion seam; the feature owns and validates the complete
-composed result.
+Manifest fields:
 
-Use `requires` and `conflicts` to declare feature relationships:
+| Field | Purpose |
+|---|---|
+| `id` | Stable configuration ID matching the directory name |
+| `title`, `description` | User-facing wizard and documentation text |
+| `defaultEnabled` | Must be `false` for every repository and local feature |
+| `internal` | Optional boolean for build-owned plumbing hidden from public feature selection |
+| `entrypoints.patchDescriptors` | Optional ASAR descriptor module |
+| `entrypoints.stageHook` | Last-resort app staging script |
+| `resources` | Declarative files copied into the app tree |
+| `runtimeHooks` | Launcher environment and lifecycle extensions |
+| `packageResources` | Declarative files outside the app tree in native packages |
+| `packageDependencies` | deb/RPM/pacman runtime dependency mapping |
+| `packageHooks` | Narrow native-package staging operations |
+| `requires` | Other feature IDs that must be enabled |
+| `conflicts` | Feature IDs that cannot be enabled together |
+
+Unknown keys and unsafe paths fail validation. A manifest title or description
+does not replace the adjacent README; document setup, settings, side effects,
+cleanup, supported sessions/architectures, and tests there.
+
+## Lifecycle
+
+1. The installer validates enabled manifests and relationships.
+2. If any enabled feature has ASAR descriptors, a temporary ASAR copy is
+   extracted, patched, deterministically repacked, and reported. Otherwise ASAR
+   is never opened.
+3. Declarative app resources and launcher hooks are staged.
+4. Remaining legacy stage hooks run.
+5. Native package resources/dependencies/hooks are applied to package staging.
+6. The launcher loads env, prelaunch, Electron-argument, launcher, cold-start,
+   and after-exit hooks.
+
+The enabled feature snapshot is recorded in build metadata and must match at
+package time. The update-builder includes only enabled descriptors/resources
+and repeats the same validation. Drift in an enabled feature rejects the
+candidate; disabled features are not probed.
+
+## Local features
+
+User-private modules can be placed under the gitignored
+`linux-features/local/<id>/` directory:
+
+```text
+linux-features/local/my-feature/
+├── feature.json
+├── README.md
+├── patch.js
+└── test.js
+```
+
+They use the same validation and disabled-by-default contract as repository
+features. Keep source and resources inside the feature directory, use a unique
+ID, and do not rely on generated `codex-app/` paths. Local features are included
+in the installed package/update-builder only when enabled.
+
+## ASAR descriptors
+
+Descriptor modules export an array or `{ descriptors: [] }`. IDs are reported
+as `feature:<feature-id>:<descriptor-id>`. Supported phases are
+`main-bundle`, `extracted-app:pre-webview`, `webview-asset`, and
+`extracted-app:post-webview`. Descriptors must be idempotent and fail softly
+unless the feature deliberately declares a required acceptance surface.
+
+The core registry contains only required compatibility patches. Features must
+be self-contained and must not compose with deleted core IDs. A generic core extension point may be
+added only when unavoidable and must remain feature-agnostic.
+
+## Declarative app resources
 
 ```json
 {
-  "requires": ["read-aloud"],
-  "conflicts": ["other-voice-loop"]
+  "resources": [{
+    "source": "assets/tool.json",
+    "target": ".codex-linux/features/my-feature/tool.json",
+    "mode": "0644"
+  }]
 }
 ```
 
-The setup wizard, installer, patcher, and package builders validate these
-relationships before applying enabled features.
+Sources stay inside the feature. Targets stay inside the app and cannot be the
+app root. Modes are quoted octal strings. Staged files are tracked so disabling
+a feature removes framework-owned files on the next rebuild.
 
-## Declarative App Staging
-
-Use `resources` to copy files into the generated app directory:
-
-```json
-{
-  "resources": [
-    {
-      "source": "assets/tool.json",
-      "target": ".codex-linux/features/my-feature/tool.json",
-      "mode": "0644"
-    }
-  ]
-}
-```
-
-`source` stays inside the feature directory. `target` is relative to the app
-directory and must point to a file or subdirectory, not the app root itself.
-File modes are optional, but when present they must be quoted octal strings
-such as `"0644"` or `"0755"`; numeric JSON modes are rejected. Declared modes
-are recorded in the staged manifest and restored after native package
-permission normalization, so restrictive resource modes survive `.deb`, `.rpm`,
-and pacman packaging.
-
-Use `runtimeHooks` for launcher-visible hooks:
+## Runtime hooks
 
 ```json
 {
@@ -171,108 +152,70 @@ Use `runtimeHooks` for launcher-visible hooks:
 }
 ```
 
-The runtime hook types map to:
+- `env`: sourced as environment assignments.
+- `prelaunch`: synchronous executable before runtime start.
+- `electronArgs`: one argument per non-comment line.
+- `launcher`: may emit `env KEY=VALUE` or `electron-arg VALUE`.
+- `coldStart`: background hook at launch.
+- `afterExit`: requires the wrapper to wait, then runs after process exit.
 
-- `env`: copied to `.codex-linux/env.d/`; each non-comment line is exported as
-  literal `KEY=VALUE` with no shell evaluation.
-- `prelaunch`: copied to `.codex-linux/prelaunch.d/`; executable hooks run
-  synchronously before the packaged runtime prelaunch and webview setup.
-- `electronArgs`: copied to `.codex-linux/electron-args.d/`; each non-comment
-  line is appended as one Electron argument.
-- `launcher`: copied to `.codex-linux/launcher.d/`; executable hooks run after
-  feature, user, and command-line Electron args are merged, but before final
-  Electron launch args are built. Hooks receive the current Electron args as
-  argv and may print `env KEY=VALUE` or `electron-arg VALUE` lines on stdout.
-  Unknown output lines are ignored; stderr is logged normally.
-- `coldStart`: copied to `.codex-linux/cold-start.d/`; executable hooks run in
-  the background during cold start, after bundled plugin cache sync.
-- `afterExit`: copied to `.codex-linux/after-exit.d/`; executable hooks run
-  after Electron exits. Hook failures are logged and the launcher preserves
-  Electron's original exit status.
+Launcher hooks receive the Electron arguments already loaded from user and
+feature configuration followed by the original launcher arguments. Other
+executable hooks receive the original arguments and use
+`CODEX_LINUX_APP_DIR`, `CODEX_LINUX_APP_STATE_DIR`, and
+`CODEX_LINUX_APP_CACHE_DIR` for lifecycle paths. Feature-owned runtime resources
+are available under `CODEX_LINUX_FEATURES_DIR`, and
+`CODEX_LINUX_LAUNCHER_LOG` names the canonical launcher log path. After-exit
+hooks receive the process status in `CODEX_LINUX_ELECTRON_EXIT_STATUS`. Keep
+hooks bounded; the compact launcher does not supervise helper processes or
+provide a second application lifecycle. The launcher exports lifecycle paths
+but does not create their directories; hooks must create a directory before
+writing into it.
 
-Runtime hooks receive `CODEX_HOME`, `CODEX_LINUX_APP_DIR`,
-`CODEX_LINUX_APP_STATE_DIR`, `CODEX_LINUX_FEATURES_DIR`, and
-`CODEX_LINUX_LAUNCHER_LOG`. Executable hooks also receive
-`CODEX_LINUX_FEATURE_HOOK_PHASE`; `afterExit` additionally receives
-`CODEX_LINUX_ELECTRON_EXIT_STATUS`. Use this pattern for user-home artifacts
-such as Codex skills: stage the source file with `resources` under
-`.codex-linux/features/<feature-id>/...`, then copy it from
-`$CODEX_LINUX_FEATURES_DIR/<feature-id>/...` to `$CODEX_HOME/skills/...` in a
-`runtimeHooks.prelaunch` script. Do not write user-home files from `stage.sh`;
-install, package, and updater rebuilds may run outside the real user's session.
+## Native package extensions
 
-## Declarative Native Package Staging
+`packageResources` place feature-owned files outside the app directory;
+`packageDependencies` map runtime dependencies for deb/RPM/pacman; package hooks
+perform the remaining narrowly scoped staging work. Targets must stay inside
+the package root and cannot overlap the packaged app tree. Special permission
+bits are rejected.
 
-`packageResources` copies feature-owned regular files outside the app directory
-into `.deb`, RPM, or pacman payloads. Each entry uses `source`, `target`, `mode`,
-and an optional `formats` list. Sources must remain inside the feature directory.
-Targets must remain inside the package root and must not be the packaged app
-directory, one of its descendants, or one of its ancestors. Modes use quoted
-octal strings and cannot set setuid, setgid, or sticky bits.
+Native Rust helpers are built once as project release components. They must not
+be rebuilt merely because a new official application package appeared. Delete
+an orphan helper crate when its last feature consumer is removed.
 
-`packageDependencies` maps each native package format to its additional runtime
-dependencies. Resources and dependencies are validated and included only when
-their feature is enabled.
+## Testing and drift
 
-Native package builders require the current feature config to match
-`.codex-linux/build-info.json` in the staged app. Packaging strictly validates
-the current `enabled` array, so malformed JSON, a non-array value, or an invalid
-feature id stops the build. A missing, malformed, or mismatched
-`linuxFeatures.enabled` snapshot also stops packaging so resources and
-dependencies cannot diverge from the app that was actually built. Rebuild the
-app after changing the enabled feature set.
+A retained feature should have:
 
-## Package Hooks
+1. manifest validation tests;
+2. idempotent descriptor/resource staging tests;
+3. byte-identical failure tests for missing or ambiguous semantic anchors;
+4. a build with that feature enabled alone against the current official ASAR;
+5. runtime acceptance for the Linux sessions, compositors, services, or devices
+   it claims to support.
 
-Use `packageHooks` only when a feature must mutate native package staging:
-
-```json
-{
-  "packageHooks": [
-    {
-      "path": "package.sh",
-      "formats": ["deb", "rpm", "pacman"]
-    }
-  ]
-}
-```
-
-Hooks run with:
-
-- `PACKAGE_FORMAT`
-- `PACKAGE_NAME`
-- `PACKAGE_VERSION`
-- `PACKAGE_ROOT` / `PACKAGE_STAGING_ROOT`
-- `APP_DIR` / `PACKAGE_APP_DIR`
-- `REPO_DIR`
-
-Package hooks should be idempotent and narrowly scoped.
-
-## Local Feature Example
-
-Create a private feature without touching tracked files:
+Run the framework and all adjacent Node tests with:
 
 ```bash
-mkdir -p linux-features/local/my-feature
-$EDITOR linux-features/local/my-feature/feature.json
+node --test scripts/lib/linux-features.test.js linux-features/*/test.js
 ```
 
-Then enable it:
+An `applied-with-warnings` or optional skip is not evidence that a feature
+works. Required feature surfaces must apply cleanly before the candidate is
+accepted.
 
-```bash
-cp linux-features/features.example.json linux-features/features.json
-$EDITOR linux-features/features.json
-make install-native
-```
+## Retirement policy
 
-`make setup-native` also discovers local features, marks them as `[local]`,
-and can enable them by id or list number.
+Remove a feature only when the official Linux runtime demonstrably replaces its
+behavior or the project intentionally drops the product surface. Delete its
+descriptors, helpers, tests, package/Nix/watchdog references, and documentation
+together. Add the exact old ID to the retired registry so existing local
+configs migrate silently; do not make arbitrary unknown IDs valid.
 
-## Design Rule
+## Design rule
 
-If a change is required for the basic Linux app to launch and behave correctly
-for most users, it belongs in core patches under `scripts/patches/`.
-
-If a change is optional, distro-specific, editor-specific, browser-specific,
-workflow-specific, or likely to add future support burden for a minority of
-users, put it in `linux-features/` and keep it disabled by default.
+The official Linux application is the baseline. A default core patch is allowed
+only for a reproduced mandatory launch/work failure with a regression test.
+Everything optional, distro/editor/browser/workflow-specific, experimental, or
+minority-use belongs here and stays disabled by default.

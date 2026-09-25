@@ -4,6 +4,7 @@
 const {
   createPatchReport,
   criticalFailuresFromReport,
+  enabledFeatureFailuresFromReport,
   writePatchReport,
 } = require("./lib/patch-report.js");
 const {
@@ -12,10 +13,6 @@ const {
 const {
   isPatchIntegrityError,
 } = require("./patches/integrity-error.js");
-const {
-  createInventory,
-  findPostPatchIntegrityFindings,
-} = require("./lib/upstream-dmg-intel.js");
 
 const USAGE = "Usage: patch-linux-window-ui.js [--report-json path] [--enforce-critical] <extracted-app-asar-dir>";
 
@@ -62,15 +59,6 @@ function main() {
     }
     integrityError = error;
   }
-  if (report != null) {
-    const inventory = createInventory({ sourcePath: extractedDir });
-    const findings = findPostPatchIntegrityFindings(inventory);
-    report.postPatchIntegrity = {
-      sourcePath: extractedDir,
-      findingCount: findings.length,
-      findings,
-    };
-  }
   // Write the report before gating so CI artifact upload sees it even on failure.
   writePatchReport(reportJson, report);
 
@@ -80,14 +68,19 @@ function main() {
   }
 
   if (enforceCritical) {
-    const failures = criticalFailuresFromReport(report);
+    const failures = [
+      ...criticalFailuresFromReport(report),
+      ...enabledFeatureFailuresFromReport(report),
+    ].filter((failure, index, all) =>
+      all.findIndex((candidate) => candidate.name === failure.name && candidate.status === failure.status) === index,
+    );
     if (failures.length > 0) {
       console.error(`Critical patch failures (${failures.length}):`);
       for (const failure of failures) {
         console.error(`  - ${failure.name} (${failure.status})${failure.reason ? `: ${failure.reason}` : ""}`);
       }
       console.error(
-        "Aborting: these patches are required for a working Linux app. " +
+        "Aborting: required patches or explicitly enabled feature patches drifted. " +
           "Set CODEX_ENFORCE_CRITICAL_PATCHES=0 to bypass (emergency builds only).",
       );
       process.exit(1);

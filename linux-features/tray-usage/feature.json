@@ -1,0 +1,9 @@
+{
+  "id": "tray-usage",
+  "title": "Tray Usage",
+  "description": "Show the current Codex usage remaining in the Linux system-tray menu.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patchDescriptors": "./patch.js"
+  }
+}

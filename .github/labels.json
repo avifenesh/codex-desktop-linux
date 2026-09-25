@@ -88,7 +88,7 @@
     {
       "name": "area: build and install",
       "color": "C5DEF5",
-      "description": "DMG extraction, dependencies, native modules, or installation flow.",
+      "description": "Signed source extraction, dependencies, build, or installation flow.",
       "group": "area"
     },
     {
@@ -122,9 +122,9 @@
       "group": "area"
     },
     {
-      "name": "area: upstream dmg",
+      "name": "area: upstream package",
       "color": "C5DEF5",
-      "description": "Compatibility or drift in the latest supported upstream DMG.",
+      "description": "Compatibility or drift in the latest signed stable upstream Linux package.",
       "group": "area"
     },
     {
@@ -178,7 +178,7 @@
     {
       "name": "status: awaiting upstream",
       "color": "D4C5F9",
-      "description": "Blocked on an upstream DMG, dependency, or external project.",
+      "description": "Blocked on an upstream package, dependency, or external project.",
       "group": "status"
     },
     {
@@ -291,8 +291,7 @@
     { "from": "users-feedback-needed", "to": "feedback wanted" },
     { "from": "autoreview/skip", "to": "workflow: manual only" },
     { "from": "duplicate", "to": "resolution: duplicate" },
-    { "from": "computer-use-sync", "to": "sync: computer use" },
-    { "from": "upstream-dmg-drift", "to": "area: upstream dmg" }
+    { "from": "computer-use-sync", "to": "sync: computer use" }
   ],
   "retiredLabels": [
     { "name": "autoreview/area-bug", "reason": "Replaced by type: bug." },
@@ -330,7 +329,6 @@
     { "name": "enhancement", "reason": "Replaced by type: feature." },
     { "name": "invalid", "reason": "Use the native not-planned close reason and a staff explanation." },
     { "name": "question", "reason": "Replaced by type: question." },
-    { "name": "upstream-dmg-drift", "reason": "Replaced by area: upstream dmg." },
     { "name": "users-feedback-needed", "reason": "Replaced by feedback wanted." },
     { "name": "wontfix", "reason": "Use the native not-planned close reason and a staff explanation." }
   ]

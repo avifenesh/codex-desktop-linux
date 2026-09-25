@@ -1,142 +1,162 @@
 #!/bin/bash
-# Driver for the Linux ASAR patcher (scripts/patch-linux-window-ui.js).
-#
+# Apply enabled feature descriptors to the official Linux app.asar.
+# A build with no active descriptor never extracts or repacks app.asar.
 # Sourced by install.sh. Do not run directly.
 # shellcheck shell=bash
 
 print_patch_report_summary() {
     local patch_report="$1"
     [ -f "$patch_report" ] || return 0
-
-    node - "$patch_report" "$SCRIPT_DIR/scripts/lib/patch-report.js" <<'NODE'
+    node - "$patch_report" <<'NODE'
 const fs = require("node:fs");
-const reportPath = process.argv[2];
-const helperPath = process.argv[3];
-const { optionalDriftFromReport, summarizePatchReport } = require(helperPath);
-
-const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
-const summary = summarizePatchReport(report);
-const fmt = (counts) => Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(", ") || "none";
-
-console.error("[INFO] patch summary:");
-console.error(`  integrity failures: ${fmt(summary.groups.integrityFailures.statusCounts)}`);
-console.error(`  required core: ${fmt(summary.groups.requiredCore.statusCounts)}`);
-console.error(`  optional core: ${fmt(summary.groups.optionalCore.statusCounts)}`);
-
-if (summary.enabledFeatures.length === 0) {
-  console.error("  optional features: none enabled");
-} else {
-  console.error(`  enabled features: ${summary.enabledFeatures.join(", ")}`);
-  const featureEntries = Object.entries(summary.groups.optionalFeatures.byFeature);
-  if (featureEntries.length === 0) {
-    console.error("  optional feature drift: none");
-  } else {
-    for (const [featureId, featureSummary] of featureEntries) {
-      console.error(`  feature ${featureId}: ${fmt(featureSummary.statusCounts)}`);
-    }
-  }
-}
-
-const drift = optionalDriftFromReport(report);
-if (drift.length > 0) {
-  console.error(`[WARN] optional patches not fully applied (${drift.length}) — fix when convenient:`);
-  for (const item of drift) {
-    console.error(`  - ${item.name}: ${item.status}${item.reason ? ` (${item.reason})` : ""}`);
-  }
-}
-
-const strategyDrift = [];
-for (const patch of report.patches ?? []) {
-  for (const entry of patch.strategies ?? []) {
-    if (entry.strategy === "none") {
-      strategyDrift.push(`${patch.name}: ${entry.group}=${entry.strategy}`);
-    }
-  }
-}
-if (strategyDrift.length > 0) {
-  console.error(`[INFO] match strategies needing attention (${strategyDrift.length}):`);
-  for (const line of strategyDrift) {
-    console.error(`  - ${line}`);
-  }
-}
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const counts = {};
+for (const patch of report.patches ?? []) counts[patch.status] = (counts[patch.status] ?? 0) + 1;
+const summary = Object.entries(counts).map(([key, value]) => `${key}=${value}`).join(", ") || "none";
+console.error(`[INFO] feature patch summary: ${summary}`);
 NODE
 }
 
-# ---- Extract and patch app.asar ----
-patch_asar() {
-    local app_dir="$1"
-    local resources_dir="$app_dir/Contents/Resources"
-    local -a patch_args=()
-
-    [ -f "$resources_dir/app.asar" ] || error "app.asar not found in $resources_dir"
-
-    info "Extracting app.asar..."
-    cd "$WORK_DIR"
-    npx --yes asar extract "$resources_dir/app.asar" app-extracted
-
-    # Copy unpacked native modules if they exist
-    if [ -d "$resources_dir/app.asar.unpacked" ]; then
-        cp -r "$resources_dir/app.asar.unpacked/"* app-extracted/ 2>/dev/null || true
-    fi
-
-    # Remove macOS-only modules
-    rm -rf "$WORK_DIR/app-extracted/node_modules/sparkle-darwin" 2>/dev/null || true
-    find "$WORK_DIR/app-extracted" -name "sparkle.node" -delete 2>/dev/null || true
-
-    # Build native modules in clean environment and copy back
-    build_native_modules "$WORK_DIR/app-extracted"
-
-    info "Patching Linux window and shell behavior..."
-    # Always produce a report: enforcement and the end-of-build summary need it,
-    # and install.sh persists it into the app's .codex-linux/ directory.
-    local patch_report_json="${CODEX_PATCH_REPORT_JSON:-$WORK_DIR/patch-report.json}"
-    mkdir -p "$(dirname "$patch_report_json")"
-    patch_args+=(--report-json "$patch_report_json")
-    if [ "${CODEX_ENFORCE_CRITICAL_PATCHES:-1}" != "0" ]; then
-        patch_args+=(--enforce-critical)
-    else
-        warn "Critical patch enforcement disabled (CODEX_ENFORCE_CRITICAL_PATCHES=0)"
-    fi
-    node "$SCRIPT_DIR/scripts/patch-linux-window-ui.js" "${patch_args[@]}" "$WORK_DIR/app-extracted"
-    CODEX_PATCH_REPORT_RESOLVED="$patch_report_json"
-    print_patch_report_summary "$patch_report_json"
-
-    # Repack
-    info "Repacking app.asar..."
-    cd "$WORK_DIR"
-    (cd app-extracted && find . -type f | LC_ALL=C sort | sed 's#^\./##') > "$WORK_DIR/app.asar.ordering"
-    npx asar pack app-extracted app.asar --ordering "$WORK_DIR/app.asar.ordering" --unpack "{*.node,*.so,*.dylib}" 2>/dev/null
-
-    info "app.asar patched"
+patch_report_has_changes() {
+    local patch_report="$1"
+    node - "$patch_report" "$SCRIPT_DIR/scripts/lib/patch-report.js" <<'NODE'
+const fs = require("node:fs");
+const [reportPath, helperPath] = process.argv.slice(2);
+const { reportHasPatchChanges } = require(helperPath);
+const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+process.exit(reportHasPatchChanges(report) ? 0 : 1);
+NODE
 }
 
-inspect_rebuild_candidate() {
+patch_report_has_only_required_core_changes() {
+    local patch_report="$1"
+    node - "$patch_report" <<'NODE'
+const fs = require("node:fs");
+const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const changed = (report.patches ?? []).filter((patch) => patch.status === "applied");
+const valid = changed.length > 0 && changed.every((patch) =>
+  patch.sourceKind === "core" && patch.ciPolicy === "required-upstream");
+process.exit(valid ? 0 : 1);
+NODE
+}
+
+record_patch_report_asar_hashes() {
+    local patch_report="$1"
+    local upstream_sha="$2"
+    local output_sha="$3"
+    local preserved_byte_for_byte="$4"
+    node - "$patch_report" "$upstream_sha" "$output_sha" "$preserved_byte_for_byte" <<'NODE'
+const fs = require("node:fs");
+const [reportPath, upstreamSha, outputSha, preserved] = process.argv.slice(2);
+const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+report.upstreamAppAsar = { sha256: upstreamSha, preservedByteForByte: preserved === "true" };
+report.outputAppAsar = { sha256: outputSha };
+fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+NODE
+}
+
+write_empty_feature_patch_report() {
+    local report_path="$1"
+    local app_asar="$2"
+    mkdir -p "$(dirname "$report_path")"
+    node - "$report_path" "$app_asar" "$SCRIPT_DIR/scripts/lib/patch-report.js" <<'NODE'
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const [reportPath, asarPath, helperPath] = process.argv.slice(2);
+const { createPatchReport } = require(helperPath);
+const sha256 = crypto.createHash("sha256").update(fs.readFileSync(asarPath)).digest("hex");
+const report = createPatchReport();
+report.upstreamAppAsar = {
+  sha256,
+  preservedByteForByte: true,
+};
+report.outputAppAsar = { sha256 };
+fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+NODE
+}
+
+patch_asar() {
     local app_dir="$1"
-    local dmg_path="$2"
-    local resources_dir="$app_dir/Contents/Resources"
-    local inspect_dir="$WORK_DIR/inspect-app-extracted"
-    local report_dir="${REPORT_DIR:-$(default_rebuild_report_dir)}"
-    local patch_report
-    local rebuild_report
+    local resources_dir="$app_dir/resources"
+    local app_asar="$resources_dir/app.asar"
+    local patch_report_json="${CODEX_PATCH_REPORT_JSON:-$WORK_DIR/patch-report.json}"
+    local descriptor_count
+    local core_descriptor_count
+    local upstream_sha
+    local patched_sha
+    local -a asar_command
 
-    [ -f "$resources_dir/app.asar" ] || error "app.asar not found in $resources_dir"
-
-    report_dir="$(prepare_rebuild_report_dir "$report_dir")"
-    patch_report="$report_dir/patch-report.json"
-    rebuild_report="$report_dir/rebuild-report.json"
-
-    info "Inspecting app.asar without changing the active app..."
-    cd "$WORK_DIR"
-    npx --yes asar extract "$resources_dir/app.asar" "$inspect_dir"
-
-    if [ -d "$resources_dir/app.asar.unpacked" ]; then
-        cp -r "$resources_dir/app.asar.unpacked/"* "$inspect_dir/" 2>/dev/null || true
+    [ -f "$app_asar" ] || error "app.asar not found in $resources_dir"
+    core_descriptor_count="$(node - "$SCRIPT_DIR/scripts/patches/runner.js" <<'NODE'
+const { corePatchDescriptors } = require(process.argv[2]);
+process.stdout.write(String(corePatchDescriptors().length));
+NODE
+)"
+    descriptor_count="$(node "$SCRIPT_DIR/scripts/lib/linux-features.js" --patch-descriptor-count)"
+    descriptor_count="$((descriptor_count + core_descriptor_count))"
+    if [ "$descriptor_count" -eq 0 ]; then
+        info "No ASAR feature descriptors enabled; preserving official app.asar byte-for-byte"
+        write_empty_feature_patch_report "$patch_report_json" "$app_asar"
+        CODEX_PATCH_REPORT_RESOLVED="$patch_report_json"
+        return 0
     fi
 
-    node "$SCRIPT_DIR/scripts/patch-linux-window-ui.js" --report-json "$patch_report" "$inspect_dir"
-    write_rebuild_report_json "$rebuild_report" "$dmg_path" "$ELECTRON_VERSION" "$patch_report" ""
+    if [ -n "${CODEX_ASAR_BIN:-}" ]; then
+        [ -x "$CODEX_ASAR_BIN" ] || error "Configured ASAR tool is not executable: $CODEX_ASAR_BIN"
+        asar_command=("$CODEX_ASAR_BIN")
+    else
+        # The Ubuntu/Debian nodejs package ships node without npm/npx, and
+        # check_deps() can only warn. Fail with actionable guidance here.
+        command -v npx >/dev/null 2>&1 || error \
+            "npx is required to patch app.asar with enabled feature descriptors, but was not found on PATH." \
+            "Install npm (Debian/Ubuntu: sudo apt install npm) or make the version-manager Node bin directory" \
+            "visible to this shell, then retry."
+        asar_command=(npx --yes @electron/asar)
+    fi
 
-    info "Patch report: $patch_report"
-    info "Rebuild report: $rebuild_report"
-    print_patch_report_summary "$patch_report"
+    upstream_sha="$(sha256sum "$app_asar" | awk '{print $1}')"
+    info "Extracting a temporary app.asar copy for $descriptor_count active descriptor(s)"
+    "${asar_command[@]}" extract "$app_asar" "$WORK_DIR/app-extracted"
+    if [ -d "$resources_dir/app.asar.unpacked" ]; then
+        cp -a "$resources_dir/app.asar.unpacked/." "$WORK_DIR/app-extracted/"
+    fi
+
+    mkdir -p "$(dirname "$patch_report_json")"
+    node "$SCRIPT_DIR/scripts/patch-linux-window-ui.js" \
+        --report-json "$patch_report_json" \
+        --enforce-critical \
+        "$WORK_DIR/app-extracted"
+    print_patch_report_summary "$patch_report_json"
+
+    if ! patch_report_has_changes "$patch_report_json"; then
+        info "No ASAR descriptor changed the current bundle; preserving official app.asar byte-for-byte"
+        record_patch_report_asar_hashes "$patch_report_json" "$upstream_sha" "$upstream_sha" true
+        CODEX_PATCH_REPORT_RESOLVED="$patch_report_json"
+        return 0
+    fi
+
+    (cd "$WORK_DIR/app-extracted" && find . -type f -printf '%P\n' | LC_ALL=C sort) > "$WORK_DIR/app.asar.ordering"
+    "${asar_command[@]}" pack \
+        "$WORK_DIR/app-extracted" \
+        "$WORK_DIR/app.asar" \
+        --ordering "$WORK_DIR/app.asar.ordering" \
+        --unpack "{*.node,*.so,*.dylib}"
+    mv "$WORK_DIR/app.asar" "$app_asar"
+    if [ -d "$WORK_DIR/app.asar.unpacked" ]; then
+        remove_tree_safely "$resources_dir/app.asar.unpacked"
+        mv "$WORK_DIR/app.asar.unpacked" "$resources_dir/app.asar.unpacked"
+    fi
+    patched_sha="$(sha256sum "$app_asar" | awk '{print $1}')"
+    record_patch_report_asar_hashes "$patch_report_json" "$upstream_sha" "$patched_sha" false
+    CODEX_PATCH_REPORT_RESOLVED="$patch_report_json"
+}
+
+inspect_upstream_linux_package() {
+    local app_dir="$1"
+    local report_dir="${REPORT_DIR:-${REBUILD_REPORT_DIR:-$SCRIPT_DIR/dist-next/rebuild}}"
+    local app_asar="$app_dir/resources/app.asar"
+    local patch_report="$report_dir/patch-report.json"
+    mkdir -p "$report_dir"
+    write_empty_feature_patch_report "$patch_report" "$app_asar"
+    info "Inspection report: $patch_report"
 }

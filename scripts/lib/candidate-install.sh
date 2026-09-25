@@ -37,7 +37,7 @@ remove_managed_candidate_backup() {
     # `find -P` also avoids dereferencing a path replaced with a symlink.
     find -P "$path" -type d -exec chmod u+w {} + 2>/dev/null || true
     [ -d "$path" ] && [ ! -L "$path" ] || return 0
-    rm -rf -- "$path"
+    rm -rf -- "$path" 2>/dev/null
 }
 
 cleanup_managed_candidate_backups_locked() {
@@ -129,7 +129,7 @@ promote_candidate_install() {
     INSTALL_DIR="$final_dir"
     if declare -F install_target_is_stopped >/dev/null 2>&1; then
         if ! install_target_is_stopped; then
-            warn "ChatGPT Desktop is still running from $final_dir (pid $RUNNING_INSTALL_TARGET_PID); accepted candidate was not promoted"
+            warn "ChatGPT Community is still running from $final_dir (pid $RUNNING_INSTALL_TARGET_PID); accepted candidate was not promoted"
             INSTALL_DIR="$previous_install_dir"
             flock -u "$promotion_lock_fd"
             exec {promotion_lock_fd}>&-

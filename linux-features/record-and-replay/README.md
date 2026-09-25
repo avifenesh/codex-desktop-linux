@@ -3,7 +3,7 @@
 Opt-in Linux integration for Record & Replay demo-to-skill workflows.
 
 This feature stages the official `Record & Replay` bundled plugin shell from
-the current upstream DMG when it is available, swaps the macOS helper for a
+the current Linux package when it is available, swaps the unavailable helper for a
 Linux `event-stream` helper, and keeps the fallback template aligned with that
 same contract. The staged plugin launches `./bin/SkyLinuxComputerUseClient
 event-stream mcp`; that helper is backed by the Rust
@@ -23,12 +23,13 @@ It is disabled by default. Enable it in `linux-features/features.json`:
 
 ## Build Prerequisite
 
-When this feature is enabled, staging builds `codex-record-replay-linux` with
-Cargo and copies the release binary into `resources/native/`, the staged plugin
+The project release builds `codex-record-replay-linux` once and copies it into
+`resources/native/`, the staged plugin
 `bin/codex-record-replay-linux`, and the official-shaped plugin helper alias
-`bin/SkyLinuxComputerUseClient`. Builds without a Rust toolchain can set
-`CODEX_RECORD_REPLAY_LINUX_SOURCE` to an executable prebuilt
-`codex-record-replay-linux` binary.
+`bin/SkyLinuxComputerUseClient`. `make install-native` performs that release
+build once before staging. Direct `./install.sh` builds may set
+`CODEX_RECORD_REPLAY_LINUX_SOURCE` to an executable prebuilt binary. Updater
+rebuilds reuse the packaged artifact and never invoke Cargo.
 
 ## Behavior
 
@@ -122,3 +123,7 @@ The Rust helper also exposes MCP tools `skysight_start`,
 
 All helper invocations use `execFile` with fixed command shapes. The bridge does
 not expose a shell or arbitrary argv surface.
+
+```bash
+node --test linux-features/record-and-replay/test.js
+```

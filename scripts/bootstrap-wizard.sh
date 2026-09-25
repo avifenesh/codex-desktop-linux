@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Guided, conservative setup helper for native ChatGPT Desktop for Linux builds.
+# Guided, conservative setup helper for native ChatGPT Community builds.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -362,8 +362,8 @@ window_backend_hint() {
 computer_use_doctor_path() {
     local candidate
     for candidate in \
-        "$REPO_DIR/codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux" \
-        "/opt/$PACKAGE_NAME/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux" \
+        "$REPO_DIR/codex-app/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-linux" \
+        "/opt/$PACKAGE_NAME/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-linux" \
         "$(command -v codex-computer-use-linux 2>/dev/null || true)"; do
         [ -n "$candidate" ] || continue
         if [ -x "$candidate" ]; then
@@ -552,7 +552,7 @@ print_system_summary() {
         atomic_host="yes"
     fi
 
-    info "ChatGPT Desktop for Linux guided setup"
+    info "ChatGPT Community guided setup"
     info "Repository: $REPO_DIR"
     info "Distro: ID=${OS_RELEASE_ID:-unknown} ID_LIKE=${OS_RELEASE_ID_LIKE:-unknown} VERSION_ID=${OS_RELEASE_VERSION_ID:-unknown}"
     info "Package manager: $(detect_package_manager)"
@@ -699,6 +699,10 @@ def discover_features(root):
             die(f"Linux feature '{feature_id}' must include README.md next to feature.json")
         if data.get("defaultEnabled") is True:
             die(f"Linux feature '{feature_id}' must be disabled by default; defaultEnabled true is not allowed")
+        if "internal" in data and not isinstance(data["internal"], bool):
+            die(f"Linux feature '{feature_id}' internal must be a boolean")
+        if data.get("internal") is True:
+            continue
         if feature_id in features:
             die(f"Duplicate Linux feature id '{feature_id}' in {manifest_path} and {features[feature_id]['manifest_path']}")
         title = data.get("title") or data.get("name") or feature_id
@@ -742,11 +746,48 @@ def read_enabled_ids(data, path):
 def csv(ids):
     return ", ".join(ids) if ids else "none"
 
+def expand_enabled(ids):
+    expanded = []
+    completed = set()
+    visiting = []
+
+    def visit(feature_id):
+        if feature_id in completed:
+            return
+        if feature_id in visiting:
+            cycle = visiting[visiting.index(feature_id):] + [feature_id]
+            die(f"Linux feature dependency cycle: {' -> '.join(cycle)}")
+        visiting.append(feature_id)
+        feature = features.get(feature_id)
+        if feature is not None:
+            for required in feature["requires"]:
+                visit(required)
+        visiting.pop()
+        completed.add(feature_id)
+        expanded.append(feature_id)
+
+    for feature_id in ids:
+        visit(feature_id)
+    return expanded
+
+def disabled_with_dependents(ids):
+    disabled = set(ids)
+    changed = True
+    while changed:
+        changed = False
+        for feature_id, feature in features.items():
+            if feature_id not in disabled and any(
+                required in disabled for required in feature["requires"]
+            ):
+                disabled.add(feature_id)
+                changed = True
+    return disabled
+
 features = discover_features(features_root)
 config_data = read_feature_config(config_path)
 if not isinstance(config_data, dict):
     die(f"Linux features config {config_path} must be a JSON object")
-current = read_enabled_ids(config_data, config_path)
+current = expand_enabled(read_enabled_ids(config_data, config_path))
 
 if output_mode == "tsv":
     # Machine-readable discovery for the GUI feature picker: one
@@ -771,10 +812,10 @@ for feature_id in disable:
     if feature_id not in features and feature_id not in current:
         die(f"Unknown Linux feature id: {feature_id}")
 
-final = [feature_id for feature_id in current if feature_id not in set(disable)]
-for feature_id in enable:
-    if feature_id not in final:
-        final.append(feature_id)
+disabled = disabled_with_dependents(disable)
+final = [feature_id for feature_id in current if feature_id not in disabled]
+final = expand_enabled(final + enable)
+final = [feature_id for feature_id in final if feature_id not in disabled]
 
 final_set = set(final)
 for feature_id in final:
@@ -805,9 +846,6 @@ unknown_enabled = [feature_id for feature_id in final if feature_id not in featu
 if unknown_enabled:
     warn(f"Enabled feature ids not found in this checkout: {csv(unknown_enabled)}")
 
-if "conversation-mode" in final and "read-aloud" not in final:
-    warn("conversation-mode is enabled without read-aloud; speech output requires the Read Aloud feature.")
-
 if features:
     print("[setup] Available Linux features:")
     for index, (feature_id, feature) in enumerate(features.items(), start=1):
@@ -819,7 +857,7 @@ else:
     print("[setup] Available Linux features: none found")
 
 if apply_changes and (enable or disable):
-    print("[setup] Feature changes apply after rebuilding and reinstalling ChatGPT Desktop for Linux.")
+    print("[setup] Feature changes apply after rebuilding and reinstalling ChatGPT Community.")
 PY
     then
         SETUP_ERROR_REPORTED=1
@@ -853,8 +891,7 @@ print_safe_disable_guidance() {
     fi
 
     if list_includes_id "$disable_raw" "read-aloud" ||
-        list_includes_id "$disable_raw" "read-aloud-mcp" ||
-        list_includes_id "$disable_raw" "conversation-mode"; then
+        list_includes_id "$disable_raw" "read-aloud-mcp"; then
         local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
         local read_aloud_data="$data_home/codex-desktop/read-aloud"
         local read_aloud_model
@@ -877,7 +914,7 @@ validate_cleanup_feature_ids() {
     raw="${raw//,/ }"
     for item in $raw; do
         case "$item" in
-            remote-mobile-control|read-aloud|read-aloud-mcp|conversation-mode)
+            remote-mobile-control|read-aloud|read-aloud-mcp)
                 ;;
             "")
                 ;;
@@ -977,8 +1014,7 @@ run_feature_cleanup() {
     fi
 
     if list_includes_id "$cleanup_raw" "read-aloud" ||
-        list_includes_id "$cleanup_raw" "read-aloud-mcp" ||
-        list_includes_id "$cleanup_raw" "conversation-mode"; then
+        list_includes_id "$cleanup_raw" "read-aloud-mcp"; then
         local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
         local read_aloud_data="$data_home/codex-desktop/read-aloud"
         local read_aloud_model
@@ -1129,7 +1165,7 @@ prompt_for_feature_changes_gui() {
             rows+=("$id" "${title_of[$id]}")
         done
         selected="$(zenity --list --checklist \
-            --title="ChatGPT Desktop for Linux features" \
+            --title="ChatGPT Community features" \
             --text="Select the optional Linux features to enable for the next build." \
             --column="Enable" --column="Feature" --column="Description" \
             --print-column=2 --separator=$'\n' \

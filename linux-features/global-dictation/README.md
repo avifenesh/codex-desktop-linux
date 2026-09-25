@@ -19,6 +19,12 @@ Enable the feature in `linux-features/features.json` before rebuilding:
 }
 ```
 
+`make install-native` builds `codex-global-dictation-linux` once before staging
+the package. Direct `./install.sh` builds must provide it at
+`global-dictation-linux/target/release/codex-global-dictation-linux` or set
+`CODEX_GLOBAL_DICTATION_LINUX_SOURCE`. Updater rebuilds reuse the packaged
+artifact and never invoke Cargo.
+
 The desktop portal may ask for shortcut approval on first use and keyboard
 access when the first result is pasted into another application. The helper
 reuses that keyboard session until the hotkey registration is stopped. If the
@@ -28,3 +34,7 @@ the macOS or Windows paths.
 Wayland shortcuts must contain at least one modifier and one key. Modifier-only
 shortcuts cannot be represented by the XDG shortcut format and are rejected
 before registration.
+
+```bash
+node --test linux-features/global-dictation/test.js
+```

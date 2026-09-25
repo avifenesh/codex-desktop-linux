@@ -1,33 +1,27 @@
 //! Detects when the running updater binary has been replaced on disk.
-//!
-//! Package upgrades replace `/usr/bin/codex-update-manager` while the daemon
-//! keeps running the old, now-deleted image. The daemon polls this check and
-//! exits so systemd relaunches it on the new binary; a stale daemon would
-//! otherwise stage rebuild workspaces with outdated logic indefinitely.
 
+use crate::install;
 use std::{
-    ffi::OsStr,
     fs,
-    os::unix::ffi::OsStrExt,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
 const PROC_SELF_EXE: &str = "/proc/self/exe";
-const DELETED_SUFFIX: &str = " (deleted)";
+pub const REPLACEMENT_RESTART_EXIT_CODE: i32 = 12;
 
-/// Returns the installed path of a replacement updater binary when the
-/// running process image no longer matches the file on disk. Returns `None`
-/// while the binary is current, or when no on-disk binary exists to restart
-/// into (package removal is handled by the packaged-runtime check instead).
+/// Returns the replacement path when the running image and its path on disk
+/// no longer refer to the same inode.
 pub fn replacement_binary() -> Option<PathBuf> {
     let link_target = fs::read_link(PROC_SELF_EXE).ok()?;
-    let installed_path = strip_deleted_suffix(&link_target);
+    let installed_path = install::strip_deleted_path_suffix(&link_target).unwrap_or(link_target);
     replacement_at(Path::new(PROC_SELF_EXE), &installed_path)
 }
 
-/// Returns `installed_path` when it points at a different inode than the
-/// running process image referenced by `running_image`.
+pub fn exit_for_replacement() -> ! {
+    std::process::exit(REPLACEMENT_RESTART_EXIT_CODE);
+}
+
 fn replacement_at(running_image: &Path, installed_path: &Path) -> Option<PathBuf> {
     let running = fs::metadata(running_image).ok()?;
     let installed = fs::metadata(installed_path).ok()?;
@@ -37,34 +31,10 @@ fn replacement_at(running_image: &Path, installed_path: &Path) -> Option<PathBuf
     Some(installed_path.to_path_buf())
 }
 
-fn strip_deleted_suffix(target: &Path) -> PathBuf {
-    let bytes = target.as_os_str().as_bytes();
-    match bytes.strip_suffix(DELETED_SUFFIX.as_bytes()) {
-        Some(stripped) => PathBuf::from(OsStr::from_bytes(stripped)),
-        None => target.to_path_buf(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use anyhow::Result;
-
-    #[test]
-    fn strips_deleted_suffix_from_replaced_binary_link() {
-        assert_eq!(
-            strip_deleted_suffix(Path::new("/usr/bin/codex-update-manager (deleted)")),
-            PathBuf::from("/usr/bin/codex-update-manager")
-        );
-    }
-
-    #[test]
-    fn keeps_link_target_without_deleted_suffix() {
-        assert_eq!(
-            strip_deleted_suffix(Path::new("/usr/bin/codex-update-manager")),
-            PathBuf::from("/usr/bin/codex-update-manager")
-        );
-    }
 
     #[test]
     fn same_file_is_not_a_replacement() -> Result<()> {
@@ -77,12 +47,12 @@ mod tests {
     }
 
     #[test]
-    fn different_inode_is_a_replacement() -> Result<()> {
+    fn different_inode_is_a_replacement_even_with_identical_contents() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let running = temp.path().join("codex-update-manager.old");
         let installed = temp.path().join("codex-update-manager");
-        fs::write(&running, b"old")?;
-        fs::write(&installed, b"new")?;
+        fs::write(&running, b"same updater")?;
+        fs::write(&installed, b"same updater")?;
 
         assert_eq!(replacement_at(&running, &installed), Some(installed));
         Ok(())
@@ -92,7 +62,7 @@ mod tests {
     fn missing_installed_binary_is_not_a_replacement() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let running = temp.path().join("codex-update-manager.old");
-        fs::write(&running, b"old")?;
+        fs::write(&running, b"current")?;
 
         assert_eq!(
             replacement_at(&running, &temp.path().join("codex-update-manager")),

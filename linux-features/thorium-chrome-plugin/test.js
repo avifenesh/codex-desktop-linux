@@ -138,7 +138,7 @@ test("Thorium staging targets the current browser registry, not legacy script sh
   assert.doesNotMatch(source, /linuxThoriumUserDataDirectory/);
 });
 
-test("Thorium stage hook upgrades a core Linux-patched Chrome plugin", () => {
+test("Thorium stage hook extends the official Linux Chrome plugin", () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "codex-thorium-stage-"));
   try {
     const installDir = path.join(workspace, "install");
@@ -150,7 +150,6 @@ test("Thorium stage hook upgrades a core Linux-patched Chrome plugin", () => {
     writeFakeChromePlugin(chromePlugin);
     fs.writeFileSync(featuresConfig, JSON.stringify({ enabled: ["thorium-chrome-plugin"] }, null, 2));
 
-    run("node", [path.join(repoRoot, "scripts", "lib", "patch-chrome-plugin.js"), chromePlugin]);
     const stageResult = run("bash", [
       "-lc",
       [
@@ -217,7 +216,6 @@ test("Thorium patcher leaves browser-client routing untouched", () => {
     const chromePlugin = path.join(workspace, "chrome");
     const scriptsDir = path.join(chromePlugin, "scripts");
     writeFakeChromePlugin(chromePlugin);
-    run("node", [path.join(repoRoot, "scripts", "lib", "patch-chrome-plugin.js"), chromePlugin]);
     fs.writeFileSync(
       path.join(scriptsDir, "browser-client.mjs"),
       'function qE(){return{extensionInstanceId:"instance",preferredWindowId:7}}var fp=class{constructor(e=null){this.browserPreference=e}browserPreference;async getForUrl(e){return e}preferredWindowIdFor(e){return this.browserPreference?.preferredWindowId}async get(e){return e}};\n',

@@ -152,464 +152,86 @@ const linuxSettingsKeys = {
   warmStart: "codex-linux-warm-start-enabled",
 };
 
-function parseDestructuredParamAliases(paramsText) {
-  const aliases = Object.create(null);
-  for (const rawPart of paramsText.split(",")) {
-    const part = rawPart.trim();
-    const match = part.match(/^([A-Za-z_$][\w$]*)(?::([A-Za-z_$][\w$]*))?$/);
-    if (match != null) {
-      aliases[match[1]] = match[2] ?? match[1];
-    }
-  }
-  return aliases;
-}
-
-function buildComputerUseGate({ nameExpr, availabilityProp, featuresVar, platformVar, migrateVar }) {
-  return `{installWhenMissing:!0,name:${nameExpr},${availabilityProp}:({features:${featuresVar},platform:${platformVar}})=>${platformVar}===\`linux\`||${platformVar}===\`darwin\`&&${featuresVar}.computerUse,migrate:${migrateVar}}`;
-}
-
-function rewriteComputerUseMarketplaceSelector(currentSource) {
-  const marketplaceGateRegex =
-    /if\(!\(\s*([A-Za-z_$][\w$]*)\.platform!==`darwin`\|\|!\s*\1\.marketplacePluginNames\.includes\(`computer-use`\)\s*\)\)return\s*\1\.desktopFeatureAvailability\.computerUseNodeRepl\?`node-repl`:`legacy-mcp`/g;
-  return currentSource.replace(
-    marketplaceGateRegex,
-    (_match, ref) =>
-      `if(!((${ref}.platform!==\`darwin\`&&${ref}.platform!==\`linux\`)||!${ref}.marketplacePluginNames.includes(\`computer-use\`)))return ${ref}.platform===\`darwin\`&&${ref}.desktopFeatureAvailability.computerUseNodeRepl?\`node-repl\`:\`legacy-mcp\``,
-  );
-}
-
-function hasPatchedComputerUseMarketplaceSelector(currentSource) {
-  return /if\(!\(\(\s*([A-Za-z_$][\w$]*)\.platform!==`darwin`&&\1\.platform!==`linux`\)\|\|!\1\.marketplacePluginNames\.includes\(`computer-use`\)\)\)return\s+\1\.platform===`darwin`&&\1\.desktopFeatureAvailability\.computerUseNodeRepl\?`node-repl`:`legacy-mcp`/.test(currentSource);
-}
-
-function stripInstallWhenMissingRequiresOptIn(value) {
-  return value.replace(/installWhenMissingRequiresOptIn:!0,/g, "");
-}
-
-function hasInstallWhenMissingRequiresOptIn(value) {
-  return value.includes("installWhenMissingRequiresOptIn:!0,");
-}
-
-function buildFlexibleComputerUseGate({
-  availabilityProp,
-  expressionSuffix,
-  featuresVar,
-  middleFields,
-  nameExpr,
-  platformVar,
-  prefix,
-}) {
-  const sanitizedPrefix = stripInstallWhenMissingRequiresOptIn(prefix);
-  const sanitizedMiddleFields = stripInstallWhenMissingRequiresOptIn(middleFields);
-  const sanitizedExpressionSuffix = stripInstallWhenMissingRequiresOptIn(expressionSuffix);
-  const installField = sanitizedPrefix.includes("installWhenMissing:!0,") ||
-      sanitizedMiddleFields.includes("installWhenMissing:!0,") ||
-      sanitizedExpressionSuffix.includes("installWhenMissing:!0,")
-    ? ""
-    : "installWhenMissing:!0,";
-  return `{${sanitizedPrefix}${installField}name:${nameExpr},${sanitizedMiddleFields}${availabilityProp}:({features:${featuresVar},platform:${platformVar}})=>${platformVar}===\`linux\`||${platformVar}===\`darwin\`&&${featuresVar}.computerUse${sanitizedExpressionSuffix}}`;
-}
-
-function hasComputerUseLiteral(source) {
-  return /(?:`computer-use`|"computer-use"|'computer-use')/.test(source);
-}
-
-function isComputerUseNameExpr(nameExpr, computerUseNameVar) {
-  return /^(?:`computer-use`|"computer-use"|'computer-use')$/.test(nameExpr) ||
-    nameExpr === computerUseNameVar ||
-    /^[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*$/.test(nameExpr);
-}
-
-function applyLinuxComputerUsePluginGatePatch(currentSource) {
-  if (!hasComputerUseLiteral(currentSource)) {
-    console.warn(
-      "WARN: Could not find Computer Use plugin gate literal — skipping Linux Computer Use plugin gate patch",
-    );
-    return currentSource;
-  }
-
-  const sourceWithMarketplaceSelector = rewriteComputerUseMarketplaceSelector(currentSource);
-  const hasMarketplaceSelectorPatch =
-    sourceWithMarketplaceSelector !== currentSource ||
-    hasPatchedComputerUseMarketplaceSelector(sourceWithMarketplaceSelector);
-
-  const computerUseNameVar = sourceWithMarketplaceSelector.match(/([A-Za-z_$][\w$]*)=(?:`computer-use`|"computer-use"|'computer-use')/)?.[1] ?? null;
-  const nameExpressionPattern = String.raw`(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?|` +
-    String.raw`\`computer-use\`|"computer-use"|'computer-use')`;
-  const gateRegex =
-    new RegExp(String.raw`\{(installWhenMissing:!0,)?name:(${nameExpressionPattern}),(isEnabled|isAvailable):\(\{([^}]*)\}\)=>([^{}]*?\.computerUse),migrate:([A-Za-z_$][\w$]*)\}`, "g");
-  let sawEnabledGate = false;
-  let sawUnpatchableGate = false;
-  let patchedGateCount = 0;
-  const patchedSource = sourceWithMarketplaceSelector.replace(
-    gateRegex,
-    (gateSource, installWhenMissing, nameExpr, availabilityProp, paramsText, expression, migrateVar) => {
-      if (!isComputerUseNameExpr(nameExpr, computerUseNameVar)) {
-        return gateSource;
-      }
-
-      const aliases = parseDestructuredParamAliases(paramsText);
-      const featuresVar = aliases.features;
-      const platformVar = aliases.platform;
-      if (featuresVar == null || platformVar == null) {
-        sawUnpatchableGate = true;
-        return gateSource;
-      }
-
-      const darwinOnlyExpression = `${platformVar}===\`darwin\`&&${featuresVar}.computerUse`;
-      const linuxExpression = `(${platformVar}===\`darwin\`||${platformVar}===\`linux\`)&&${featuresVar}.computerUse`;
-      const linuxRegisteredExpression = `${platformVar}===\`linux\`||${platformVar}===\`darwin\`&&${featuresVar}.computerUse`;
-      if (installWhenMissing != null && expression === linuxRegisteredExpression && !hasInstallWhenMissingRequiresOptIn(gateSource)) {
-        sawEnabledGate = true;
-        return gateSource;
-      }
-      if (expression === darwinOnlyExpression || expression === linuxExpression || expression === linuxRegisteredExpression) {
-        patchedGateCount += 1;
-        return buildComputerUseGate({ nameExpr, availabilityProp, featuresVar, platformVar, migrateVar });
-      }
-      sawUnpatchableGate = true;
-      return gateSource;
-    },
-  );
-
-  if (patchedGateCount > 0) {
-    return patchedSource;
-  }
-
-  const flexibleGateRegex =
-    new RegExp(String.raw`\{([^{}]*?)name:(${nameExpressionPattern}),([^{}]*?)(isEnabled|isAvailable):\(\{([^}]*)\}\)=>([^{}]*?\.computerUse)([^{}]*?)\}`, "g");
-  let flexiblePatchedCount = 0;
-  const flexiblyPatchedSource = sourceWithMarketplaceSelector.replace(
-    flexibleGateRegex,
-    (gateSource, prefix, nameExpr, middleFields, availabilityProp, paramsText, expression, expressionSuffix) => {
-      if (!isComputerUseNameExpr(nameExpr, computerUseNameVar)) {
-        return gateSource;
-      }
-
-      const aliases = parseDestructuredParamAliases(paramsText);
-      const featuresVar = aliases.features;
-      const platformVar = aliases.platform;
-      if (featuresVar == null || platformVar == null) {
-        sawUnpatchableGate = true;
-        return gateSource;
-      }
-
-      const darwinOnlyExpression = `${platformVar}===\`darwin\`&&${featuresVar}.computerUse`;
-      const linuxExpression = `(${platformVar}===\`darwin\`||${platformVar}===\`linux\`)&&${featuresVar}.computerUse`;
-      const linuxRegisteredExpression = `${platformVar}===\`linux\`||${platformVar}===\`darwin\`&&${featuresVar}.computerUse`;
-      if (
-        prefix.includes("installWhenMissing:!0,") &&
-        expression === linuxRegisteredExpression &&
-        !hasInstallWhenMissingRequiresOptIn(gateSource)
-      ) {
-        sawEnabledGate = true;
-        return gateSource;
-      }
-      if (expression.includes("win32") || expression.includes("isInternal")) {
-        return gateSource;
-      }
-      if (expression === darwinOnlyExpression || expression === linuxExpression || expression === linuxRegisteredExpression) {
-        flexiblePatchedCount += 1;
-        return buildFlexibleComputerUseGate({
-          availabilityProp,
-          expressionSuffix,
-          featuresVar,
-          middleFields,
-          nameExpr,
-          platformVar,
-          prefix,
-        });
-      }
-      sawUnpatchableGate = true;
-      return gateSource;
-    },
-  );
-
-  if (flexiblePatchedCount > 0) {
-    return flexiblyPatchedSource;
-  }
-
-  if (sawEnabledGate && !sawUnpatchableGate) {
-    return sourceWithMarketplaceSelector;
-  }
-
-  if (hasMarketplaceSelectorPatch && !sawUnpatchableGate) {
-    return sourceWithMarketplaceSelector;
-  }
-
-  if (hasComputerUseLiteral(sourceWithMarketplaceSelector) && sourceWithMarketplaceSelector.includes("computerUse")) {
-    throw new Error("Required Linux Computer Use plugin gate patch failed: could not enable bundled Computer Use on Linux");
-  }
-
-  return sourceWithMarketplaceSelector;
-}
-
 function applyLinuxComputerUseFeaturePatch(currentSource) {
-  const patchedFeaturePattern =
-    /function [A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*,\{env:[A-Za-z_$][\w$]*=process\.env,platform:[A-Za-z_$][\w$]*=process\.platform\}=\{\}\)\{return [A-Za-z_$][\w$]*===`linux`\?\{\.\.\.[A-Za-z_$][\w$]*,computerUse:!0,computerUseNodeRepl:!0\}:/;
-  const currentPatchedFeaturePattern =
-    /let [A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*===`linux`\?\{\.\.\.[A-Za-z_$][\w$]*,computerUse:!0,computerUseNodeRepl:!0\}:[A-Za-z_$][\w$]*===`win32`&&[A-Za-z_$][\w$]*\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`\?\{\.\.\.[A-Za-z_$][\w$]*,computerUse:!0,computerUseNodeRepl:!0\}:[A-Za-z_$][\w$]*,/;
-  const currentChainedPatchedFeaturePattern =
-    /,[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*===`linux`\?\{\.\.\.[A-Za-z_$][\w$]*,computerUse:!0,computerUseNodeRepl:!0\}:[A-Za-z_$][\w$]*===`win32`&&[A-Za-z_$][\w$]*\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`\?\{\.\.\.[A-Za-z_$][\w$]*,computerUse:!0,computerUseNodeRepl:!0\}:[A-Za-z_$][\w$]*,/;
-  const windowsOnlyFeaturePattern =
-    /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{env:([A-Za-z_$][\w$]*)=process\.env,platform:([A-Za-z_$][\w$]*)=process\.platform\}=\{\}\)\{return \4!==`win32`\|\|\3\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==`1`\?\2:\{\.\.\.\2,computerUse:!0,computerUseNodeRepl:!0\}\}/g;
-  const currentWindowsOnlyFeaturePattern =
-    /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)===`win32`&&([A-Za-z_$][\w$]*)\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`\?\{\.\.\.([A-Za-z_$][\w$]*),computerUse:!0,computerUseNodeRepl:!0\}:\4,/g;
-  const chainedWindowsOnlyFeaturePattern =
-    /,([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)===`win32`&&([A-Za-z_$][\w$]*)\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`\?\{\.\.\.([A-Za-z_$][\w$]*),computerUse:!0,computerUseNodeRepl:!0\}:\4,/g;
-
-  let changed = false;
-  let patchedSource = currentSource.replace(
-    windowsOnlyFeaturePattern,
-    (_, fnName, featuresVar, envVar, platformVar) => {
-      changed = true;
-      return `function ${fnName}(${featuresVar},{env:${envVar}=process.env,platform:${platformVar}=process.platform}={}){return ${platformVar}===\`linux\`?{...${featuresVar},computerUse:!0,computerUseNodeRepl:!0}:${platformVar}!==\`win32\`||${envVar}.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==\`1\`?${featuresVar}:{...${featuresVar},computerUse:!0,computerUseNodeRepl:!0}}`;
-    },
+  const identifier = "[A-Za-z_$][\\w$]*";
+  const currentPattern = new RegExp(
+    `let (${identifier})=(${identifier})===\`win32\`&&(${identifier})\\.` +
+      `CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===\`1\`\\?\\{\\.\\.\\.(${identifier}),` +
+      `computerUse:!0\\}:\\4,`,
+    "g",
   );
-  patchedSource = patchedSource.replace(
-    currentWindowsOnlyFeaturePattern,
-    (_, gateVar, platformVar, envVar, featuresVar) => {
-      changed = true;
-      return `let ${gateVar}=${platformVar}===\`linux\`?{...${featuresVar},computerUse:!0,computerUseNodeRepl:!0}:${platformVar}===\`win32\`&&${envVar}.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===\`1\`?{...${featuresVar},computerUse:!0,computerUseNodeRepl:!0}:${featuresVar},`;
-    },
+  const patchedPattern = new RegExp(
+    `let (${identifier})=(${identifier})===\`linux\`\\?\\{\\.\\.\\.(${identifier}),computerUse:!0\\}:` +
+      `\\2===\`win32\`&&(${identifier})\\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===\`1\`\\?` +
+      `\\{\\.\\.\\.\\3,computerUse:!0\\}:\\3,`,
+    "g",
   );
-  patchedSource = patchedSource.replace(
-    chainedWindowsOnlyFeaturePattern,
-    (_, gateVar, platformVar, envVar, featuresVar) => {
-      changed = true;
-      return `,${gateVar}=${platformVar}===\`linux\`?{...${featuresVar},computerUse:!0,computerUseNodeRepl:!0}:${platformVar}===\`win32\`&&${envVar}.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===\`1\`?{...${featuresVar},computerUse:!0,computerUseNodeRepl:!0}:${featuresVar},`;
-    },
-  );
-
-  if (changed) {
-    return patchedSource;
-  }
-
-  if (
-    patchedFeaturePattern.test(currentSource) ||
-    currentPatchedFeaturePattern.test(currentSource) ||
-    currentChainedPatchedFeaturePattern.test(currentSource)
-  ) {
-    return currentSource;
-  }
-
-  if (currentSource.includes("CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE")) {
-    console.warn(
-      "WARN: Could not find Computer Use desktop feature gate — skipping Linux Computer Use feature patch",
-    );
-  }
-
-  return currentSource;
-}
-
-// Scan to the `;` that closes the declaration the plugins query lives in,
-// ignoring separators nested in calls, literals, or template substitutions.
-function findStatementEnd(source, fromIndex) {
-  const stack = [];
-  let quote = null;
-  let escaped = false;
-
-  for (let i = fromIndex; i < source.length; i += 1) {
-    const char = source[i];
-    if (quote != null) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (quote === "`" && char === "$" && source[i + 1] === "{") {
-        stack.push("`");
-        quote = null;
-        i += 1;
-      } else if (char === quote) {
-        quote = null;
-      }
-      continue;
-    }
-
-    if (char === "'" || char === '"' || char === "`") {
-      quote = char;
-    } else if (char === "(" || char === "[" || char === "{") {
-      stack.push(char);
-    } else if (char === ")" || char === "]" || char === "}") {
-      const opener = stack.pop();
-      if (opener === "`") {
-        quote = "`";
-      } else if (opener == null) {
-        return -1;
-      }
-    } else if (char === ";" && stack.length === 0) {
-      return i;
-    }
-  }
-
-  return -1;
-}
-
-// The settings component is compiled with the React Compiler, so the plugin
-// card is derived inside memo-cache branches rather than a plain declaration
-// chain. Anchor on that derivation and inject before the query is first read.
-function currentComputerUseCardTarget(source) {
-  const computerUsePluginNameVars = new Set(
-    [...source.matchAll(/([A-Za-z_$][\w$]*)=`computer-use`/g)].map((match) => match[1]),
-  );
-  if (computerUsePluginNameVars.size === 0) {
-    return null;
-  }
-
-  const derivations = [...source.matchAll(
-    /(?<derived>[A-Za-z_$][\w$]*)=(?<selector>[A-Za-z_$][\w$]*)\((?<plugins>[A-Za-z_$][\w$]*)\.availablePlugins,(?<pluginName>[A-Za-z_$][\w$]*),(?<marketplacePath>[A-Za-z_$][\w$]*)\)/g,
-  )].filter((match) => computerUsePluginNameVars.has(match.groups.pluginName));
-  if (derivations.length !== 1) {
-    return null;
-  }
-
-  const derivation = derivations[0];
-  const pluginsQueryVar = derivation.groups.plugins;
-  const declarationIndex = source.lastIndexOf(`${pluginsQueryVar}=`, derivation.index);
-  if (declarationIndex === -1) {
-    return null;
-  }
-
-  const statementEnd = findStatementEnd(source, declarationIndex);
-  if (statementEnd === -1 || statementEnd >= derivation.index) {
-    return null;
-  }
-
-  const platformVar = findLastRegexMatch(
-    source.slice(0, declarationIndex),
-    /\{computerUseAvailability:[A-Za-z_$][\w$]*,platform:([A-Za-z_$][\w$]*)\}=/g,
-  )?.[1];
-  if (platformVar == null) {
-    return null;
-  }
-
-  return {
-    insertAt: statementEnd + 1,
-    pluginsQueryVar,
-    pluginNameVar: derivation.groups.pluginName,
-    platformVar,
-  };
-}
-
-function applyCurrentComputerUseSettingsContract(currentSource) {
-  if (
-    !currentSource.includes("computerUseAvailability:") ||
-    !currentSource.includes("availablePlugins")
-  ) {
-    return null;
-  }
-
-  const availabilityMarkerPattern =
-    /([A-Za-z_$][\w$]*)===`linux`&&\(([A-Za-z_$][\w$]*)=\{\.\.\.\2,available:!0,isFetching:!1,isLoading:!1\}\);/;
-  const cardMarkerPattern =
-    /let ([A-Za-z_$][\w$]*BundledMarketplaceDonor)=([A-Za-z_$][\w$]*)\.availablePlugins\.find\(e=>e\.marketplaceName===`openai-bundled`&&typeof e\.marketplacePath===`string`&&e\.marketplacePath\.startsWith\(`\/`\)&&e\.marketplacePath\.endsWith\(`\/\.agents\/plugins\/marketplace\.json`\)\);[^;]{0,1800}marketplacePath:\1\.marketplacePath/;
-  const hasAvailabilityMarker = availabilityMarkerPattern.test(currentSource);
-  const hasCardMarker = cardMarkerPattern.test(currentSource);
-
-  if (hasAvailabilityMarker && hasCardMarker) {
-    return currentSource;
-  }
-  if (hasAvailabilityMarker !== hasCardMarker) {
-    console.warn(
-      "WARN: Could not find the complete current Computer Use settings contract — skipping Linux Computer Use UI availability patch",
-    );
-    return currentSource;
-  }
-
-  let availabilityChanged = false;
-  const availabilityPattern =
-    /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(([^)]*)\),\{platform:([A-Za-z_$][\w$]*)\}=([A-Za-z_$][\w$]*)\(\),([A-Za-z_$][\w$]*)=/g;
-  let patchedSource = currentSource.replace(
-    availabilityPattern,
-    (match, availabilityVar, hookVar, hookArg, platformVar, platformHookVar, nextVar, offset) => {
-      const nextSource = currentSource.slice(offset + match.length, offset + match.length + 3000);
-      if (
-        !nextSource.includes(`computerUseAvailability:${availabilityVar}`) ||
-        !nextSource.includes(`${availabilityVar}.available`)
-      ) {
-        return match;
-      }
-      availabilityChanged = true;
-      return `let ${availabilityVar}=${hookVar}(${hookArg}),{platform:${platformVar}}=${platformHookVar}();${platformVar}===\`linux\`&&(${availabilityVar}={...${availabilityVar},available:!0,isFetching:!1,isLoading:!1});let ${nextVar}=`;
-    },
-  );
-
-  let cardChanged = false;
-  const cardTarget = currentComputerUseCardTarget(patchedSource);
-  if (cardTarget != null) {
-    const { insertAt, pluginsQueryVar, pluginNameVar, platformVar } = cardTarget;
-    const bundledMarketplaceDonorVar = `${pluginsQueryVar}BundledMarketplaceDonor`;
-    const linuxCard =
-      `let ${bundledMarketplaceDonorVar}=${pluginsQueryVar}.availablePlugins.find(e=>e.marketplaceName===\`openai-bundled\`&&typeof e.marketplacePath===\`string\`&&e.marketplacePath.startsWith(\`/\`)&&e.marketplacePath.endsWith(\`/.agents/plugins/marketplace.json\`));${platformVar}===\`linux\`&&${bundledMarketplaceDonorVar}!=null&&!${pluginsQueryVar}.availablePlugins.some(e=>e.plugin?.name===${pluginNameVar}||e.plugin?.id?.split(\`@\`)[0]===${pluginNameVar})&&(${pluginsQueryVar}={...${pluginsQueryVar},availablePlugins:[...${pluginsQueryVar}.availablePlugins,{marketplaceName:\`openai-bundled\`,marketplacePath:${bundledMarketplaceDonorVar}.marketplacePath,logoPath:new URL(\`computer-use-plugin-icon-linux.png\`,import.meta.url).href,logoDarkPath:new URL(\`computer-use-plugin-icon-linux.png\`,import.meta.url).href,plugin:{id:${pluginNameVar},name:${pluginNameVar},installed:!0,enabled:!0}}]});`;
-    patchedSource =
-      `${patchedSource.slice(0, insertAt)}${linuxCard}${patchedSource.slice(insertAt)}`;
-    cardChanged = true;
-  }
-
-  if (
-    availabilityChanged &&
-    cardChanged &&
-    availabilityMarkerPattern.test(patchedSource) &&
-    cardMarkerPattern.test(patchedSource)
-  ) {
-    return patchedSource;
+  const current = [...currentSource.matchAll(currentPattern)];
+  const patched = [...currentSource.matchAll(patchedPattern)];
+  if (patched.length === 1 && current.length === 0) return currentSource;
+  if (current.length === 1 && patched.length === 0) {
+    const match = current[0];
+    const [, gateVar, platformVar, envVar, featuresVar] = match;
+    const replacement =
+      `let ${gateVar}=${platformVar}===\`linux\`?{...${featuresVar},computerUse:!0}:` +
+      `${platformVar}===\`win32\`&&${envVar}.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===\`1\`?` +
+      `{...${featuresVar},computerUse:!0}:${featuresVar},`;
+    return currentSource.slice(0, match.index) + replacement +
+      currentSource.slice(match.index + match[0].length);
   }
 
   console.warn(
-    "WARN: Could not find the complete current Computer Use settings contract — skipping Linux Computer Use UI availability patch",
+    "WARN: Could not find Computer Use desktop feature gate — skipping Linux Computer Use feature patch",
   );
-  return currentSource;
-}
 
-function applyLinuxComputerUseRendererAvailabilityPatch(currentSource) {
-  const currentSettingsSource = applyCurrentComputerUseSettingsContract(currentSource);
-  if (currentSettingsSource != null) {
-    return currentSettingsSource;
-  }
-
-  console.warn(
-    "WARN: Could not find the current Computer Use settings contract — skipping Linux Computer Use UI availability patch",
-  );
   return currentSource;
 }
 
 function applyCurrentComputerUseHostPlatformContract(currentSource) {
-  let changed = false;
-  const patchedSource = currentSource.replace(
-    /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\{areRequiredFeaturesEnabled:([A-Za-z_$][\w$]*),enabled:([A-Za-z_$][\w$]*),isAnyFeatureLoading:([A-Za-z_$][\w$]*),isComputerUseGateEnabled:([A-Za-z_$][\w$]*),isHostCompatiblePlatform:([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\),isPlatformLoading:([A-Za-z_$][\w$]*),windowType:`electron`\}\)/g,
-    (
-      match,
-      resultVar,
-      helperVar,
-      requiredFeaturesVar,
-      enabledVar,
-      featureLoadingVar,
-      rolloutVar,
-      platformPredicateVar,
-      platformVar,
-      platformLoadingVar,
-      offset,
-    ) => {
-      const context = currentSource.slice(Math.max(0, offset - 1200), offset + match.length);
-      if (!context.includes("featureName:`computer_use`")) {
-        return match;
-      }
-      changed = true;
-      return `${resultVar}=${helperVar}({areRequiredFeaturesEnabled:${requiredFeaturesVar},enabled:${enabledVar},isAnyFeatureLoading:${featureLoadingVar},isComputerUseGateEnabled:${rolloutVar},isHostCompatiblePlatform:${platformVar}===\`linux\`||${platformPredicateVar}(${platformVar}),isPlatformLoading:${platformLoadingVar},windowType:\`electron\`})`;
-    },
-  );
+  const contractPattern =
+    /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\{areRequirementsPending:([A-Za-z_$][\w$]*),areRequiredFeaturesEnabled:([A-Za-z_$][\w$]*),enabled:([A-Za-z_$][\w$]*),isBrowserAndComputerUseAllowed:([A-Za-z_$][\w$]*),isAnyFeatureLoading:([A-Za-z_$][\w$]*),isComputerUseGateEnabled:([A-Za-z_$][\w$]*),isHostCompatiblePlatform:([^,{}]+),isPlatformLoading:([A-Za-z_$][\w$]*),windowType:`electron`\}\)/g;
+  const candidates = [];
+  let match;
+  while ((match = contractPattern.exec(currentSource)) != null) {
+    const context = currentSource.slice(Math.max(0, match.index - 1200), match.index + match[0].length);
+    if (!context.includes("featureName:`computer_use`")) {
+      continue;
+    }
 
-  if (changed) {
-    return patchedSource;
+    const hostExpression = match[9];
+    const pristine = hostExpression.match(
+      /^([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)$/,
+    );
+    const patched = hostExpression.match(
+      /^([A-Za-z_$][\w$]*)===`linux`\|\|([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)$/,
+    );
+    let kind = "malformed";
+    let platformVar = null;
+    if (pristine != null) {
+      kind = "pristine";
+      platformVar = pristine[2];
+    } else if (patched != null && patched[1] === patched[3]) {
+      kind = "patched";
+      platformVar = patched[1];
+    }
+    candidates.push({ hostExpression, kind, match, platformVar });
   }
 
-  if (
-    /featureName:`computer_use`[\s\S]{0,2200}?areRequiredFeaturesEnabled:[A-Za-z_$][\w$]*,enabled:[A-Za-z_$][\w$]*,isAnyFeatureLoading:[A-Za-z_$][\w$]*,isComputerUseGateEnabled:[A-Za-z_$][\w$]*,isHostCompatiblePlatform:([A-Za-z_$][\w$]*)===`linux`\|\|[A-Za-z_$][\w$]*\(\1\),isPlatformLoading:/.test(currentSource)
-  ) {
+  if (candidates.length !== 1 || candidates[0].kind === "malformed") {
+    return null;
+  }
+
+  const candidate = candidates[0];
+  if (candidate.kind === "patched") {
     return currentSource;
   }
 
-  return null;
+  const hostExpressionStart = candidate.match.index +
+    candidate.match[0].indexOf(candidate.hostExpression);
+  const hostExpressionEnd = hostExpressionStart + candidate.hostExpression.length;
+  return currentSource.slice(0, hostExpressionStart) +
+    `${candidate.platformVar}===\`linux\`||${candidate.hostExpression}` +
+    currentSource.slice(hostExpressionEnd);
 }
 
 function matchesLinuxComputerUseHostPlatformContract(currentSource) {
@@ -624,61 +246,6 @@ function applyLinuxComputerUseHostPlatformPatch(currentSource) {
 
   console.warn(
     "WARN: Could not find current Computer Use host-platform gate — skipping Linux Computer Use host-platform patch",
-  );
-  return currentSource;
-}
-
-function applyCurrentComputerUseInstallFlowContract(currentSource) {
-  if (currentSource.includes("plugin detail query requires pluginName")) {
-    const markerPattern =
-      /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)!==`computer-use`,([A-Za-z_$][\w$]*);/;
-    if (markerPattern.test(currentSource)) {
-      return currentSource;
-    }
-
-    const needlePattern =
-      /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*);/g;
-    let changed = false;
-    const patchedSource = currentSource.replace(
-      needlePattern,
-      (match, gateVar, gateValueVar, nextVar, offset) => {
-        const lookback = currentSource.slice(Math.max(0, offset - 900), offset);
-        const nextSource = currentSource.slice(offset + match.length, offset + match.length + 1800);
-        const pluginNameVar = lookback.match(/pluginName:([A-Za-z_$][\w$]*)/)?.[1];
-        if (
-          pluginNameVar == null ||
-          !new RegExp(
-            String.raw`&&\(!${gateVar}\|\|[A-Za-z_$][\w$]*\.available\)`,
-          ).test(nextSource) ||
-          !nextSource.includes("`read-plugin`")
-        ) {
-          return match;
-        }
-        changed = true;
-        return `let ${gateVar}=${gateValueVar}&&${pluginNameVar}!==\`computer-use\`,${nextVar};`;
-      },
-    );
-
-    if (changed && markerPattern.test(patchedSource)) {
-      return patchedSource;
-    }
-  }
-
-  return null;
-}
-
-function matchesLinuxComputerUseInstallFlowContract(currentSource) {
-  return applyCurrentComputerUseInstallFlowContract(currentSource) != null;
-}
-
-function applyLinuxComputerUseInstallFlowPatch(currentSource) {
-  const patchedSource = applyCurrentComputerUseInstallFlowContract(currentSource);
-  if (patchedSource != null) {
-    return patchedSource;
-  }
-
-  console.warn(
-    "WARN: Could not find current Computer Use plugin detail availability gate — skipping Linux Computer Use install flow patch",
   );
   return currentSource;
 }
@@ -764,7 +331,7 @@ function linuxNativeDesktopAppsHelper({ childProcessVar, fsVar, osVar, pathVar }
     `function codexLinuxNativeDesktopAppsPayload(e){return e?.params??e??{}}`,
     `function codexLinuxNativeDesktopAppsHome(){return process.env.HOME||${osVar}.homedir?.()||\`\`}`,
     `function codexLinuxNativeDesktopAppsExecutable(e){if(!e)return null;if(e.includes(\`/\`)){try{return ${fsVar}.existsSync(e)&&(${fsVar}.accessSync(e,${fsVar}.constants.X_OK),!0)?e:null}catch{return null}}for(let t of(process.env.PATH||\`\`).split(\`:\`)){if(!t||!${pathVar}.isAbsolute(t))continue;let n=${pathVar}.join(t,e);try{if(${fsVar}.existsSync(n)&&(${fsVar}.accessSync(n,${fsVar}.constants.X_OK),!0))return n}catch{}}return null}`,
-    `function codexLinuxNativeDesktopAppsBackendPath(){let e=process.env.CODEX_LINUX_COMPUTER_USE_BACKEND_SOURCE?.trim(),t=process.env.CODEX_ELECTRON_RESOURCES_PATH||process.resourcesPath,n=process.env.CODEX_HOME||(codexLinuxNativeDesktopAppsHome()?${pathVar}.join(codexLinuxNativeDesktopAppsHome(),\`.codex\`):\`\`),r=[e,t&&${pathVar}.join(t,\`plugins\`,\`openai-bundled\`,\`plugins\`,\`computer-use\`,\`bin\`,\`codex-computer-use-linux\`),n&&${pathVar}.join(n,\`plugins\`,\`cache\`,\`openai-bundled\`,\`computer-use\`,\`latest\`,\`bin\`,\`codex-computer-use-linux\`),\`codex-computer-use-linux\`];for(let e of r){if(typeof e!==\`string\`||e.length===0)continue;let t=codexLinuxNativeDesktopAppsExecutable(e);if(t)return t}return null}`,
+    `function codexLinuxNativeDesktopAppsBackendPath(){let e=process.env.CODEX_LINUX_COMPUTER_USE_BACKEND_SOURCE?.trim(),t=process.env.CODEX_ELECTRON_RESOURCES_PATH||process.resourcesPath,n=process.env.CODEX_HOME||(codexLinuxNativeDesktopAppsHome()?${pathVar}.join(codexLinuxNativeDesktopAppsHome(),\`.codex\`):\`\`),r=[e,t&&${pathVar}.join(t,\`plugins\`,\`openai-bundled\`,\`plugins\`,\`unified-computer-use\`,\`bin\`,\`codex-computer-use-linux\`),n&&${pathVar}.join(n,\`plugins\`,\`cache\`,\`openai-bundled\`,\`unified-computer-use\`,\`latest\`,\`bin\`,\`codex-computer-use-linux\`),\`codex-computer-use-linux\`];for(let e of r){if(typeof e!==\`string\`||e.length===0)continue;let t=codexLinuxNativeDesktopAppsExecutable(e);if(t)return t}return null}`,
     `function codexLinuxNativeDesktopAppsRun(e){let t=codexLinuxNativeDesktopAppsBackendPath();if(t==null)return null;try{let n=${childProcessVar}.spawnSync(t,e,{encoding:\`utf8\`,env:process.env,maxBuffer:1048576,timeout:2500});if(n.error||n.status!==0)return null;return JSON.parse(n.stdout||\`null\`)}catch{return null}}`,
     `function codexLinuxNativeDesktopAppsDataDirs(){let e=codexLinuxNativeDesktopAppsHome(),t=process.env.XDG_DATA_HOME||(e&&${pathVar}.join(e,\`.local\`,\`share\`)),n=(process.env.XDG_DATA_DIRS||\`/usr/local/share:/usr/share\`).split(\`:\`).filter(Boolean);return[...t?[t]:[],...n]}`,
     `function codexLinuxNativeDesktopAppsUnescape(e){return String(e??\`\`).replace(/\\\\s/g,\` \`).replace(/\\\\n/g,\`\\n\`).replace(/\\\\t/g,\`\\t\`).replace(/\\\\r/g,\`\\r\`).replace(/\\\\\\\\/g,\`\\\\\`)}`,
@@ -863,12 +430,8 @@ module.exports = {
   applyLinuxComputerUseAvatarCursorBridgePatch,
   applyLinuxComputerUseFeaturePatch,
   applyLinuxComputerUseHostPlatformPatch,
-  applyLinuxComputerUseInstallFlowPatch,
   applyLinuxNativeDesktopAppsHandlerPatch,
-  applyLinuxComputerUsePluginGatePatch,
-  applyLinuxComputerUseRendererAvailabilityPatch,
   isComputerUseUiEnabled,
   linuxComputerUseCursorBridgeRuntimeSource,
   matchesLinuxComputerUseHostPlatformContract,
-  matchesLinuxComputerUseInstallFlowContract,
 };

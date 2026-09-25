@@ -2,7 +2,7 @@
 
 const RUNTIME_VERSION = "omarchy-theme-v1";
 const STYLE_LINK_ID = "codex-linux-omarchy-theme-link";
-const THEME_CSS_ENDPOINT = "/__codex_user_stylesheet.css";
+const THEME_CSS_ENV = "CODEX_LINUX_OMARCHY_STYLESHEET_URI";
 
 function omarchyThemeRuntimeSource() {
   return [
@@ -12,9 +12,9 @@ function omarchyThemeRuntimeSource() {
     "try{globalThis.codexLinuxOmarchyThemeCleanup?.()}catch{}",
     "globalThis.codexLinuxOmarchyThemeVersion=VERSION;",
     `const STYLE_LINK_ID=${JSON.stringify(STYLE_LINK_ID)};`,
-    `const THEME_CSS_ENDPOINT=${JSON.stringify(THEME_CSS_ENDPOINT)};`,
+    `const THEME_CSS_ENV=${JSON.stringify(THEME_CSS_ENV)};`,
     "let interval=null,installed=false;",
-    "function refresh(){if(typeof document===`undefined`)return;const target=document.head||document.documentElement;if(!target)return;let link=document.getElementById(STYLE_LINK_ID);if(!link){link=document.createElement(`link`);link.id=STYLE_LINK_ID;link.rel=`stylesheet`;link.type=`text/css`;target.appendChild(link)}link.href=THEME_CSS_ENDPOINT+`?t=`+Date.now()}",
+    "function refresh(){if(typeof document===`undefined`)return;const uri=globalThis.process?.env?.[THEME_CSS_ENV];if(!uri)return;const target=document.head||document.documentElement;if(!target)return;let link=document.getElementById(STYLE_LINK_ID);if(!link){link=document.createElement(`link`);link.id=STYLE_LINK_ID;link.rel=`stylesheet`;link.type=`text/css`;target.appendChild(link)}link.href=uri+`?t=`+Date.now()}",
     "function onVisibilityChange(){document.hidden||refresh()}",
     "function install(){if(installed)return;installed=true;refresh();interval=setInterval(refresh,5000);window.addEventListener(`focus`,refresh);document.addEventListener(`visibilitychange`,onVisibilityChange)}",
     "function cleanup(){document.removeEventListener(`DOMContentLoaded`,install);document.removeEventListener(`visibilitychange`,onVisibilityChange);window.removeEventListener(`focus`,refresh);interval!=null&&clearInterval(interval);interval=null;installed=false}",
@@ -37,7 +37,7 @@ function applyOmarchyThemeLoader(source) {
 module.exports = {
   RUNTIME_VERSION,
   STYLE_LINK_ID,
-  THEME_CSS_ENDPOINT,
+  THEME_CSS_ENV,
   descriptors: [
     {
       id: "omarchy-theme-css-loader",

@@ -51,6 +51,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   wtype failure; GNOME, KDE/Plasma, and COSMIC retain their existing guarded
   paths.
 
+- The launcher sends at most one anonymous `/app-launch` count per UTC day to
+  the public GoatCounter dashboard so maintainers can gauge whether the
+  distribution is useful. The background request uses one fixed,
+  non-identifying User-Agent and contains no application, account, machine,
+  version, architecture, language, screen, or referrer data;
+  `CODEX_LINUX_DISABLE_USAGE_REPORTING=1` disables it.
 - A disabled-by-default `deferred-update-build` Linux feature adds a **Build
   updates automatically** setting. Turning it off keeps notification and DMG
   verification active while deferring local package builds until an explicit
@@ -65,6 +71,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   standalone `COMPUTER_USE_LINUX_ENABLE_SHELL=1` compatibility alias), preserves
   Codex naming and DBus boundaries, clears ambient credentials, bounds execution
   and output, and records command digests without becoming a sandbox.
+- The embedded Computer Use backend is synchronized to standalone v0.4.9 as
+  `0.4.9-linux-alpha1`, including generic X11/EWMH window control, deep GTK4
+  accessibility traversal, bounded queue and child-read work, X11 `xdotool`
+  keyboard, text, and coordinate-click input, KDE portal scroll polarity, and
+  portal key chords, with generic X11 registered last.
 - A shared upstream DMG acceptance profile now produces the same structured
   decision for local installs, updater rebuilds, and scheduled CI. Scheduled
   rejections create one fingerprinted drift issue and supersede issues for
@@ -81,6 +92,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Restored and adapted the required Quit-confirmation focus patch because the
+  current signed Linux package still opens its synchronous confirmation without
+  a parent window. The patch discovers the handler through its unique semantic
+  contract, uses a visible parent with reentrancy protection, and fails closed
+  when that contract drifts.
 - Remote mobile control now relies on the current upstream account-enrollment
   compatibility and Connections tab resolver instead of patching duplicate
   Linux-specific fallbacks into those paths.
@@ -93,6 +109,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- The documented `UPSTREAM_DEB=/path/to/chatgpt_<version>_<arch>.deb make build-app`
+  invocation (also `make rebuild`, `rebuild-install`, `inspect-upstream`, and
+  `rebuild-next`) no longer fails with "Only one upstream .deb path may be
+  provided". The Makefile forwards `UPSTREAM_DEB` to `install.sh` both through
+  the recipe environment and as the positional argument, and duplicate-input
+  detection treated that single documented input as two conflicting paths. A
+  positional argument is now rejected only when it differs from the
+  environment-provided path.
+- The NixOS module publishes the package's workspace runtime libraries through
+  `programs.nix-ld.libraries` when `programs.nix-ld` is enabled. Codex sources
+  a login-shell snapshot before every sandboxed command, and on such systems
+  that snapshot restores the host `NIX_LD_LIBRARY_PATH` over the value set by
+  the packaged Bubblewrap adapter, so the adapter's libraries never reached the
+  primary runtime's headless LibreOffice. The package exposes the list as
+  `passthru.workspaceRuntimeLibraries`; the module test and the NixOS VM test
+  cover the nix-ld path.
+- The Nix workspace runtime now lets the primary runtime's bundled headless
+  LibreOffice start on NixOS. Document conversions previously failed with
+  `liblcms2.so.2: cannot open shared object file` and, once that library was
+  present, `libcurl.so.4: version CURL_OPENSSL_4 not found`, because the
+  sandbox library path carried only the GnuTLS-compat curl needed by the
+  bundled Git. The path now includes `freetype` and `lcms2` and places the
+  stock curl ahead of the GnuTLS-compat build, so `libcurl.so.4` resolves with
+  OpenSSL symbol versions while `libcurl-gnutls.so.4` still reaches Git. The
+  `nix-runtime` checks and the VM smoke test run a document-runtime probe that
+  links all three libraries.
+- Default builds now repair the renderer module cycle in signed stable Linux
+  `26.908.31748` that can leave the main window empty with
+  `Initial route prefetch failed: n is not a function`. The required core
+  patch is acceptance-gated and must be retired when upstream removes the
+  cycle.
+- Wayland sessions again start the app on a native Wayland surface. The
+  launcher appends `--ozone-platform=wayland` when `WAYLAND_DISPLAY` names a
+  live compositor socket, the session is not X11, and no command-line argument,
+  flag file, feature argument, or launcher hook already selects a backend.
+  ChromeOS Crostini, GNOME Wayland with several monitors, and WSLg keep the X11
+  default, and `CODEX_OZONE_PLATFORM=x11|wayland` pins a backend ahead of the
+  detection; the Nix wrapper sets `x11` so `NIXOS_OZONE_WL` remains its opt-in.
+  The runtime otherwise defaults to X11, so compositors that do not scale
+  XWayland clients drew the window at 1x on a HiDPI output.
+- Lifecycle hooks now use exported application paths without interpreting
+  desktop arguments or deep-link URIs as launcher context. After-exit hooks
+  receive the Electron status and cannot replace it when cleanup fails; the
+  MCP and Node REPL reapers now run on normal and deep-link launches.
+- The opt-in `frameless-titlebar` feature again hides official Linux overlay
+  buttons. It retargets the current `titleBarOverlay` window options, zoom
+  update, and theme-sync contracts, remaps Linux webview chrome to `native`,
+  and rejects mixed, duplicate, or drifted official-package surfaces
+  byte-identically. Retired DMG inset and user-agent layout-gate rewrites are
+  omitted because official Linux already uses a 0px inset for both layouts.
+- The opt-in Dock icon tweak is restored for the signed official Linux package,
+  using its ChatGPT icon and desktop metadata while preserving ChatGPT
+  Community window, tray, and managed launcher synchronization.
 - Native remote-mobile builds now route side-by-side `--new-instance` launches
   through the normal single-instance handoff, preventing competing Desktop
   Remote Control owners. Nix module sessions instead proxy every Desktop

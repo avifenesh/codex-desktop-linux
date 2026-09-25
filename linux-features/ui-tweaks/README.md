@@ -1,6 +1,6 @@
 # UI Tweaks
 
-`ui-tweaks` is an optional Linux feature for small ChatGPT Desktop UI
+`ui-tweaks` is an optional Linux feature for small ChatGPT Community UI
 customizations. It is disabled by default and is intended as a shared place for
 future visual tweaks that are useful to some Linux users but should not affect
 the baseline app.
@@ -17,7 +17,8 @@ Enable it in the local, gitignored feature config:
 
 | Tweak | Patch module | What it does | Settings |
 | --- | --- | --- | --- |
-| `appearance.dockIcon` | `patches/dock-icon.js` | Exposes the upstream Appearance setting and search result for switching Linux windows, the system tray, and supported launchers between the official ChatGPT and Codex icons. | `tweaks.appearance.dockIcon.enabled` |
+| `appearance.dockIcon` | `patches/dock-icon.js` | Exposes the upstream Dock icon selector and synchronizes the selected icon across Linux windows, tray, and supported desktop launchers. | `tweaks.appearance.dockIcon.enabled` |
+| `appearance.uiFontSize` | `patches/ui-font-size.js` | Raises the upstream 16 px UI font-size maximum to a configurable value. | `tweaks.appearance.uiFontSize.enabled`, `tweaks.appearance.uiFontSize.max` |
 | `home.suggestedPrompts` | `patches/suggested-prompts.js` | Exposes the upstream Suggested Prompts setting and enables generated project-aware cards on Home. | `tweaks.home.suggestedPrompts.enabled` |
 | `modelPicker.showModelsByDefault` | `patches/model-picker-model-list.js` | Opens the advanced picker by default and shows model choices inline instead of hiding them behind the compact Power slider and a nested Model submenu. | `tweaks.modelPicker.showModelsByDefault.enabled` |
 | `reasoning.keepEffortLabelsEnglish` | `patches/reasoning-effort-labels.js` | Keeps reasoning effort values in English in the Simplified Chinese UI while leaving the surrounding interface translated. | `tweaks.reasoning.keepEffortLabelsEnglish.enabled` |
@@ -52,20 +53,27 @@ Each tweak documents its own config keys below.
 
 ### `appearance.dockIcon`
 
-Exposes the upstream Dock icon selector on Linux and stages the original PNG
-resources from the current macOS bundle. The selected icon is applied to open
-and restored Electron windows and to the system tray. On KDE Plasma, the tweak
-also creates and updates a managed user-local desktop entry so a pinned taskbar
-launcher follows the selected icon without reloading Plasma Shell. The Codex
-resources are cropped to the same visual occupancy as the ChatGPT icon because
-Linux taskbars do not apply macOS Dock normalization. Existing user-managed
-desktop entries remain untouched. Packaged launchers are discovered from the
-runtime desktop hint or the standard `XDG_DATA_DIRS` application paths. The
-source launcher must match the active app id before it can be copied, so a
-side-by-side identity cannot inherit the default package's launch commands.
+Exposes the upstream Appearance row on Linux and applies the selection to
+existing and newly registered windows, the official Linux tray, and a managed
+user-local desktop entry. The ChatGPT choice uses `icon-chatgpt.png` from the
+signed official Linux package. The alternate choice uses the existing ChatGPT
+Community package icon; retired macOS DMG icon resources are not imported.
 
-This tweak is independently disabled by default. Enable it while keeping the
-rest of `ui-tweaks` configurable:
+Staging validates the official package's `chatgpt.desktop` identity before it
+copies the ChatGPT icon. Missing or changed package resources reject the
+candidate so an enabled Dock tweak cannot be installed without its runtime
+payload. The desktop helper writes only a full-state-hash-owned launcher derived
+from an identity-matching packaged entry. AppImage launch commands are rewritten
+to the persistent AppImage path instead of the temporary mounted `AppRun`.
+The prelaunch hook removes only an unchanged managed override after the nested
+tweak is disabled. Desktop entries carry a full-content digest, while icon files
+use content-addressed names whose digest must match their bytes. Any user edit or
+pre-existing conflicting icon is preserved, and interrupted sync or cleanup can
+resume without a separate ownership sidecar. A per-app lock serializes runtime
+updates, and later runs remove only digest-verified orphan icons from the three
+feature-owned selection namespaces.
+
+This tweak is independently disabled by default:
 
 ```json
 {
@@ -86,11 +94,51 @@ rest of `ui-tweaks` configurable:
 
 Config keys:
 
-- `enabled`: `true` applies the three Dock icon descriptors and stages their
-  resources. `false` skips Dock-specific asset checks and removes any staged
-  Dock icon payload without disabling other UI tweaks. On the next cold start,
-  a prelaunch hook also removes a marker-owned user-local launcher and its
-  managed icon files. Unmanaged or symlinked desktop artifacts are preserved.
+- `enabled`: `true` applies the two current official-package Dock descriptors
+  and stages their resources. `false` leaves official Linux behavior unchanged.
+
+To remove `ui-tweaks` after using a custom Dock icon, first keep the feature
+enabled, set `appearance.dockIcon.enabled` to `false`, rebuild and install, and
+launch the app once. That launch lets the marker-safe prelaunch hook remove its
+managed desktop override and icons. The feature can then be removed from the
+next rebuild. Removing `ui-tweaks` directly does not run feature-owned local
+cleanup, by design.
+
+### `appearance.uiFontSize`
+
+Raises the official app's hard-coded UI font-size maximum from 16 px. The same
+upstream limit feeds both the numeric input and the persisted-setting schema.
+That registry is compiled into the renderer, main-process support bundle, and
+worker, so the patch requires and updates all three copies atomically instead of
+bypassing only the visible control. Code font sizing is unchanged.
+
+This tweak is independently disabled by default. Its default extended maximum
+is 24 px and can be configured from 17 through 64 px:
+
+```json
+{
+  "enabled": ["ui-tweaks"],
+  "settings": {
+    "ui-tweaks": {
+      "tweaks": {
+        "appearance": {
+          "uiFontSize": {
+            "enabled": true,
+            "max": 24
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Config keys:
+
+- `enabled`: `true` raises the UI font-size maximum; `false` preserves the
+  official 11–16 px range.
+- `max`: integer from `17` through `64`; invalid values warn and fall back to
+  `24`.
 
 ### `home.suggestedPrompts`
 
@@ -103,6 +151,11 @@ The patch continues to call the upstream rollout and account-eligibility
 functions for diagnostics, then honors the explicit Linux opt-in. It also keeps
 the upstream setting as the user's runtime on/off control after the feature is
 built into the app.
+
+The current official package keeps the renderer feature-sync bridge in
+`app-initial`, normal Home in `app-primary`, and Work Home in its `page` bundle.
+Each bundle has its own semantic contract so a future filename hash change does
+not silently select an unrelated asset.
 
 This tweak is independently disabled by default:
 
@@ -125,7 +178,7 @@ This tweak is independently disabled by default:
 
 Config keys:
 
-- `enabled`: `true` applies the four current-DMG Suggested Prompts descriptors.
+- `enabled`: `true` applies the six current-package Suggested Prompts descriptors.
   `false` leaves the upstream Settings and Home behavior unchanged while other
   UI tweaks remain independently configurable.
 
@@ -190,13 +243,17 @@ Config keys:
 
 ## Drift Behavior
 
-The patches are fail-soft. If upstream bundle markers drift, the feature writes
-a `WARN` message and leaves the asset unchanged. The patch report exposes that
-warning, and acceptance rejects a candidate when the enabled feature has drifted.
-Missing Dock icon resources also warn, remove only the Dock icon payload, and do
-not abort staging. Suggested Prompts validates every current insertion point
+The ASAR patches are fail-soft. If upstream bundle markers drift, the feature
+writes a `WARN` message and leaves the asset unchanged. The patch report exposes
+that warning, and acceptance rejects a candidate when the enabled feature has
+drifted. Missing Dock icon package resources or metadata fail the stage hook,
+remove only the incomplete Dock icon payload, and reject candidate promotion.
+Suggested Prompts validates every current insertion point
 before changing an asset and leaves mixed or drifted input byte-identical.
 Invalid style values warn and fall back to the default bold style.
+The UI font-size tweak requires the three current settings-registry contracts
+and leaves every target unchanged when any copy is missing, mixed, drifted, or
+ambiguous.
 
 ## Adding Tweaks
 

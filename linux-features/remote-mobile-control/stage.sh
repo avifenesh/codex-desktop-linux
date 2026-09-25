@@ -8,7 +8,6 @@ feature_marker="$feature_marker_dir/remote-mobile-control-enabled"
 desktop_remote_control_marker="$feature_marker_dir/desktop-app-server-remote-control-enabled"
 cold_start_hook_dir="$feature_marker_dir/cold-start.d"
 cold_start_hook="$cold_start_hook_dir/remote-mobile-control"
-single_instance_marker="$feature_marker_dir/single-instance-required"
 
 mkdir -p "$feature_marker_dir" "$cold_start_hook_dir"
 printf '%s\n' "remote-mobile-control" > "$feature_marker"
@@ -33,11 +32,10 @@ const found = fs.readdirSync(buildDir).some((name) => {
 process.exit(found ? 0 : 1);
 NODE
 then
-    rm -f "$desktop_remote_control_marker" "$single_instance_marker"
+    rm -f "$desktop_remote_control_marker"
     printf '%s\n' "version=1" "owner=desktop" > "$desktop_remote_control_marker"
-    printf '%s\n' "version=1" "feature=remote-mobile-control" > "$single_instance_marker"
 else
-    rm -f "$desktop_remote_control_marker" "$single_instance_marker"
+    rm -f "$desktop_remote_control_marker"
     echo "WARN: Desktop app-server remote-control marker not found; standalone remote mobile daemon remains enabled" >&2
 fi
 

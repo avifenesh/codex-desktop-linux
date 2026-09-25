@@ -183,8 +183,6 @@ function applyAgentWorkspaceMainBridgePatch(currentSource) {
 }
 
 function buildAgentWorkspaceSettingsSource({
-  chunkAsset,
-  chunkExportName = "s",
   reactAsset,
   reactExportName = "t",
   codexRequestAsset,
@@ -192,11 +190,10 @@ function buildAgentWorkspaceSettingsSource({
   vscodeApiAsset,
 }) {
   const requestAsset = codexRequestAsset ?? vscodeApiAsset;
-  return `import{${chunkExportName} as __toESM}from"./${chunkAsset}";
-import{${reactExportName} as __reactFactory}from"./${reactAsset}";
+  return `import{${reactExportName} as __reactFactory}from"./${reactAsset}";
 import{${codexRequestExportName} as __post}from"./${requestAsset}";
 
-var React=__toESM(__reactFactory(),1);
+var React=__reactFactory();
 var h=React.createElement;
 function SettingsPage({title,subtitle,children}){
   return h("div",{className:"h-full min-h-0 w-full overflow-y-auto"},
@@ -1816,33 +1813,36 @@ function importBindings(source) {
 
 function inferRuntimeDependenciesFromSettingsSource(source) {
   const jsxLocal = source.match(/\(0,([A-Za-z_$][\w$]*)\.jsx\)/)?.[1] ?? null;
-  const reactLocal = source.match(/\(0,([A-Za-z_$][\w$]*)\.useState\)/)?.[1] ?? null;
-  if (jsxLocal == null || reactLocal == null) {
-    return null;
-  }
-
-  const jsxFactoryLocal = source.match(
-    new RegExp(`${escapeRegExp(jsxLocal)}=([A-Za-z_$][\\w$]*)\\(\\)`),
-  )?.[1] ?? null;
-  const reactInitialization = source.match(
-    new RegExp(`${escapeRegExp(reactLocal)}=([A-Za-z_$][\\w$]*)\\(([A-Za-z_$][\\w$]*)\\(\\),1\\)`),
-  );
-  const chunkHelperLocal = reactInitialization?.[1] ?? null;
-  const reactFactoryLocal = reactInitialization?.[2] ?? null;
-  if (jsxFactoryLocal == null || chunkHelperLocal == null || reactFactoryLocal == null) {
+  const reactLocals = [...source.matchAll(/\(0,([A-Za-z_$][\w$]*)\.useState\)/g)]
+    .map((match) => match[1]);
+  if (jsxLocal == null || reactLocals.length === 0) {
     return null;
   }
 
   const bindings = importBindings(source);
-  const chunkBinding = bindings.get(chunkHelperLocal);
-  const reactBinding = bindings.get(reactFactoryLocal);
-  if (bindings.get(jsxFactoryLocal) == null || chunkBinding == null || reactBinding == null) {
+  const jsxFactoryLocal = source.match(
+    new RegExp(`${escapeRegExp(jsxLocal)}=([A-Za-z_$][\\w$]*)\\(\\)`),
+  )?.[1] ?? null;
+  if (jsxFactoryLocal == null || bindings.get(jsxFactoryLocal) == null) {
     return null;
   }
 
+  const candidates = new Map();
+  for (const reactLocal of reactLocals) {
+    const factoryLocal = source.match(
+      new RegExp(`${escapeRegExp(reactLocal)}=([A-Za-z_$][\\w$]*)\\(\\)`),
+    )?.[1] ?? null;
+    const reactBinding = factoryLocal == null ? null : bindings.get(factoryLocal);
+    if (reactBinding != null) {
+      candidates.set(`${reactBinding.assetName}\0${reactBinding.exportName}`, reactBinding);
+    }
+  }
+  if (candidates.size !== 1) {
+    return null;
+  }
+  const reactBinding = candidates.values().next().value;
+
   return {
-    chunkAsset: chunkBinding.assetName,
-    chunkExportName: chunkBinding.exportName,
     reactAsset: reactBinding.assetName,
     reactExportName: reactBinding.exportName,
   };
@@ -1853,15 +1853,16 @@ function inferRuntimeDependenciesFromSettingsAssets(assetsDir) {
     .readdirSync(assetsDir)
     .filter((name) => /^settings-page-[^.]+\.js$/.test(name))
     .sort();
+  const matches = [];
   for (const candidate of candidates) {
     const dependencies = inferRuntimeDependenciesFromSettingsSource(
       fs.readFileSync(path.join(assetsDir, candidate), "utf8"),
     );
     if (dependencies != null) {
-      return dependencies;
+      matches.push(dependencies);
     }
   }
-  return null;
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function resolveAgentWorkspaceSettingsAsset(extractedDir) {
@@ -1874,19 +1875,12 @@ function resolveAgentWorkspaceSettingsAsset(extractedDir) {
   if (runtimeDependencies == null) {
     throw new Error("could not resolve current settings runtime dependencies");
   }
-  const {
-    chunkAsset,
-    chunkExportName,
-    reactAsset,
-    reactExportName,
-  } = runtimeDependencies;
+  const { reactAsset, reactExportName } = runtimeDependencies;
   const codexRequestAsset = findCodexRequestWebviewAsset(assetsDir);
 
   return {
     filePath: path.join(assetsDir, SETTINGS_ASSET),
     source: buildAgentWorkspaceSettingsSource({
-      chunkAsset,
-      chunkExportName,
       reactAsset,
       reactExportName,
       codexRequestAsset: codexRequestAsset.assetName,
@@ -1925,10 +1919,23 @@ const CURRENT_SETTINGS_VISIBILITY_CASES =
   "case`worktrees`:case`local-environments`:case`environments`:return";
 const PATCHED_SETTINGS_VISIBILITY_CASES =
   "case`worktrees`:case`local-environments`:case`agent-workspaces`:case`environments`:return";
-const CURRENT_SETTINGS_ICON_PATTERN =
-  /"local-environments":([A-Za-z_$][\w$]*),worktrees:([A-Za-z_$][\w$]*)/;
-const PATCHED_SETTINGS_ICON_PATTERN =
-  /"local-environments":([A-Za-z_$][\w$]*),"agent-workspaces":([A-Za-z_$][\w$]*),worktrees:([A-Za-z_$][\w$]*)/;
+const CURRENT_SETTINGS_ICON_PATTERN = new RegExp(
+  `"local-environments":(\\{component:[A-Za-z_$][\\w$]*,commandAsset:[A-Za-z_$][\\w$]*,` +
+    `navigation:\\{assets:\\{16:[A-Za-z_$][\\w$]*,20:[A-Za-z_$][\\w$]*\\},ariaHidden:!1\\}\\}),worktrees:`,
+);
+const PATCHED_SETTINGS_ICON_PATTERN = new RegExp(
+  `"local-environments":(\\{component:[A-Za-z_$][\\w$]*,commandAsset:[A-Za-z_$][\\w$]*,` +
+    `navigation:\\{assets:\\{16:[A-Za-z_$][\\w$]*,20:[A-Za-z_$][\\w$]*\\},ariaHidden:!1\\}\\}),` +
+    `"agent-workspaces":\\1,worktrees:`,
+);
+const CURRENT_SETTINGS_PRELOAD_SLUGS =
+  "`hooks-settings`,`local-environments`,`worktrees`,`data-controls`";
+const PATCHED_SETTINGS_PRELOAD_SLUGS =
+  "`hooks-settings`,`local-environments`,`agent-workspaces`,`worktrees`,`data-controls`";
+const CURRENT_SETTINGS_POLICY_PATTERN =
+  /"local-environments":([A-Za-z_$][\w$]*|`codexLocal`),"mcp-settings":/;
+const PATCHED_SETTINGS_POLICY_PATTERN =
+  /"local-environments":([A-Za-z_$][\w$]*|`codexLocal`),"agent-workspaces":\1,"mcp-settings":/;
 
 function isAgentWorkspaceSettingsNavigationBundleSource(currentSource) {
   return (
@@ -2049,22 +2056,37 @@ function applyAgentWorkspaceSettingsPagePatch(currentSource) {
   if (isAgentWorkspaceSettingsVisibilityBundleSource(patchedSource)) {
     matched = true;
     const iconMatch = patchedSource.match(PATCHED_SETTINGS_ICON_PATTERN);
-    if (iconMatch != null && iconMatch[1] !== iconMatch[2]) {
-      throw new Error("agent workspace settings visibility has an unexpected icon");
-    }
-    const iconPatched = iconMatch != null && iconMatch[1] === iconMatch[2];
+    const iconPatched = iconMatch != null;
     const casesPatched = patchedSource.includes(PATCHED_SETTINGS_VISIBILITY_CASES);
-    if (iconPatched !== casesPatched) {
+    const preloadPatched = patchedSource.includes(PATCHED_SETTINGS_PRELOAD_SLUGS);
+    const policyPatched = PATCHED_SETTINGS_POLICY_PATTERN.test(patchedSource);
+    const patchedContracts = [iconPatched, casesPatched, preloadPatched, policyPatched];
+    if (patchedContracts.some(Boolean) && !patchedContracts.every(Boolean)) {
       throw new Error("agent workspace settings visibility is partially patched");
     }
     if (!iconPatched) {
+      const currentContracts = [
+        CURRENT_SETTINGS_ICON_PATTERN.test(patchedSource),
+        patchedSource.includes(CURRENT_SETTINGS_VISIBILITY_CASES),
+        patchedSource.includes(CURRENT_SETTINGS_PRELOAD_SLUGS),
+        CURRENT_SETTINGS_POLICY_PATTERN.test(patchedSource),
+      ];
+      if (!currentContracts.every(Boolean)) {
+        throw new Error("could not add agent workspace to current settings visibility contracts");
+      }
       patchedSource = patchedSource
         .replace(
           CURRENT_SETTINGS_ICON_PATTERN,
-          (_match, localEnvironmentsIcon, worktreesIcon) =>
-            `"local-environments":${localEnvironmentsIcon},"${SETTINGS_SLUG}":${localEnvironmentsIcon},worktrees:${worktreesIcon}`,
+          (_match, localEnvironmentsDescriptor) =>
+            `"local-environments":${localEnvironmentsDescriptor},"${SETTINGS_SLUG}":${localEnvironmentsDescriptor},worktrees:`,
         )
-        .replace(CURRENT_SETTINGS_VISIBILITY_CASES, PATCHED_SETTINGS_VISIBILITY_CASES);
+        .replace(CURRENT_SETTINGS_VISIBILITY_CASES, PATCHED_SETTINGS_VISIBILITY_CASES)
+        .replace(CURRENT_SETTINGS_PRELOAD_SLUGS, PATCHED_SETTINGS_PRELOAD_SLUGS)
+        .replace(
+          CURRENT_SETTINGS_POLICY_PATTERN,
+          (_match, policy) =>
+            `"local-environments":${policy},"${SETTINGS_SLUG}":${policy},"mcp-settings":`,
+        );
     }
   }
 

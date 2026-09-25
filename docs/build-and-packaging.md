@@ -1,266 +1,212 @@
-# Build And Packaging
+# Build and packaging
 
 ## Prerequisites
 
-You need:
-
-- `python3`, `7z` or `7zz`, `curl`, `unzip`, `tar`, `make`, `g++`
-- Rust toolchain with `cargo` for `codex-update-manager`,
-  `codex-computer-use-linux`, the Chrome extension host binary, and optional
-  Rust-backed features such as Read Aloud MCP and Record & Replay
-
-The installer downloads a managed Linux Node.js runtime into
-`codex-app/resources/node-runtime` and uses it for `node`, `npm`, and `npx`
-during the build. Existing `nvm`, asdf, Volta, NodeSource, or nodejs.org
-installs are fine, but no longer required for the generated app build. The
-dependency helper may still install or validate a distro Node.js toolchain on
-some bootstrap paths.
-
-Bootstrap dependencies:
+Baseline builds require Bash, curl, `gpgv`, `dpkg-deb`, Node.js 20+, npm,
+Python 3, SHA-256 utilities, tar, make, and a C/C++ toolchain. Rust is needed
+for updater/native helper release builds. Install common dependencies with:
 
 ```bash
 bash scripts/install-deps.sh
 ```
 
-It detects `apt`, `dnf5`, `dnf`, `pacman`, or `zypper`, installs system
-packages, and bootstraps Rust through `rustup` when needed.
+The dependency installer supports apt, dnf/dnf5, zypper, and pacman. On
+rpm-ostree systems, build inside Toolbox or Distrobox and copy the resulting
+AppImage or native package out. Debian-derived systems use the pinned
+NodeSource keyring when a newer Node.js is required; the script never pipes a
+remote installer directly to a shell.
 
-## Manual Dependencies
+If you install dependencies manually, use `scripts/install-deps.sh` as the
+authoritative package list. At minimum, the source verifier needs Bash, curl,
+GnuPG, `dpkg-deb`, Node.js 20+, Python 3, SHA-256 tools, tar, and `xz`; native
+packaging additionally needs the target format's package builder.
 
-```bash
-# Fedora 41+
-sudo dnf install python3 7zip curl unzip tar rpm-build make gcc-c++ @development-tools
+## Build the application tree
 
-# Fedora < 41
-sudo dnf install python3 p7zip p7zip-plugins curl unzip tar rpm-build make gcc-c++
-sudo dnf groupinstall 'Development Tools'
-
-# openSUSE
-sudo zypper install python3 p7zip-full curl unzip tar
-sudo zypper install -t pattern devel_basis
-
-# Arch / Manjaro
-sudo pacman -S --needed python p7zip curl unzip tar zstd base-devel
-
-# Rust toolchain
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-On apt-based systems, `scripts/install-deps.sh` can still bootstrap optional
-NodeSource Node.js for users who want a system Node.js toolchain:
-
-```bash
-bash scripts/install-deps.sh
-NODEJS_MAJOR=24 bash scripts/install-deps.sh
-```
-
-Ubuntu-family `p7zip-full` can be too old for newer APFS DMGs, so
-`install-deps.sh` bootstraps `7zz` into `~/.local/bin` by default.
-
-## Generate The Local App
-
-```bash
-make build-app
-make build-app-fresh
-make build-app DMG=/path/to/Codex.dmg
-```
-
-Equivalent direct commands:
+Resolve and verify the latest signed stable package for the host architecture:
 
 ```bash
 ./install.sh
-./install.sh /path/to/Codex.dmg
-./install.sh --fresh
 ```
 
-The default path stores upstream DMG headers, plus a hash of the upstream URL,
-next to `Codex.dmg` and refreshes the cached file when that upstream fingerprint
-changes. Every command builds a sibling candidate and runs the shared
-[upstream DMG acceptance profile](upstream-dmg-acceptance.md) before replacing
-`codex-app/`. A rejected or inconclusive candidate leaves the working app
-unchanged. Acceptance checks only configured Linux Features and rejects drift
-in any enabled feature; disable that feature before retrying if necessary.
-Replacing an existing app uses an atomic directory exchange plus a recovery
-journal, so interruption cannot leave the canonical install path missing. If
-the filesystem does not support atomic exchange, promotion stops without
-changing the working app.
-`--fresh` still forces a cache removal before rebuilding, and an
-explicit `DMG=/path/to/Codex.dmg` uses that file exactly.
-Native install shortcuts use `--fresh --reuse-dmg`, so they build a clean
-candidate while still reusing the cached DMG when upstream metadata matches.
+This is a Linux `.deb`-only source pipeline. Retired source inputs and
+compatibility variables are rejected rather than emulated; the official
+Electron runtime and native modules are preserved directly.
 
-For deterministic test rounds, set `CODEX_DMG_REFRESH_MODE=pinned`. Pinned mode
-reuses the existing cached `Codex.dmg` verbatim, skips upstream metadata checks,
-and fails instead of downloading when no cached DMG or explicit `DMG=...` path is
-available. This also keeps `--fresh` from deleting the cached DMG.
-
-Before accepting a fast-moving upstream DMG, run the report-only intelligence
-lane to inventory protected Sky/Chronicle/Skysight/Computer Use/Record & Replay
-surfaces:
+Use an explicit already-downloaded package that you trust:
 
 ```bash
-make inspect-upstream DMG=/path/to/Codex.dmg
-make inspect-upstream-intel-devcontainer
+./install.sh /path/to/chatgpt_<version>_<arch>.deb
+UPSTREAM_DEB=/path/to/chatgpt_<version>_<arch>.deb make build-app
 ```
 
-The devcontainer intelligence target downloads the current upstream DMG into
-`reports/upstream-dmg/downloads/` when `DMG=...` is omitted and automatically
-compares it against repo `./Codex.dmg` when that cached baseline exists.
-For an already downloaded candidate, pass only that one path:
+The explicit package is validated for package name, version, architecture, and
+required payload, and its SHA-256 is recorded in build metadata. Supplying a
+local file deliberately skips signed repository discovery, so the caller is
+responsible for its provenance. Source package formats from the retired build
+architecture are rejected with a clear error and have no compatibility
+fallback.
+
+Inspection writes reports without promoting an app:
 
 ```bash
-make inspect-upstream-intel-devcontainer DMG=/path/to/new/Codex.dmg
+make inspect-upstream
 ```
 
-See `docs/upstream-dmg-intelligence.md` for the protected-surface registry,
-JSON/Markdown report outputs, and fixture-based test strategy.
+Generated metadata under `.codex-linux/build-info.json` uses schema v2 and
+records `upstreamLinuxPackage` version, architecture, repository path, and
+SHA-256.
 
-Run the generated app:
+## Running the generated app
+
+Run the staged application without installing it:
 
 ```bash
 make run-app
-./codex-app/start.sh
 ```
 
-## Running The Generated App
+This executes `codex-app/start.sh`. The wrapper sets the Community desktop
+identity, loads enabled feature hooks, and forwards arguments and URIs to the
+official `ChatGPT` executable. It does not provide a second single-instance,
+tray, window, or lifecycle implementation.
 
-By default, second launches reuse the running app through the Linux warm-start
-handoff.
-
-Open an independent app process:
+Useful diagnostics:
 
 ```bash
-./codex-app/start.sh --new-instance
+./codex-app/start.sh --help
+./codex-app/start.sh --diagnose
 ```
 
-Configure the port range or make every launch use multi-instance mode:
+## Baseline ASAR invariant
+
+`linux-features/features.example.json` contains no enabled features. For that
+configuration, the installer copies `resources/app.asar` directly and compares
+its SHA-256 with the package payload. No ASAR extraction tool runs.
+
+If a selected feature contains patch descriptors, the installer patches a
+temporary extraction, repacks deterministically, and writes a feature-aware
+patch report. An enabled feature drift blocks candidate acceptance.
+
+## Package formats
+
+First build `codex-app/`, then choose an output:
 
 ```bash
-CODEX_MULTI_LAUNCH_PORT_RANGE=5175-5199 ./codex-app/start.sh --new-instance
-CODEX_MULTI_LAUNCH=1 CODEX_MULTI_LAUNCH_PORT_RANGE=5175-5199 ./codex-app/start.sh
-```
-
-`CODEX_MULTI_LAUNCH=1` applies only to that launcher invocation. The launcher
-does not forward it into Electron, so a normal launch from an app descendant
-does not recursively create another side-by-side instance.
-
-## Package Formats
-
-After `make build-app` or `make build-app-fresh`, build a package from
-`codex-app/`:
-
-| Format | Build command | Output | Install |
-|---|---|---|---|
-| Debian | `make deb` | `dist/codex-desktop_*.deb` | `sudo dpkg -i dist/codex-desktop_*.deb` |
-| RPM | `make rpm` | `dist/codex-desktop-*.x86_64.rpm` | `sudo dnf install dist/codex-desktop-*.rpm` or `sudo zypper install dist/codex-desktop-*.rpm` |
-| Arch | `make pacman` | `dist/codex-desktop-*.pkg.tar.zst` | `sudo pacman -U dist/codex-desktop-*.pkg.tar.zst` |
-| AppImage | `make appimage` | `dist/codex-desktop-*.AppImage` | Run directly |
-| Auto-detect | `make package && make install` | matches host distro | handled by `make install` |
-
-Override package version:
-
-```bash
-PACKAGE_VERSION=2026.03.24.220723+88f07cd3 make deb
-```
-
-The packaging scripts only repackage what is already in `codex-app/`; they do
-not download or extract the DMG.
-
-## AppImage Local Self-Build
-
-```bash
-make build-app
-make appimage
-./dist/codex-desktop-*.AppImage
-```
-
-The AppImage flow does not include `codex-update-manager`, the systemd user
-service, polkit policy, or the native-package update builder.
-
-To make a local AppImage self-contained, install the CLI with its optional
-Linux package and pass the package directory to the AppImage build:
-
-```bash
-cli_prefix="$HOME/.cache/codex-desktop-linux/appimage-cli"
-npm install --prefix "$cli_prefix" --include=optional @openai/codex
-CODEX_CLI_BUNDLE_SOURCE="$cli_prefix/node_modules/@openai/codex" make appimage
-```
-
-The build copies only `@openai/codex` and the matching Linux architecture
-package on x86-64 and ARM64. It does not fetch packages itself. The bundled CLI
-is used when `CODEX_CLI_PATH` is unset and takes precedence over a host
-installation. This adds the native CLI payload to the AppImage, which is several
-hundred MiB for current releases. Rebuild the AppImage when you want to update
-the embedded CLI.
-
-When upstream ChatGPT Desktop changes:
-
-```bash
-git pull --ff-only
-make build-app-fresh
-make appimage
-```
-
-AppImage builds require `appimagetool` on `PATH`, or:
-
-```bash
-APPIMAGETOOL=/path/to/appimagetool make appimage
-```
-
-## Electron Mirrors
-
-If runtime downloads from GitHub are slow or blocked:
-
-```bash
-ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ make build-app
-```
-
-`ELECTRON_HEADERS_URL` is passed to `@electron/rebuild --dist-url` and must
-provide both `node-v<version>-headers.tar.gz` and the matching `SHASUMS256.txt`.
-
-## Build Parallelism
-
-```bash
-MAX_BUILD_THREADS=8 make build-app-fresh
-MAX_BUILD_THREADS=8 make package
-MAX_BUILD_THREADS=8 make install-native
-```
-
-`MAX_BUILD_THREADS=0` is the default and preserves each tool's automatic
-behavior. A nonzero value controls Cargo jobs, native module rebuild jobs,
-Debian package compression, pacman package compression, and RPM zstd payload
-compression.
-
-## Make Targets
-
-Run:
-
-```bash
-make help
-```
-
-Common targets:
-
-```bash
-make check
-make test
-make build-updater
-make build-app
-make build-app-fresh
-make bootstrap-native
-make install-native
-make update-native
-make run-app
-make build-dev-app
-make run-dev-app
 make deb
 make rpm
 make pacman
 make appimage
+```
+
+For an installed native build, `make setup-native` is only the optional-feature
+wizard, `make install-native` performs build/package/install, and
+`make bootstrap-native` first installs build dependencies and then performs the
+same installation flow.
+
+Shared payload logic lives in `scripts/lib/package-common.sh`. Native packages
+install to `/opt/codex-desktop`, provide `/usr/bin/codex-desktop`, install a
+separate **ChatGPT Community** desktop entry and community-marked icon, and may
+include the updater service/update-builder.
+Their dependency declarations correspond to libraries required by the official
+ELF runtime. They do not install OpenAI's repository configuration.
+
+The deb package uses the upstream dependency baseline. RPM and pacman templates
+map those library capabilities to their distribution names. Native packages
+adapt the upstream AppArmor policy to `/opt/codex-desktop/ChatGPT`.
+
+AppImage uses the official bundled `codex` and does not add `--no-sandbox`.
+Systems that prohibit unprivileged user namespaces receive a diagnostic instead
+of an insecure automatic fallback.
+
+### Package selection and installation
+
+`make package` detects deb, RPM, or pacman from `/etc/os-release` and available
+tools. `make install` selects the newest matching artifact from `dist/` and
+uses the distribution package manager. Build and install can also be split:
+
+```bash
+make build-app
 make package
 make install
-make service-enable
-make service-status
-make clean-dist
-make clean-state
 ```
+
+For manual-update packages that omit the service and update-builder:
+
+```bash
+PACKAGE_WITH_UPDATER=0 make package
+```
+
+### AppImage local self-build
+
+```bash
+make build-app
+make appimage
+```
+
+The result is written under `dist/`. It is not system-installed and does not
+include the native-package update manager. Delete the AppImage to uninstall it.
+The official runtime libraries and bundled CLI remain inside the payload; the
+launcher still enforces the sandbox policy.
+
+## Make target reference
+
+| Target | Purpose |
+|---|---|
+| `make build-app` | Build `codex-app/` from signed stable metadata or `UPSTREAM_DEB` |
+| `make inspect-upstream` | Verify and report without promoting an app tree |
+| `make rebuild` | Build a side-by-side candidate |
+| `make rebuild-install` | Build and transactionally replace the generated app |
+| `make setup-native` | Configure optional features only |
+| `make bootstrap-native` | Install dependencies, build, package, and install |
+| `make install-native` | Build helpers/app/package and install for this distro |
+| `make update-native` | Fast-forward the checkout and perform a native reinstall |
+| `make run-app` | Run the generated app tree |
+| `make deb\|rpm\|pacman\|appimage` | Build a specific artifact |
+| `make clean-dist` | Remove generated package outputs |
+| `make clean-state` | Remove updater config/state/cache; rollback is lost |
+
+## Build variables and parallelism
+
+| Variable | Default | Effect |
+|---|---|---|
+| `UPSTREAM_DEB` | signed stable discovery | Use an explicitly trusted local official package |
+| `APP_DIR` | `./codex-app` | Generated active app directory |
+| `NEXT_APP_DIR` | `./codex-app-next` | Side-by-side candidate directory |
+| `PACKAGE_WITH_UPDATER` | `1` | Include the native updater when supported |
+| `PACKAGE_VERSION` | upstream-derived | Override wrapper package version for release work |
+| `MAX_BUILD_THREADS` | `0` | Limit Cargo and package-compression jobs; `0` uses tool defaults |
+| `CODEX_LINUX_FEATURES_CONFIG` | local or example config | Select the feature configuration |
+
+Example:
+
+```bash
+MAX_BUILD_THREADS=4 PACKAGE_WITH_UPDATER=0 make install-native
+```
+
+## Update-builder payload
+
+`packaging/update-builder/` contains only source verification/extraction,
+feature selection/descriptors/resources, the ASAR toolchain, package templates,
+required build helpers, and already staged release executables for enabled
+native features. It excludes the full repository, Cargo workspaces, and
+disabled features, and never contains an app-runtime Node installation.
+
+## Cross-format validation
+
+Payload, launcher, updater, feature framework, or package-common changes affect
+all formats unless explicitly scoped. Run:
+
+```bash
+bash tests/scripts_smoke.sh
+./scripts/ci-local.sh pr
+./scripts/ci-local.sh all
+```
+
+Inspect the final packages for the `ChatGPT` ELF, byte identity of clean
+`app.asar`, bundled commands, desktop files, AppArmor policy, update-builder,
+and absence of upstream package-manager configuration.
+
+Package inspection should also confirm the payload architecture matches the
+builder (`amd64` or `arm64`), the desktop entry says **ChatGPT Community**, and
+the package neither installs nor depends on OpenAI's APT source or maintainer
+scripts.

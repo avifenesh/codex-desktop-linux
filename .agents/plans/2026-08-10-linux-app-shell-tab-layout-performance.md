@@ -7,7 +7,7 @@ Browser tabs, without suspending Browser Use or Computer Use workloads.
 
 ## Evidence and scope
 
-- An isolated same-DMG baseline reproduced 2.0-6.8 second settle times, a 3.6
+- An isolated same-package baseline reproduced 2.0-6.8 second settle times, a 3.6
   second long task, and up to 6,674 DOM elements across eight session switches.
 - A focused heavy-session CPU profile attributed about 423 ms to the app-shell
   tab overflow callback and 361 ms to Framer Motion `measureScroll` work.
@@ -35,7 +35,7 @@ Browser tabs, without suspending Browser Use or Computer Use workloads.
 
 - Lock the transform with fixture tests for the complete contract, idempotence,
   semantic rejection, ambiguity, and drift.
-- Rebuild from the same upstream DMG and require an accepted patch report.
+- Rebuild from the same signed upstream Linux package and require an accepted patch report.
 - Profile a light-to-heavy switch in an isolated candidate and verify the two
   targeted layout-read hotspots fall materially.
 - Check after two animation frames that overflowing tab labels retain their fade

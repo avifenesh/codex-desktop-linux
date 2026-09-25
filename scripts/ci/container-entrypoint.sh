@@ -1,762 +1,135 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-REPO_DIR="/work"
+REPO_DIR=/work
 CI_JOB="${1:-${CI_JOB:-}}"
-CI_IMAGE_KEY="${CI_IMAGE_KEY:-unknown}"
-CI_HOST_UID="${CI_HOST_UID:-1000}"
-CI_HOST_GID="${CI_HOST_GID:-1000}"
-CI_PACKAGE_VERSION="${CI_PACKAGE_VERSION:-2026.04.28.000000+local}"
-CI_CARGO_HOME="${CARGO_HOME:-/ci-cache/cargo}"
-CI_RUSTUP_HOME="${RUSTUP_HOME:-/ci-cache/rustup}"
-CI_NPM_CACHE="${npm_config_cache:-/ci-cache/npm}"
+PACKAGE_VERSION="${CI_PACKAGE_VERSION:-2026.08.12.000000+local}"
 
-info() {
-    echo "[ci:$CI_JOB] $*" >&2
-}
+die() { echo "[ci:${CI_JOB}][ERROR] $*" >&2; exit 1; }
 
-error() {
-    echo "[ci:$CI_JOB][ERROR] $*" >&2
-    exit 1
-}
-
-append_summary() {
-    [ -n "${GITHUB_STEP_SUMMARY:-}" ] || return 0
-    {
-        echo "## $1"
-        echo ""
-        shift
-        for line in "$@"; do
-            echo "- $line"
-        done
-        echo ""
-    } >> "$GITHUB_STEP_SUMMARY"
-}
-
-apt_install() {
-    export DEBIAN_FRONTEND=noninteractive
+install_apt() {
     apt-get update -qq
-    apt-get install -y --no-install-recommends "$@"
-    rm -rf /var/lib/apt/lists/*
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        bash ca-certificates curl dpkg-dev g++ gcc git gnupg make nodejs npm \
+        pkg-config python3 ripgrep rpm rpm2cpio sudo tar unzip util-linux xz-utils
 }
 
-prepare_apt_ci() {
-    apt_install \
-        bash \
-        ca-certificates \
-        curl \
-        file \
-        g++ \
-        gcc \
-        git \
-        libssl-dev \
-        make \
-        nodejs \
-        npm \
-        p7zip-full \
-        pkg-config \
-        python3 \
-        tar \
-        unzip \
-        xz-utils
+install_fedora() {
+    dnf install -y bash ca-certificates curl dpkg gcc gcc-c++ git gnupg2 make \
+        nodejs npm python3 ripgrep rpm-build tar unzip util-linux xz
 }
 
-prepare_apt_install_deps() {
-    apt_install ca-certificates curl sudo
+install_arch() {
+    pacman -Syu --noconfirm --needed base-devel ca-certificates curl dpkg git \
+        gnupg nodejs npm python ripgrep rustup sudo unzip util-linux xz zstd
 }
 
-prepare_fedora_ci() {
-    dnf install -y \
-        bash \
-        ca-certificates \
-        curl \
-        findutils \
-        gcc \
-        gcc-c++ \
-        git \
-        make \
-        nodejs \
-        npm \
-        openssl-devel \
-        pkgconf-pkg-config \
-        python3 \
-        rpm \
-        rpm-build \
-        shadow-utils \
-        tar \
-        unzip \
-        which \
-        xz
-    dnf clean all
-}
-
-prepare_arch_ci() {
-    pacman -Syu --noconfirm --needed \
-        base-devel \
-        ca-certificates \
-        curl \
-        git \
-        nodejs \
-        npm \
-        python \
-        rustup \
-        sudo \
-        unzip \
-        xz \
-        zstd
-}
-
-ensure_ci_user() {
-    if [ "$CI_HOST_UID" = "0" ]; then
-        CI_USER="root"
-        CI_HOME="/root"
-        return 0
-    fi
-
-    local group_name
-    if getent group "$CI_HOST_GID" >/dev/null 2>&1; then
-        group_name="$(getent group "$CI_HOST_GID" | cut -d: -f1)"
-    else
-        group_name="ci"
-        groupadd -g "$CI_HOST_GID" "$group_name"
-    fi
-
-    if getent passwd "$CI_HOST_UID" >/dev/null 2>&1; then
-        CI_USER="$(getent passwd "$CI_HOST_UID" | cut -d: -f1)"
-    else
-        CI_USER="ci"
-        useradd -m -u "$CI_HOST_UID" -g "$CI_HOST_GID" -s /bin/bash "$CI_USER"
-    fi
-
-    CI_HOME="$(getent passwd "$CI_HOST_UID" | cut -d: -f6)"
-    mkdir -p "$CI_HOME" "$CI_CARGO_HOME" "$CI_RUSTUP_HOME" "$CI_NPM_CACHE"
-    chown -R "$CI_HOST_UID:$CI_HOST_GID" "$CI_HOME" /ci-cache
-}
-
-quote_args() {
-    printf '%q ' "$@"
-}
-
-run_as_ci_user() {
-    local script_path="$REPO_DIR/scripts/ci/container-entrypoint.sh"
-    local -a env_cmd=(
-        env
-        "HOME=$CI_HOME"
-        "USER=$CI_USER"
-        "LOGNAME=$CI_USER"
-        "CI=true"
-        "CI_CONTAINER_PHASE=job"
-        "CI_JOB=$CI_JOB"
-        "CI_IMAGE_KEY=$CI_IMAGE_KEY"
-        "CI_PACKAGE_VERSION=$CI_PACKAGE_VERSION"
-        "PACKAGE_VERSION=$CI_PACKAGE_VERSION"
-        "CI_DMG_PATH=${CI_DMG_PATH:-}"
-        "UPSTREAM_DMG_URL=${UPSTREAM_DMG_URL:-https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg}"
-        "UPSTREAM_DMG_PATH=${UPSTREAM_DMG_PATH:-/tmp/codex-upstream-ci/Codex.dmg}"
-        "UPSTREAM_DMG_CACHE_HIT=${UPSTREAM_DMG_CACHE_HIT:-}"
-        "GITHUB_STEP_SUMMARY=${GITHUB_STEP_SUMMARY:-}"
-        "CARGO_HOME=$CI_CARGO_HOME"
-        "RUSTUP_HOME=$CI_RUSTUP_HOME"
-        "npm_config_cache=$CI_NPM_CACHE"
-        "CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-always}"
-        "PATH=$CI_CARGO_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-        bash
-        "$script_path"
-        "$CI_JOB"
-    )
-
-    if [ "$CI_HOST_UID" = "0" ]; then
-        "${env_cmd[@]}"
-    else
-        su -s /bin/bash "$CI_USER" -c "$(quote_args "${env_cmd[@]}")"
-    fi
-}
-
-enter_workspace() {
-    cd "$REPO_DIR"
-    git config --global --add safe.directory "$REPO_DIR" >/dev/null 2>&1 || true
-}
-
-ensure_rust_toolchain() {
-    mkdir -p "$CI_CARGO_HOME" "$CI_RUSTUP_HOME"
-    if ! command -v rustup >/dev/null 2>&1; then
-        info "Installing Rust toolchain with rustup"
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain stable
-    fi
-
-    rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-    rustup default stable
-    rustc --version
-    cargo --version
-}
-
-package_file_or_fail() {
-    local pattern="$1"
-    local package_file
-    package_file="$(find dist -maxdepth 1 -name "$pattern" -print -quit)"
-    [ -n "$package_file" ] || error "No package found matching: $pattern"
-    printf '%s\n' "$package_file"
-}
-
-assert_contains_file() {
-    local path="$1"
-    local pattern="$2"
-    grep -q -- "$pattern" "$path" || error "Expected '$pattern' in $path"
-}
-
-assert_not_contains_file() {
-    local path="$1"
-    local pattern="$2"
-    if grep -q -- "$pattern" "$path"; then
-        error "Did not expect '$pattern' in $path"
-    fi
-}
-
-prepare_package_fixture() {
-    rm -rf codex-app dist
-    tests/fixtures/create-packaged-app-fixture.sh codex-app
-}
-
-package_target_dir() {
-    local target_dir="/ci-cache/target/$CI_IMAGE_KEY"
-    mkdir -p "$target_dir"
-    printf '%s\n' "$target_dir"
-}
-
-run_core_job() {
-    enter_workspace
-    ensure_rust_toolchain
-
-    bash -n install.sh
-    bash -n scripts/lib/*.sh
-    bash -n launcher/start.sh.template
-    bash -n scripts/install-deps.sh
-    bash -n scripts/build-deb.sh
-    bash -n scripts/build-rpm.sh
-    bash -n scripts/build-pacman.sh
-    bash -n scripts/build-appimage.sh
-    bash -n scripts/ci-local.sh
-    bash -n scripts/ci/*.sh
-
-    cargo fmt --check
-    cargo clippy --workspace --all-targets -- -D warnings
-    cargo check --workspace --all-targets
-    cargo test --workspace --all-targets
-
-    bash scripts/ci/run-node-checks.sh
-
-    bash tests/scripts_smoke.sh
-
-    append_summary "Rust and Smoke Tests" \
-        "Shell syntax checks passed." \
-        "Rust formatting, clippy, check, and tests passed." \
-        "Node syntax checks, Node tests, and script smoke tests passed."
-}
-
-run_deb_job() {
-    enter_workspace
-    ensure_rust_toolchain
-    prepare_package_fixture
-
-    local target_dir
-    target_dir="$(package_target_dir)"
-    CARGO_TARGET_DIR="$target_dir" \
-    UPDATER_BINARY_SOURCE="$target_dir/release/codex-update-manager" \
-    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-        ./scripts/build-deb.sh
-
-    local deb_file
-    deb_file="$(package_file_or_fail 'codex-desktop_*.deb')"
-    dpkg-deb -I "$deb_file"
-    dpkg-deb -c "$deb_file" | tee /tmp/deb-contents.txt >/dev/null
-    dpkg-deb -f "$deb_file" Depends | tee /tmp/deb-depends.txt >/dev/null
-    assert_contains_file /tmp/deb-contents.txt './usr/bin/codex-update-manager'
-    assert_contains_file /tmp/deb-contents.txt './usr/lib/systemd/user/codex-update-manager.service'
-    assert_contains_file /tmp/deb-contents.txt './opt/codex-desktop/update-builder/install.sh'
-    assert_contains_file /tmp/deb-contents.txt './opt/codex-desktop/update-builder/launcher/webview-server.py'
-    assert_contains_file /tmp/deb-contents.txt './opt/codex-desktop/update-builder/scripts/lib/upstream-dmg-intel.js'
-    assert_contains_file /tmp/deb-contents.txt './opt/codex-desktop/update-builder/scripts/lib/patch-browser-client-iab-socket-scope.js'
-    assert_contains_file /tmp/deb-contents.txt './opt/codex-desktop/update-builder/scripts/lib/upstream-dmg-acceptance.js'
-    assert_contains_file /tmp/deb-contents.txt './opt/codex-desktop/update-builder/scripts/lib/candidate-promotion.py'
-    assert_contains_file /tmp/deb-contents.txt './opt/codex-desktop/update-builder/scripts/validate-upstream-dmg.js'
-    assert_contains_file /tmp/deb-contents.txt './opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
-    assert_not_contains_file /tmp/deb-contents.txt './usr/share/codex-package-framework/fixture.txt'
-    assert_not_contains_file /tmp/deb-depends.txt 'codex-package-framework-runtime'
-
-    rm -rf dist
-    CARGO_TARGET_DIR="$target_dir" \
-    PACKAGE_WITH_UPDATER=0 \
-    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-        ./scripts/build-deb.sh
-
-    local deb_no_updater_file
-    deb_no_updater_file="$(package_file_or_fail 'codex-desktop_*.deb')"
-    dpkg-deb -c "$deb_no_updater_file" | tee /tmp/deb-no-updater-contents.txt >/dev/null
-    rm -rf /tmp/deb-no-updater-control
-    rm -rf /tmp/deb-no-updater-payload
-    mkdir -p /tmp/deb-no-updater-control /tmp/deb-no-updater-payload
-    dpkg-deb -e "$deb_no_updater_file" /tmp/deb-no-updater-control
-    dpkg-deb -x "$deb_no_updater_file" /tmp/deb-no-updater-payload
-    assert_not_contains_file /tmp/deb-no-updater-contents.txt './usr/bin/codex-update-manager'
-    assert_not_contains_file /tmp/deb-no-updater-contents.txt './usr/lib/systemd/user/codex-update-manager.service'
-    assert_not_contains_file /tmp/deb-no-updater-contents.txt './usr/share/polkit-1/actions/com.github.ilysenko.codex-desktop-linux.update.policy'
-    assert_not_contains_file /tmp/deb-no-updater-contents.txt './opt/codex-desktop/update-builder/'
-    assert_contains_file /tmp/deb-no-updater-contents.txt './opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
-    assert_contains_file /tmp/deb-no-updater-contents.txt './opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh'
-    assert_contains_file /tmp/deb-no-updater-payload/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh 'codex_no_updater_cleanup_user_enablement_links'
-    assert_contains_file /tmp/deb-no-updater-payload/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh 'default.target.wants'
-    assert_contains_file /tmp/deb-no-updater-control/postinst 'codex_no_updater_cleanup_update_manager_service'
-    assert_contains_file /tmp/deb-no-updater-control/prerm 'codex_no_updater_cleanup_update_manager_service'
-    assert_not_contains_file /tmp/deb-no-updater-control/postinst 'update-builder'
-    assert_not_contains_file /tmp/deb-no-updater-control/prerm 'update-builder'
-
-    rm -rf codex-app dist
-    CODEX_FIXTURE_LINUX_FEATURES_JSON='["package-framework-fixture"]' \
-        tests/fixtures/create-packaged-app-fixture.sh codex-app
-    CARGO_TARGET_DIR="$target_dir" \
-    UPDATER_BINARY_SOURCE="$target_dir/release/codex-update-manager" \
-    CODEX_LINUX_FEATURES_ROOT="$REPO_DIR/tests/fixtures/linux-features" \
-    CODEX_LINUX_FEATURES_CONFIG="$REPO_DIR/tests/fixtures/linux-features/features-enabled.json" \
-    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-        ./scripts/build-deb.sh
-
-    local deb_feature_file
-    local deb_feature_mode
-    deb_feature_file="$(package_file_or_fail 'codex-desktop_*.deb')"
-    dpkg-deb -I "$deb_feature_file"
-    dpkg-deb -c "$deb_feature_file" | tee /tmp/deb-feature-contents.txt >/dev/null
-    dpkg-deb -f "$deb_feature_file" Depends | tee /tmp/deb-feature-depends.txt >/dev/null
-    assert_contains_file /tmp/deb-feature-contents.txt './usr/share/codex-package-framework/fixture.txt'
-    assert_contains_file /tmp/deb-feature-depends.txt 'codex-package-framework-runtime'
-    deb_feature_mode="$(
-        awk '$NF == "./usr/share/codex-package-framework/fixture.txt" { print $1 }' \
-            /tmp/deb-feature-contents.txt
-    )"
-    [ "$deb_feature_mode" = '-rw-r-----' ] \
-        || error "Expected Debian fixture mode 0640, got: ${deb_feature_mode:-missing}"
-
-    rm -rf codex-app dist
-    CODEX_FIXTURE_LINUX_FEATURES_JSON='["codex-micro"]' \
-        tests/fixtures/create-packaged-app-fixture.sh codex-app
-    printf '%s\n' '{"enabled":["codex-micro"]}' > /tmp/codex-micro-features.json
-    CARGO_TARGET_DIR="$target_dir" \
-    UPDATER_BINARY_SOURCE="$target_dir/release/codex-update-manager" \
-    CODEX_LINUX_FEATURES_CONFIG=/tmp/codex-micro-features.json \
-    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-        ./scripts/build-deb.sh
-
-    local deb_micro_file
-    local deb_micro_mode
-    deb_micro_file="$(package_file_or_fail 'codex-desktop_*.deb')"
-    dpkg-deb -c "$deb_micro_file" | tee /tmp/deb-micro-contents.txt >/dev/null
-    dpkg-deb -f "$deb_micro_file" Depends | tee /tmp/deb-micro-depends.txt >/dev/null
-    assert_contains_file /tmp/deb-micro-contents.txt './usr/lib/udev/rules.d/70-codex-micro.rules'
-    assert_contains_file /tmp/deb-micro-depends.txt 'libudev1'
-    assert_contains_file /tmp/deb-micro-depends.txt 'libusb-1.0-0'
-    deb_micro_mode="$(
-        awk '$NF == "./usr/lib/udev/rules.d/70-codex-micro.rules" { print $1 }' \
-            /tmp/deb-micro-contents.txt
-    )"
-    [ "$deb_micro_mode" = '-rw-r--r--' ] \
-        || error "Expected Debian Codex Micro rule mode 0644, got: ${deb_micro_mode:-missing}"
-
-    append_summary "Debian Package Validation" \
-        "Built: \`$(basename "$deb_file")\`" \
-        "Verified updater binary, user service, update-builder bundle, and packaged runtime helper." \
-        "Verified PACKAGE_WITH_UPDATER=0 omits updater artifacts." \
-        "Feature-enabled build: \`$(basename "$deb_feature_file")\`." \
-        "Verified generic feature resource, 0640 mode, and runtime dependency." \
-        "Codex Micro build: \`$(basename "$deb_micro_file")\`." \
-        "Verified udev rule, 0644 mode, and libudev/libusb dependencies."
-}
-
-run_rpm_job() {
-    enter_workspace
-    ensure_rust_toolchain
-    prepare_package_fixture
-
-    local target_dir
-    target_dir="$(package_target_dir)"
-    CARGO_TARGET_DIR="$target_dir" \
-    UPDATER_BINARY_SOURCE="$target_dir/release/codex-update-manager" \
-    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-        ./scripts/build-rpm.sh
-
-    local rpm_file
-    rpm_file="$(package_file_or_fail 'codex-desktop-*.rpm')"
-    rpm -qip "$rpm_file"
-    rpm -qlp "$rpm_file" | tee /tmp/rpm-contents.txt >/dev/null
-    rpm -qp --requires "$rpm_file" | tee /tmp/rpm-requires.txt >/dev/null
-    assert_contains_file /tmp/rpm-contents.txt '/usr/bin/codex-update-manager'
-    assert_contains_file /tmp/rpm-contents.txt '/usr/lib/systemd/user/codex-update-manager.service'
-    assert_contains_file /tmp/rpm-contents.txt '/opt/codex-desktop/update-builder/install.sh'
-    assert_contains_file /tmp/rpm-contents.txt '/opt/codex-desktop/update-builder/launcher/webview-server.py'
-    assert_contains_file /tmp/rpm-contents.txt '/opt/codex-desktop/update-builder/scripts/lib/upstream-dmg-intel.js'
-    assert_contains_file /tmp/rpm-contents.txt '/opt/codex-desktop/update-builder/scripts/lib/patch-browser-client-iab-socket-scope.js'
-    assert_contains_file /tmp/rpm-contents.txt '/opt/codex-desktop/update-builder/scripts/lib/upstream-dmg-acceptance.js'
-    assert_contains_file /tmp/rpm-contents.txt '/opt/codex-desktop/update-builder/scripts/lib/candidate-promotion.py'
-    assert_contains_file /tmp/rpm-contents.txt '/opt/codex-desktop/update-builder/scripts/validate-upstream-dmg.js'
-    assert_contains_file /tmp/rpm-contents.txt '/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
-    assert_not_contains_file /tmp/rpm-contents.txt '/usr/share/codex-package-framework/fixture.txt'
-    assert_not_contains_file /tmp/rpm-requires.txt 'codex-package-framework-runtime'
-
-    rm -rf dist
-    CARGO_TARGET_DIR="$target_dir" \
-    PACKAGE_WITH_UPDATER=0 \
-    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-        ./scripts/build-rpm.sh
-
-    local rpm_no_updater_file
-    rpm_no_updater_file="$(package_file_or_fail 'codex-desktop-*.rpm')"
-    rpm -qlp "$rpm_no_updater_file" | tee /tmp/rpm-no-updater-contents.txt >/dev/null
-    rpm -qp --scripts "$rpm_no_updater_file" | tee /tmp/rpm-no-updater-scripts.txt >/dev/null
-    assert_not_contains_file /tmp/rpm-no-updater-contents.txt '/usr/bin/codex-update-manager'
-    assert_not_contains_file /tmp/rpm-no-updater-contents.txt '/usr/lib/systemd/user/codex-update-manager.service'
-    assert_not_contains_file /tmp/rpm-no-updater-contents.txt '/usr/share/polkit-1/actions/com.github.ilysenko.codex-desktop-linux.update.policy'
-    assert_not_contains_file /tmp/rpm-no-updater-contents.txt '/opt/codex-desktop/update-builder/'
-    assert_contains_file /tmp/rpm-no-updater-contents.txt '/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
-    assert_contains_file /tmp/rpm-no-updater-contents.txt '/opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh'
-    assert_contains_file /tmp/rpm-no-updater-scripts.txt 'codex_no_updater_cleanup_update_manager_service'
-    assert_not_contains_file /tmp/rpm-no-updater-scripts.txt 'update-builder'
-    assert_not_contains_file /tmp/rpm-no-updater-scripts.txt 'codex_ensure_user_service_running'
-
-    rm -rf codex-app dist
-    CODEX_FIXTURE_LINUX_FEATURES_JSON='["package-framework-fixture"]' \
-        tests/fixtures/create-packaged-app-fixture.sh codex-app
-    CARGO_TARGET_DIR="$target_dir" \
-    UPDATER_BINARY_SOURCE="$target_dir/release/codex-update-manager" \
-    CODEX_LINUX_FEATURES_ROOT="$REPO_DIR/tests/fixtures/linux-features" \
-    CODEX_LINUX_FEATURES_CONFIG="$REPO_DIR/tests/fixtures/linux-features/features-enabled.json" \
-    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-        ./scripts/build-rpm.sh
-
-    local rpm_feature_file
-    local rpm_feature_mode
-    rpm_feature_file="$(package_file_or_fail 'codex-desktop-*.rpm')"
-    rpm -qip "$rpm_feature_file"
-    rpm -qlp "$rpm_feature_file" | tee /tmp/rpm-feature-contents.txt >/dev/null
-    rpm -qlvp "$rpm_feature_file" | tee /tmp/rpm-feature-long-contents.txt >/dev/null
-    rpm -qp --requires "$rpm_feature_file" | tee /tmp/rpm-feature-requires.txt >/dev/null
-    assert_contains_file /tmp/rpm-feature-contents.txt '/usr/share/codex-package-framework/fixture.txt'
-    assert_contains_file /tmp/rpm-feature-requires.txt '^codex-package-framework-runtime$'
-    rpm_feature_mode="$(
-        awk '$NF == "/usr/share/codex-package-framework/fixture.txt" { print $1 }' \
-            /tmp/rpm-feature-long-contents.txt
-    )"
-    [ "$rpm_feature_mode" = '-rw-r-----' ] \
-        || error "Expected RPM fixture mode 0640, got: ${rpm_feature_mode:-missing}"
-
-    rm -rf codex-app dist
-    CODEX_FIXTURE_LINUX_FEATURES_JSON='["codex-micro"]' \
-        tests/fixtures/create-packaged-app-fixture.sh codex-app
-    printf '%s\n' '{"enabled":["codex-micro"]}' > /tmp/codex-micro-features.json
-    CARGO_TARGET_DIR="$target_dir" \
-    UPDATER_BINARY_SOURCE="$target_dir/release/codex-update-manager" \
-    CODEX_LINUX_FEATURES_CONFIG=/tmp/codex-micro-features.json \
-    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-        ./scripts/build-rpm.sh
-
-    local rpm_micro_file
-    local rpm_micro_mode
-    rpm_micro_file="$(package_file_or_fail 'codex-desktop-*.rpm')"
-    rpm -qlp "$rpm_micro_file" | tee /tmp/rpm-micro-contents.txt >/dev/null
-    rpm -qlvp "$rpm_micro_file" | tee /tmp/rpm-micro-long-contents.txt >/dev/null
-    rpm -qp --requires "$rpm_micro_file" | tee /tmp/rpm-micro-requires.txt >/dev/null
-    assert_contains_file /tmp/rpm-micro-contents.txt '/usr/lib/udev/rules.d/70-codex-micro.rules'
-    assert_contains_file /tmp/rpm-micro-requires.txt '^libudev\.so\.1'
-    assert_contains_file /tmp/rpm-micro-requires.txt '^libusb-1\.0\.so\.0'
-    rpm_micro_mode="$(
-        awk '$NF == "/usr/lib/udev/rules.d/70-codex-micro.rules" { print $1 }' \
-            /tmp/rpm-micro-long-contents.txt
-    )"
-    [ "$rpm_micro_mode" = '-rw-r--r--' ] \
-        || error "Expected RPM Codex Micro rule mode 0644, got: ${rpm_micro_mode:-missing}"
-
-    append_summary "RPM Package Validation" \
-        "Built: \`$(basename "$rpm_file")\`" \
-        "Verified updater binary, user service, update-builder bundle, and packaged runtime helper." \
-        "Verified PACKAGE_WITH_UPDATER=0 omits updater artifacts." \
-        "Feature-enabled build: \`$(basename "$rpm_feature_file")\`." \
-        "Verified generic feature resource, 0640 mode, and runtime dependency." \
-        "Codex Micro build: \`$(basename "$rpm_micro_file")\`." \
-        "Verified udev rule, 0644 mode, and libudev/libusb dependencies."
-}
-
-run_pacman_job() {
-    enter_workspace
-    ensure_rust_toolchain
-    prepare_package_fixture
-
-    local target_dir
-    target_dir="$(package_target_dir)"
-    CARGO_TARGET_DIR="$target_dir" cargo build --release -p codex-update-manager
-    CARGO_TARGET_DIR="$target_dir" \
-    UPDATER_BINARY_SOURCE="$target_dir/release/codex-update-manager" \
-    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-        ./scripts/build-pacman.sh
-
-    local pkg_file
-    pkg_file="$(package_file_or_fail 'codex-desktop-*.pkg.tar.*')"
-    pacman -Qip "$pkg_file"
-    pacman -Qlp "$pkg_file" | tee /tmp/pacman-contents.txt >/dev/null
-    tar -xOf "$pkg_file" .PKGINFO | tee /tmp/pacman-pkginfo.txt >/dev/null
-    assert_contains_file /tmp/pacman-contents.txt 'usr/bin/codex-update-manager'
-    assert_contains_file /tmp/pacman-contents.txt 'usr/lib/systemd/user/codex-update-manager.service'
-    assert_contains_file /tmp/pacman-contents.txt 'opt/codex-desktop/update-builder/install.sh'
-    assert_contains_file /tmp/pacman-contents.txt 'opt/codex-desktop/update-builder/launcher/webview-server.py'
-    assert_contains_file /tmp/pacman-contents.txt 'opt/codex-desktop/update-builder/scripts/lib/upstream-dmg-intel.js'
-    assert_contains_file /tmp/pacman-contents.txt 'opt/codex-desktop/update-builder/scripts/lib/patch-browser-client-iab-socket-scope.js'
-    assert_contains_file /tmp/pacman-contents.txt 'opt/codex-desktop/update-builder/scripts/lib/upstream-dmg-acceptance.js'
-    assert_contains_file /tmp/pacman-contents.txt 'opt/codex-desktop/update-builder/scripts/lib/candidate-promotion.py'
-    assert_contains_file /tmp/pacman-contents.txt 'opt/codex-desktop/update-builder/scripts/validate-upstream-dmg.js'
-    assert_contains_file /tmp/pacman-contents.txt 'opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
-    assert_not_contains_file /tmp/pacman-contents.txt 'usr/share/codex-package-framework/fixture.txt'
-    assert_not_contains_file /tmp/pacman-pkginfo.txt '^depend = codex-package-framework-runtime$'
-
-    rm -rf dist
-    CARGO_TARGET_DIR="$target_dir" \
-    PACKAGE_WITH_UPDATER=0 \
-    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-        ./scripts/build-pacman.sh
-
-    local pkg_no_updater_file
-    pkg_no_updater_file="$(package_file_or_fail 'codex-desktop-*.pkg.tar.*')"
-    pacman -Qlp "$pkg_no_updater_file" | tee /tmp/pacman-no-updater-contents.txt >/dev/null
-    tar -xOf "$pkg_no_updater_file" .INSTALL | tee /tmp/pacman-no-updater-install.txt >/dev/null
-    tar -xOf "$pkg_no_updater_file" opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh | tee /tmp/pacman-no-updater-cleanup.txt >/dev/null
-    assert_not_contains_file /tmp/pacman-no-updater-contents.txt 'usr/bin/codex-update-manager'
-    assert_not_contains_file /tmp/pacman-no-updater-contents.txt 'usr/lib/systemd/user/codex-update-manager.service'
-    assert_not_contains_file /tmp/pacman-no-updater-contents.txt 'usr/share/polkit-1/actions/com.github.ilysenko.codex-desktop-linux.update.policy'
-    assert_not_contains_file /tmp/pacman-no-updater-contents.txt 'opt/codex-desktop/update-builder/'
-    assert_contains_file /tmp/pacman-no-updater-contents.txt 'opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
-    assert_contains_file /tmp/pacman-no-updater-contents.txt 'opt/codex-desktop/.codex-linux/codex-no-updater-transition-cleanup.sh'
-    assert_contains_file /tmp/pacman-no-updater-cleanup.txt 'codex_no_updater_cleanup_user_enablement_links'
-    assert_contains_file /tmp/pacman-no-updater-cleanup.txt 'default.target.wants'
-    assert_contains_file /tmp/pacman-no-updater-install.txt 'codex_no_updater_cleanup_update_manager_service'
-    assert_contains_file /tmp/pacman-no-updater-install.txt 'post_upgrade'
-    assert_contains_file /tmp/pacman-no-updater-install.txt 'pre_remove'
-    assert_not_contains_file /tmp/pacman-no-updater-install.txt 'update-builder'
-
-    rm -rf codex-app dist
-    CODEX_FIXTURE_LINUX_FEATURES_JSON='["package-framework-fixture"]' \
-        tests/fixtures/create-packaged-app-fixture.sh codex-app
-    CARGO_TARGET_DIR="$target_dir" \
-    UPDATER_BINARY_SOURCE="$target_dir/release/codex-update-manager" \
-    CODEX_LINUX_FEATURES_ROOT="$REPO_DIR/tests/fixtures/linux-features" \
-    CODEX_LINUX_FEATURES_CONFIG="$REPO_DIR/tests/fixtures/linux-features/features-enabled.json" \
-    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-        ./scripts/build-pacman.sh
-
-    local pkg_feature_file
-    local pkg_feature_mode
-    pkg_feature_file="$(package_file_or_fail 'codex-desktop-*.pkg.tar.*')"
-    pacman -Qip "$pkg_feature_file"
-    pacman -Qlp "$pkg_feature_file" | tee /tmp/pacman-feature-contents.txt >/dev/null
-    tar -xOf "$pkg_feature_file" .PKGINFO | tee /tmp/pacman-feature-pkginfo.txt >/dev/null
-    tar -tvf "$pkg_feature_file" \
-        usr/share/codex-package-framework/fixture.txt \
-        | tee /tmp/pacman-feature-long-contents.txt >/dev/null
-    assert_contains_file /tmp/pacman-feature-contents.txt 'usr/share/codex-package-framework/fixture.txt'
-    assert_contains_file /tmp/pacman-feature-pkginfo.txt '^depend = codex-package-framework-runtime$'
-    pkg_feature_mode="$(awk 'NR == 1 { print $1 }' /tmp/pacman-feature-long-contents.txt)"
-    [ "$pkg_feature_mode" = '-rw-r-----' ] \
-        || error "Expected pacman fixture mode 0640, got: ${pkg_feature_mode:-missing}"
-
-    rm -rf codex-app dist
-    CODEX_FIXTURE_LINUX_FEATURES_JSON='["codex-micro"]' \
-        tests/fixtures/create-packaged-app-fixture.sh codex-app
-    printf '%s\n' '{"enabled":["codex-micro"]}' > /tmp/codex-micro-features.json
-    CARGO_TARGET_DIR="$target_dir" \
-    UPDATER_BINARY_SOURCE="$target_dir/release/codex-update-manager" \
-    CODEX_LINUX_FEATURES_CONFIG=/tmp/codex-micro-features.json \
-    PACKAGE_VERSION="$CI_PACKAGE_VERSION" \
-        ./scripts/build-pacman.sh
-
-    local pkg_micro_file
-    local pkg_micro_mode
-    pkg_micro_file="$(package_file_or_fail 'codex-desktop-*.pkg.tar.*')"
-    pacman -Qlp "$pkg_micro_file" | tee /tmp/pacman-micro-contents.txt >/dev/null
-    tar -xOf "$pkg_micro_file" .PKGINFO | tee /tmp/pacman-micro-pkginfo.txt >/dev/null
-    tar -tvf "$pkg_micro_file" \
-        usr/lib/udev/rules.d/70-codex-micro.rules \
-        | tee /tmp/pacman-micro-long-contents.txt >/dev/null
-    assert_contains_file /tmp/pacman-micro-contents.txt 'usr/lib/udev/rules.d/70-codex-micro.rules'
-    assert_contains_file /tmp/pacman-micro-pkginfo.txt '^depend = libusb$'
-    assert_contains_file /tmp/pacman-micro-pkginfo.txt '^depend = systemd-libs$'
-    pkg_micro_mode="$(awk 'NR == 1 { print $1 }' /tmp/pacman-micro-long-contents.txt)"
-    [ "$pkg_micro_mode" = '-rw-r--r--' ] \
-        || error "Expected pacman Codex Micro rule mode 0644, got: ${pkg_micro_mode:-missing}"
-
-    append_summary "Pacman Package Validation" \
-        "Built: \`$(basename "$pkg_file")\`" \
-        "Verified updater binary, user service, update-builder bundle, and packaged runtime helper." \
-        "Verified PACKAGE_WITH_UPDATER=0 omits updater artifacts." \
-        "Feature-enabled build: \`$(basename "$pkg_feature_file")\`." \
-        "Verified generic feature resource, 0640 mode, and runtime dependency." \
-        "Codex Micro build: \`$(basename "$pkg_micro_file")\`." \
-        "Verified udev rule, 0644 mode, and systemd-libs/libusb dependencies."
-}
-
-run_install_deps_job_as_root() {
-    enter_workspace
-
-    bash scripts/install-deps.sh
-    export PATH="$HOME/.local/bin:$PATH"
-
-    node -p "process.versions.node"
-    node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)'
-    npm -v
-    npx -v
-    dpkg-query -W -f='${Provides}\n' nodejs | grep -E '(^|[,[:space:]])npm([,[:space:](]|$)'
-
-    local output
-    local status
-    output="$(./install.sh /tmp/nope.dmg 2>&1)" && status=0 || status=$?
-    printf '%s\n' "$output"
-    [ "$status" -ne 0 ] || error "Installer should fail for a missing DMG"
-    printf '%s\n' "$output" | grep -q "Provided DMG not found: /tmp/nope.dmg"
-    if printf '%s\n' "$output" | grep -q "Node.js 20+ required"; then
-        error "Installer still failed Node preflight after install-deps"
-    fi
-
-    append_summary "Install Dependencies Validation" \
-        "Image: \`$CI_IMAGE_KEY\`" \
-        "Node.js, npm, npx, and installer preflight passed."
-}
-
-capture_upstream_metadata() {
-    local dmg_path="$1"
-    local headers_file
-    headers_file="$(mktemp)"
-
-    local last_modified="unknown"
-    local etag="no-etag"
-    local content_length="unknown"
-    if curl -fsSLI "$UPSTREAM_DMG_URL" > "$headers_file"; then
-        # Match header names case-insensitively without gawk's IGNORECASE,
-        # which is a no-op under mawk (the default awk in the CI containers).
-        last_modified="$(awk 'tolower($0) ~ /^last-modified:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
-        etag="$(awk 'tolower($0) ~ /^etag:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); gsub(/"/,""); print; exit}' "$headers_file")"
-        content_length="$(awk 'tolower($0) ~ /^content-length:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
-    fi
-    rm -f "$headers_file"
-
-    [ -n "$last_modified" ] || last_modified="unknown"
-    [ -n "$etag" ] || etag="no-etag"
-    [ -n "$content_length" ] || content_length="unknown"
-
-    local dmg_sha256
-    local dmg_size_bytes
-    local tested_at_utc
-    dmg_sha256="$(sha256sum "$dmg_path" | cut -d' ' -f1)"
-    dmg_size_bytes="$(stat -c '%s' "$dmg_path")"
-    tested_at_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-
-    node - "$UPSTREAM_DMG_URL" "$dmg_path" "$last_modified" "$etag" "$content_length" "$dmg_sha256" "$dmg_size_bytes" "$tested_at_utc" "${UPSTREAM_DMG_CACHE_HIT:-unknown}" <<'NODE'
-const fs = require("node:fs");
-const [url, path, lastModified, etag, contentLength, sha256, sizeBytes, testedAtUtc, cacheHit] = process.argv.slice(2);
-const metadata = {
-  url,
-  path,
-  last_modified: lastModified,
-  etag,
-  content_length: contentLength,
-  sha256,
-  size_bytes: Number(sizeBytes),
-  tested_at_utc: testedAtUtc,
-  cache_hit: cacheHit,
-};
-fs.writeFileSync("upstream-dmg-metadata.json", JSON.stringify(metadata, null, 2) + "\n");
-NODE
-
-    append_summary "Upstream Build App" \
-        "DMG URL: \`$UPSTREAM_DMG_URL\`" \
-        "DMG Last-Modified: \`$last_modified\`" \
-        "DMG ETag: \`$etag\`" \
-        "DMG Content-Length: \`$content_length\`" \
-        "DMG SHA-256: \`$dmg_sha256\`" \
-        "DMG Size (bytes): \`$dmg_size_bytes\`" \
-        "Tested At (UTC): \`$tested_at_utc\`" \
-        "Cache Hit: \`${UPSTREAM_DMG_CACHE_HIT:-unknown}\`" \
-        "Build command: \`make build-app DMG=$dmg_path\`"
-}
-
-run_upstream_job() {
-    enter_workspace
-    ensure_rust_toolchain
-
-    local dmg_path="${CI_DMG_PATH:-${UPSTREAM_DMG_PATH:-/tmp/codex-upstream-ci/Codex.dmg}}"
-    mkdir -p "$(dirname "$dmg_path")"
-
-    if [ ! -s "$dmg_path" ]; then
-        info "Downloading upstream DMG"
-        scripts/ci/download-upstream-dmg.sh "$UPSTREAM_DMG_URL" "$dmg_path"
-    else
-        info "Using cached upstream DMG: $dmg_path"
-    fi
-
-    capture_upstream_metadata "$dmg_path"
-    make build-app DMG="$dmg_path"
-}
-
-run_nix_job_as_root() {
-    enter_workspace
-    export NIX_CONFIG="${NIX_CONFIG:-experimental-features = nix-command flakes}"
-
-    nix flake check --no-write-lock-file --option sandbox false
-    nix build .#codex-desktop --no-link --print-build-logs --option sandbox false
-    nix build .#installer --no-link --print-build-logs --option sandbox false
-
-    append_summary "Nix Validation" \
-        "Flake check passed." \
-        "Built the Nix checks, .#codex-desktop, and .#installer without result links."
-}
-
-run_job_as_current_user() {
+prepare() {
     case "$CI_JOB" in
-        core) run_core_job ;;
-        deb) run_deb_job ;;
-        rpm) run_rpm_job ;;
-        pacman) run_pacman_job ;;
-        upstream) run_upstream_job ;;
-        *) error "Unsupported user-phase job: $CI_JOB" ;;
+        rpm) install_fedora ;;
+        pacman) install_arch ;;
+        nix) ;;
+        install-deps) ;;
+        *) install_apt ;;
+    esac
+
+    if command -v git >/dev/null 2>&1; then
+        git config --global --add safe.directory "$REPO_DIR"
+    fi
+}
+
+build_clean_app() {
+    export CODEX_LINUX_FEATURES_CONFIG="$REPO_DIR/linux-features/features.example.json"
+    "$REPO_DIR/install.sh"
+}
+
+run_core() {
+    local node_test_log
+    node_test_log="$(mktemp)"
+    bash tests/scripts_smoke.sh
+    if ! node --test scripts/patch-linux-window-ui.test.js scripts/patches/runner.test.js \
+        scripts/patches/core/quit-confirmation-focus/test.js \
+        scripts/lib/linux-features.test.js linux-features/*/test.js >"$node_test_log" 2>&1; then
+        rg -n -C 30 '^not ok' "$node_test_log" || tail -n 120 "$node_test_log"
+        return 1
+    fi
+    tail -n 12 "$node_test_log"
+    if command -v cargo >/dev/null 2>&1; then
+        cargo test -p codex-update-manager
+        cargo test -p codex-record-replay-linux
+    fi
+}
+
+run_package() {
+    build_clean_app
+    export PACKAGE_VERSION PACKAGE_WITH_UPDATER=0
+    case "$CI_JOB" in
+        deb) ./scripts/build-deb.sh ;;
+        rpm) ./scripts/build-rpm.sh ;;
+        pacman)
+            local host_uid="${CI_HOST_UID:?missing CI_HOST_UID}"
+            local host_gid="${CI_HOST_GID:?missing CI_HOST_GID}"
+            local builder_group
+            local builder_user
+            builder_group="$(getent group "$host_gid" | cut -d: -f1 || true)"
+            if [ -z "$builder_group" ]; then
+                builder_group=codex-ci
+                groupadd --gid "$host_gid" "$builder_group"
+            fi
+            builder_user="$(getent passwd "$host_uid" | cut -d: -f1 || true)"
+            if [ -z "$builder_user" ]; then
+                builder_user=codex-ci
+                useradd --uid "$host_uid" --gid "$host_gid" --no-create-home "$builder_user"
+            fi
+            install -d -o "$host_uid" -g "$host_gid" /tmp/codex-ci-home
+            chown -R "$host_uid:$host_gid" "$REPO_DIR/codex-app" "$REPO_DIR/dist"
+            runuser -u "$builder_user" -- env \
+                HOME=/tmp/codex-ci-home \
+                CODEX_LINUX_FEATURES_CONFIG="$CODEX_LINUX_FEATURES_CONFIG" \
+                PACKAGE_VERSION="$PACKAGE_VERSION" \
+                PACKAGE_WITH_UPDATER="$PACKAGE_WITH_UPDATER" \
+                ./scripts/build-pacman.sh
+            ;;
     esac
 }
 
-if [ -z "$CI_JOB" ]; then
-    error "Missing CI job name"
-fi
+run_upstream() {
+    node scripts/automation/upstream-linux-package-watchdog/watchdog.js --json
+    build_clean_app
+    ./codex-app/start.sh --diagnose
+}
 
-if [ "${CI_CONTAINER_PHASE:-root}" = "job" ]; then
-    run_job_as_current_user
-    exit 0
-fi
+run_install_deps() {
+    if [ "${CI_IMAGE_KEY:-}" = archlinux-base-devel ]; then
+        local -a matrix_args=()
+        if [ -n "${CI_INSTALL_DEPS_CASE:-}" ]; then
+            matrix_args+=("$CI_INSTALL_DEPS_CASE")
+        fi
+        CODEX_RUN_ARCH_INSTALL_DEPS_MATRIX=1 \
+            bash tests/install_deps_pacman_rust_matrix.sh "${matrix_args[@]}"
+        return
+    fi
 
+    bash scripts/install-deps.sh
+    output="$(./install.sh /tmp/retired-source.dmg 2>&1)" && status=0 || status=$?
+    test "$status" -ne 0
+    grep -q "macOS DMG inputs are no longer supported" <<<"$output"
+}
+
+run_nix() {
+    export NIX_CONFIG="${NIX_CONFIG:-experimental-features = nix-command flakes}"
+    nix flake check --no-write-lock-file --option sandbox false
+    nix build .#codex-desktop --no-link --option sandbox false
+}
+
+[ -n "$CI_JOB" ] || die "missing job"
+cd "$REPO_DIR"
+prepare
 case "$CI_JOB" in
-    core|deb|upstream)
-        prepare_apt_ci
-        ensure_ci_user
-        run_as_ci_user
-        ;;
-    rpm)
-        prepare_fedora_ci
-        ensure_ci_user
-        run_as_ci_user
-        ;;
-    pacman)
-        prepare_arch_ci
-        ensure_ci_user
-        run_as_ci_user
-        ;;
-    install-deps)
-        prepare_apt_install_deps
-        run_install_deps_job_as_root
-        ;;
-    nix)
-        run_nix_job_as_root
-        ;;
-    *)
-        error "Unsupported CI job: $CI_JOB"
-        ;;
+    core) run_core ;;
+    deb|rpm|pacman) run_package ;;
+    upstream) run_upstream ;;
+    install-deps) run_install_deps ;;
+    nix) run_nix ;;
+    *) die "unsupported job" ;;
 esac

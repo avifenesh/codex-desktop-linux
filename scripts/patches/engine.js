@@ -31,7 +31,6 @@ const {
   PHASE_MAIN_BUNDLE,
   PHASE_WEBVIEW_ASSET,
   PATCH_PHASES,
-  normalizeComposesPatches,
 } = require("./descriptor.js");
 const {
   drainStrategies,
@@ -65,28 +64,34 @@ function normalizeDescriptor(descriptor, sourcePath = null, index = 0) {
       `Patch descriptor '${id}' has unsupported ciPolicy '${ciPolicy}' in ${sourcePath ?? "inline descriptor"}`,
     );
   }
+  if (descriptor.enforceWhenEnabled != null && typeof descriptor.enforceWhenEnabled !== "boolean") {
+    throw new Error(
+      `Patch descriptor '${id}' enforceWhenEnabled must be a boolean in ${sourcePath ?? "inline descriptor"}`,
+    );
+  }
+  if (descriptor.enforceWhenEnabled === false && ciPolicy !== OPTIONAL) {
+    throw new Error(
+      `Patch descriptor '${id}' can disable enabled-feature enforcement only with ciPolicy 'optional'`,
+    );
+  }
   const normalized = {
     ...descriptor,
     ciPolicy,
+    enforceWhenEnabled: descriptor.enforceWhenEnabled ?? true,
     id,
     name: descriptor.name ?? id,
     phase: descriptor.phase ?? PHASE_MAIN_BUNDLE,
     sourceKind: descriptor.sourceKind ?? (descriptor.featureId != null ? "feature" : "core"),
     order: descriptor.order ?? 10_000 + index,
     sourcePath,
-    ...(descriptor.composesPatches == null
-      ? {}
-      : { composesPatches: normalizeComposesPatches(descriptor.composesPatches, id) }),
   };
   if (!PATCH_PHASES.has(normalized.phase)) {
     throw new Error(
       `Patch descriptor '${id}' has unsupported phase '${normalized.phase}' in ${sourcePath ?? "inline descriptor"}`,
     );
   }
-  if (normalized.composesPatches != null && normalized.sourceKind !== "feature") {
-    throw new Error(
-      `Patch descriptor '${id}' composesPatches is supported only for Linux feature descriptors`,
-    );
+  if (normalized.composesPatches != null) {
+    throw new Error(`Patch descriptor '${id}' uses removed composesPatches support`);
   }
   return normalized;
 }
@@ -227,6 +232,9 @@ function recordDescriptorPatch(report, descriptor, status, reason, context, extr
     ciPolicy: descriptor.ciPolicy ?? "optional",
     sourceKind: descriptor.sourceKind ?? "core",
     ...(descriptor.featureId != null ? { featureId: descriptor.featureId } : {}),
+    ...(descriptor.sourceKind === "feature"
+      ? { enforceWhenEnabled: descriptor.enforceWhenEnabled !== false }
+      : {}),
     ...(extraMetadata ?? {}),
     ...warnings,
   });
@@ -247,6 +255,27 @@ function recordDescriptorError(report, descriptor, error, context, strategies = 
     context,
     { error: true, ...(strategyMetadata(strategies) ?? {}) },
   );
+}
+
+function recordUnavailablePhasePatchDescriptors(descriptors, phase, context, report, reason) {
+  for (const descriptor of descriptors.filter((patch) => patch.phase === phase)) {
+    if (!descriptorAppliesTo(descriptor, context)) {
+      recordDescriptorPatch(report, descriptor, PATCH_STATUS_SKIPPED_TARGET, null, context);
+      continue;
+    }
+    if (!descriptorEnabled(descriptor, context)) {
+      recordDescriptorPatch(report, descriptor, PATCH_STATUS_SKIPPED_DISABLED, null, context);
+      continue;
+    }
+    recordDescriptorPatch(
+      report,
+      descriptor,
+      descriptorFailureStatus(descriptor),
+      reason,
+      context,
+      { unavailable: true },
+    );
+  }
 }
 
 function rethrowPatchIntegrityError(error) {
@@ -462,5 +491,6 @@ module.exports = {
   normalizeDescriptor,
   normalizePatchDescriptors,
   patchTargetSummary,
+  recordUnavailablePhasePatchDescriptors,
   sortPatchDescriptors,
 };

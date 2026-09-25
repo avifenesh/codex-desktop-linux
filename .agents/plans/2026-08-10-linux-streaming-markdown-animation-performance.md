@@ -44,7 +44,7 @@ Browser Use webview retention, scrolling, or image enter motion.
 
 - Focused Node tests for the patch and descriptor.
 - Full script smoke suite, separating pre-existing environment failures.
-- Patch the exact current DMG stylesheet and verify idempotence.
+- Patch the exact current-package stylesheet and verify idempotence.
 - Fresh baseline/candidate 25-session sweep and targeted heavy-session A/B.
 
 ## Non-goals

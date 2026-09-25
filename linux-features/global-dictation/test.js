@@ -57,15 +57,14 @@ function mainBundleFixture() {
   return [
     "var p=require(`node:fs`),u=require(`node:path`),h=require(`node:child_process`),c=require(`electron`),r={r:()=>({warning(){}})};",
     "function Kk(e,t){let n=``;e.stdout?.on(`data`,e=>{n+=e.toString(`utf8`);let r=n.indexOf(`\\n`);for(;r!==-1;)t(n.slice(0,r).trim()),n=n.slice(r+1),r=n.indexOf(`\\n`)})}",
-    "function eA(e,t,n){if(Rk(e))return Lk(e)?Mk(e,t,n?.bareModifierTrigger):null;let r=oA(e),i=()=>{t.onPressed()},a=c.globalShortcut.register(r,i);return a?process.platform===`darwin`?sA({hotkey:e,onPressed:i,registrationHotkey:r}):{handlesRelease:!1,unregister:()=>{c.globalShortcut.unregister(r)}}:null}",
-    "function fA(e){return nA(e)??(Lk(e)||bA(e,process.platform)?null:`Shortcut key is not supported for global dictation.`)}",
+    "function eA(e,t,n){let r=n?.ownership,i=t.onReleased,a=t.onCancelled,o=r==null?t:{onPressed:()=>{r.isOwner()&&t.onPressed()},onReleased:i==null?void 0:()=>{r.isOwner()&&i()},onCancelled:a==null?void 0:()=>{r.isOwner()&&a()}};if(process.platform===`win32`&&uV(e))return eBe(e,o);if(Rk(e))return Lk(e)||Qk(e)?Mk(e,o,n?.bareModifierTrigger):null;let s=oA(e),l=()=>{o.onPressed()},d=c.globalShortcut.register(s,l);return d?process.platform===`darwin`?sA({hotkey:e,onPressed:l,registrationHotkey:s}):{handlesRelease:!1,unregister:()=>{c.globalShortcut.unregister(s)}}:null}",
+    "function fA(e){if(process.platform===`win32`&&uV(e))return null;let t=xV(e,process.platform,{allowUnmodified:!0});if(t!=null)return t;if(Lk(e))return null;return null}",
     "function pA(e,t){switch(process.platform){case`darwin`:{let n=Ik(mA(e),t);if(n==null)throw Error(`Global dictation hotkey release watching is not supported.`);return n}case`win32`:{let n=gA(e,process.platform);if(n==null)throw Error(`Global dictation hotkey release watching is not supported.`);return BA((0,h.spawn)(`powershell.exe`,[],{stdio:`ignore`}),t)}case`aix`:case`android`:case`cygwin`:case`freebsd`:case`haiku`:case`linux`:case`netbsd`:case`openbsd`:case`sunos`:throw Error(`Global dictation hotkey release watching is not supported.`)}}",
     "function mA(e){let t=[];for(let n of e.split(`+`)){let e=uA.get(n.trim().toLowerCase());e!=null&&!t.includes(e)&&t.push(e)}return t}",
     "function _A(){return [`/unrelated/native/path`]}",
     "function BA(e,t){let n=!1,i=e=>{n||(n=!0,e!=null&&r.r().warning(`Global dictation hotkey release watching failed`,{safe:{},sensitive:{error:e}}),t())};return e.once(`error`,i),e.once(`exit`,()=>i()),{dispose:()=>{n=!0,e.kill()}}}",
-    "function bA(e,t){return t===`darwin`?mA(e).length>0:gA(e,t)!=null}",
     "function k7(e,t,n){return{x:e.centerX-n.x-t.width/2,y:e.centerY-n.y-t.height/2,...t}}var V7=async(...e)=>globalThis.__upstreamExecFile(...e);async function P7(){switch(process.platform){case`darwin`:await V7(`/usr/bin/osascript`,[]);return;case`win32`:return;case`aix`:case`android`:case`cygwin`:case`freebsd`:case`haiku`:case`linux`:case`netbsd`:case`openbsd`:case`sunos`:throw Error(`Global dictation paste is not supported on this OS.`)}}",
-    "var H7=class{registeredHotkey=null;registeredHotkeyRegistration=null;registeredToggleHotkey=null;registeredToggleHotkeyRegistration=null;registerHotkeyOrThrow(e){if(this.registeredHotkey===e)return;let t=this.registeredHotkey,n=eA(e,{onPressed:()=>{this.handleHoldHotkeyPressed()},onReleased:()=>{this.handleHoldHotkeyReleased()}});if(n==null)throw Error(`Unable to register global dictation hotkey: ${e}`);t!=null&&this.registeredHotkeyRegistration?.unregister(),this.registeredHotkey=e,this.registeredHotkeyRegistration=n}unregisterHotkey(){this.registeredHotkey!=null&&(this.registeredHotkeyRegistration?.unregister(),this.registeredHotkey=null,this.registeredHotkeyRegistration=null)}registerToggleHotkeyOrThrow(e){if(this.registeredToggleHotkey===e)return;let t=this.registeredToggleHotkey,n=eA(e,{onPressed:()=>{this.handleToggleHotkeyPressed()}},{bareModifierTrigger:`release`});if(n==null)throw Error(`Unable to register global dictation toggle hotkey: ${e}`);t!=null&&this.registeredToggleHotkeyRegistration?.unregister(),this.registeredToggleHotkey=e,this.registeredToggleHotkeyRegistration=n}unregisterToggleHotkey(){this.registeredToggleHotkey!=null&&(this.registeredToggleHotkeyRegistration?.unregister(),this.registeredToggleHotkey=null,this.registeredToggleHotkeyRegistration=null)}deactivateLifecycle(){this.unregisterHotkey(),this.unregisterToggleHotkey()}handleHoldHotkeyPressed(){}handleHoldHotkeyReleased(){}handleToggleHotkeyPressed(){}};",
+    "var H7=class{registeredHotkey=null;registeredHotkeyRegistration=null;registeredToggleHotkey=null;registeredToggleHotkeyRegistration=null;registerHotkeyOrThrow(e,t){if(this.registeredHotkey===e)return;let n=this.registeredHotkey,r=eA(e,{onPressed:()=>{this.handleHoldHotkeyPressed()},onReleased:()=>{this.handleHoldHotkeyReleased()},onCancelled:()=>{this.handleHoldHotkeyReleased()}},{ownership:t,bareModifierTrigger:`cancellablePress`});if(r==null)throw Error(`Unable to register global dictation hotkey: ${e}`);n!=null&&this.registeredHotkeyRegistration?.unregister(),this.registeredHotkey=e,this.registeredHotkeyRegistration=r}unregisterHotkey(){this.registeredHotkey!=null&&(this.registeredHotkeyRegistration?.unregister(),this.registeredHotkey=null,this.registeredHotkeyRegistration=null)}registerToggleHotkeyOrThrow(e,t){if(this.registeredToggleHotkey===e)return;let n=this.registeredToggleHotkey,r=eA(e,{onPressed:()=>{this.handleTogglePress()},onReleased:()=>this.handleToggleRelease(),onCancelled:()=>{this.toggleHotkeyStartsSession&&(this.toggleHotkeyStartsSession=!1,this.cancelDictation()),this.toggleHotkeyPressedAtMs=void 0,this.lastToggleTapAtMs=void 0}},{bareModifierTrigger:`cancellablePress`,ownership:t});if(r==null)throw Error(`Unable to register global dictation toggle hotkey: ${e}`);n!=null&&this.registeredToggleHotkeyRegistration?.unregister(),this.registeredToggleHotkey=e,this.registeredToggleHotkeyRegistration=r}unregisterToggleHotkey(){this.registeredToggleHotkey!=null&&(this.registeredToggleHotkeyRegistration?.unregister(),this.registeredToggleHotkey=null,this.registeredToggleHotkeyRegistration=null)}deactivateLifecycle(){this.unregisterHotkey(),this.unregisterToggleHotkey()}handleHoldHotkeyPressed(){}handleHoldHotkeyReleased(){}handleTogglePress(){}handleToggleRelease(){}};",
     "function W7(){return process.platform===`darwin`||process.platform===`win32`}",
   ].join("");
 }
@@ -208,6 +207,29 @@ test("main patch enables Linux and preserves the other platform gates", () => {
   assert.doesNotMatch(patched, /await k7\(`xdotool`/);
 });
 
+test("main patch accepts the verified Windows-first registration and validation layout", () => {
+  const patched = applyPatchTwice(mainBundleFixture());
+  assert.match(patched, /process\.platform===`linux`&&Rk\(e\).*Modifier-only shortcuts/u);
+  assert.match(patched, /codexLinuxGlobalDictationPortalRegistration/u);
+});
+
+test("main patch rejects retired, partial, duplicate, and ambiguous toggle registrations", () => {
+  const current = "eA(e,{onPressed:()=>{this.handleTogglePress()},onReleased:()=>this.handleToggleRelease(),onCancelled:()=>{this.toggleHotkeyStartsSession&&(this.toggleHotkeyStartsSession=!1,this.cancelDictation()),this.toggleHotkeyPressedAtMs=void 0,this.lastToggleTapAtMs=void 0}},{bareModifierTrigger:`cancellablePress`,ownership:t})";
+  const retired = "eA(e,{onPressed:()=>{this.handleToggleHotkeyPressed()}},{bareModifierTrigger:`release`,ownership:t})";
+  const fixture = mainBundleFixture();
+  const variants = {
+    retired: fixture.replace(current, retired),
+    partial: fixture.replace(",onCancelled:()=>{this.toggleHotkeyStartsSession&&(this.toggleHotkeyStartsSession=!1,this.cancelDictation()),this.toggleHotkeyPressedAtMs=void 0,this.lastToggleTapAtMs=void 0}", ""),
+    duplicate: fixture.replace(current, `${current},${current}`),
+    ambiguous: fixture + `function duplicate(e,t){return ${current}}`,
+  };
+
+  for (const [name, source] of Object.entries(variants)) {
+    assert.notEqual(source, fixture, name);
+    assert.equal(applyLinuxGlobalDictationMainProcessPatch(source), source, name);
+  }
+});
+
 test("main patch handles dollar signs in minified identifiers", () => {
   const source = mainBundleFixture()
     .split("eA")
@@ -217,7 +239,19 @@ test("main patch handles dollar signs in minified identifiers", () => {
   const patched = applyPatchTwice(source);
   assert.match(patched, /function e\$A\(e,t,n\)/);
   assert.match(patched, /e\$A\(e,\{onPressed:/);
-  assert.match(patched, /L\$k\(e\)\?`Modifier-only shortcuts/);
+  assert.match(patched, /Rk\(e\)\)return`Modifier-only shortcuts/);
+});
+
+test("main patch fails closed when the ownership release alias drifts", () => {
+  const source = mainBundleFixture()
+    .replace(",i=t.onReleased,a=", ",q=t.onReleased,a=")
+    .replace(
+      "onReleased:i==null?void 0:()=>{r.isOwner()&&i()}}",
+      "onReleased:q==null?void 0:()=>{r.isOwner()&&q()}}",
+    );
+  assert.notEqual(source, mainBundleFixture());
+  assert.equal(applyLinuxGlobalDictationMainProcessPatch(source), source);
+  assert.doesNotMatch(source, /codex-linux-global-dictation-v2/);
 });
 
 test("Wayland registration uses a release-aware portal helper", () => {
@@ -338,10 +372,9 @@ test("X11 hold mode starts the bounded release watcher", () => {
   const patched = applyPatchTwice(mainBundleFixture());
   assert.match(patched, /function codexLinuxGlobalDictationReleaseWatcher\(/);
   assert.match(patched, /case`linux`:\{let n=codexLinuxGlobalDictationReleaseWatcher\(e,t\)/);
-  assert.match(patched, /t===`darwin`\|\|t===`linux`\?mA\(e\)\.length>0/);
   assert.match(
     patched,
-    /process\.platform===`linux`&&Lk\(e\)\?`Modifier-only shortcuts are not supported for global dictation on Linux\.`/,
+    /process\.platform===`linux`&&Rk\(e\)\)return`Modifier-only shortcuts are not supported for global dictation on Linux\.`/,
   );
 });
 
@@ -371,8 +404,8 @@ test("portal failure tears down the existing lifecycle without dropping other pl
   const patched = applyPatchTwice(mainBundleFixture());
   assert.match(patched, /handleLinuxHotkeyUnavailable\(e,t\)/);
   assert.match(patched, /this\.deactivateLifecycle\(\)/);
-  assert.match(patched, /onUnavailable:t=>\{this\.handleLinuxHotkeyUnavailable\(`hold`,t\)\}/);
-  assert.match(patched, /onUnavailable:t=>\{this\.handleLinuxHotkeyUnavailable\(`toggle`,t\)\}/);
+  assert.match(patched, /onUnavailable:n=>\{this\.handleLinuxHotkeyUnavailable\(`hold`,n\)\}/);
+  assert.match(patched, /onUnavailable:n=>\{this\.handleLinuxHotkeyUnavailable\(`toggle`,n\)\}/);
 });
 
 test("feature descriptor stays limited to the main bundle", () => {
@@ -595,6 +628,7 @@ test("main patch reports a missing release watcher sentinel as an optional skip"
       phase: "main-bundle",
       targetSummary: "all-linux",
       ciPolicy: "optional",
+      enforceWhenEnabled: true,
       sourceKind: "feature",
       featureId: "global-dictation",
       warnings: ["WARN: release watcher sentinel was not found - skipping Linux global dictation patch"],
@@ -638,53 +672,25 @@ test("stage hook accepts a verified prebuilt helper", () => {
   }
 });
 
-test("stage hook builds from the repository root", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "global-dictation-build-root-"));
-  const sourceRoot = path.join(tempDir, "source");
-  const installDir = path.join(tempDir, "install");
-  const binDir = path.join(tempDir, "bin");
-  const observedCwd = path.join(tempDir, "cargo.cwd");
-  fs.mkdirSync(sourceRoot);
-  fs.mkdirSync(binDir);
-  fs.writeFileSync(
-    path.join(binDir, "cargo"),
-    [
-      `#!${hostBash}`,
-      "set -eu",
-      "pwd > \"$FAKE_CARGO_CWD\"",
-      "printf '%s\\n' \"$*\" > \"$FAKE_CARGO_ARGS\"",
-      "target_dir=\"$FAKE_SOURCE_ROOT/global-dictation-linux/target/release\"",
-      "mkdir -p \"$target_dir\"",
-      "cp \"$FAKE_SOURCE_BINARY\" \"$target_dir/codex-global-dictation-linux\"",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+test("stage hook requires a release artifact and never invokes Cargo", () => {
+  const stage = fs.readFileSync(path.join(__dirname, "stage.sh"), "utf8");
+  assert.doesNotMatch(stage, /cargo\s+(?:build|install)/);
+  assert.match(stage, /global-dictation-linux\/target\/release\/codex-global-dictation-linux/);
 
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "global-dictation-missing-release-"));
   try {
-    execFileSync(path.join(__dirname, "stage.sh"), {
-      cwd: "/",
-      env: {
-        ...process.env,
-        FAKE_CARGO_ARGS: path.join(tempDir, "cargo.args"),
-        FAKE_CARGO_CWD: observedCwd,
-        FAKE_SOURCE_ROOT: sourceRoot,
-        FAKE_SOURCE_BINARY: process.execPath,
-        INSTALL_DIR: installDir,
-        PATH: `${binDir}${path.delimiter}${hostPath}`,
-        SCRIPT_DIR: sourceRoot,
-      },
-      stdio: "pipe",
-    });
-    assert.equal(fs.readFileSync(observedCwd, "utf8").trim(), sourceRoot);
-    assert.equal(
-      fs.readFileSync(path.join(tempDir, "cargo.args"), "utf8").trim(),
-      "build --release --manifest-path global-dictation-linux/Cargo.toml",
-    );
-    assert.equal(
-      fs.statSync(
-        path.join(installDir, "resources", "native", "codex-global-dictation-linux"),
-      ).mode & 0o777,
-      0o755,
+    assert.throws(
+      () => execFileSync(path.join(__dirname, "stage.sh"), {
+        cwd: "/",
+        env: {
+          ...process.env,
+          CODEX_GLOBAL_DICTATION_LINUX_SOURCE: path.join(tempDir, "missing-helper"),
+          INSTALL_DIR: path.join(tempDir, "install"),
+          SCRIPT_DIR: tempDir,
+        },
+        stdio: "pipe",
+      }),
+      /Command failed/,
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });

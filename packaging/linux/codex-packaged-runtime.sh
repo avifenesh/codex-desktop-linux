@@ -65,11 +65,11 @@ codex_packaged_runtime_trigger_update_check() {
             --unit=codex-update-manager-launch-check \
             --collect \
             --quiet \
-            /usr/bin/codex-update-manager check-now --if-stale >/dev/null 2>&1 || true
+            /usr/bin/codex-update-manager check-now >/dev/null 2>&1 || true
         return 0
     fi
 
-    codex-update-manager check-now --if-stale >/dev/null 2>&1 || true
+    codex-update-manager check-now >/dev/null 2>&1 || true
 }
 
 codex_packaged_runtime_export_env() {

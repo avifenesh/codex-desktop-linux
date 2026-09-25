@@ -1,16 +1,40 @@
 # Linux Chronicle / Skysight
 
-Chronicle/Skysight is the screen and event-memory companion to Record & Replay
-on Linux. It is part of the demo-to-skill capture path, not a microphone
-transcription system.
+Chronicle/Skysight is the independent screen and event-memory feature on Linux.
+It can run without Record & Replay and is not a microphone transcription
+system.
 
 ## Relationship To Record & Replay
 
 - Record & Replay owns the user-facing demo-to-skill flow.
 - Chronicle/Skysight keeps the recent activity memory that helps draft the
   resulting skill.
+- Enabling Record & Replay also enables its required `chronicle-skysight`
+  feature. Chronicle/Skysight may be enabled by itself.
+- Standalone Chronicle/Skysight registers a restricted `skysight` MCP server
+  with activity-memory tools only. Recording and skill-composition tools remain
+  exclusive to Record & Replay's `event-stream` MCP server.
 - `speech_context` remains the transcript channel when spoken text is
   available; it is separate from Chronicle-compatible resources.
+
+### Capture Lifecycle
+
+Having either feature installed, enabling Chronicle, or polling
+Chronicle permissions/status does not start continuous desktop capture. The
+event-stream recording path uses bounded session evidence by default and does
+not start the Skysight daemon.
+
+Continuous capture starts only through an explicit Skysight start or Chronicle
+tray action. Each start records a `source` and `owner` in `status.json`; direct
+starts default to `source: cli` and `owner: manual-continuous`. A recording may
+use an owner such as `recording-session:<id>`. Finalizing, canceling, or
+expiring that recording, and clean shutdown of its event-stream MCP server,
+requests stop only when the persisted owner exactly matches that session.
+Manual continuous capture is not stopped by an unrelated recording boundary.
+
+The stop request is a bounded daemon lifecycle signal; the daemon exits on its
+normal loop boundary and records the initiating stop source. Status and
+permission probes remain read-only with respect to daemon startup and capture.
 
 ## Runtime Locations
 
@@ -113,7 +137,7 @@ may also require the system package that provides `libGL.so.1`.
 
 ## Verification After Rebuild
 
-1. Run `node --test linux-features/record-and-replay/test.js`.
+1. Run `node --test linux-features/chronicle-skysight/test.js linux-features/record-and-replay/test.js`.
 2. Rebuild and reinstall the feature bundle.
 3. Confirm the bridge exposes `linux-record-replay-skysight-pause` and
    `linux-record-replay-skysight-resume`.
@@ -123,3 +147,8 @@ may also require the system package that provides `libGL.so.1`.
 6. Capture `skysight snapshot` and confirm the segment has `events.jsonl`,
    `metadata.json`, `artifacts/diagnostics.json`, a `*-10min-*.md` resource,
    and either a newly-created or previously-current `*-6h-*.md` rollup.
+
+This lifecycle fix does not add a new empty-exclusion confirmation dialog or a
+hard kill path for an MCP process terminated without a clean transport
+shutdown. Existing exclusion matching, suppression, pruning, and retention
+behavior remains the privacy boundary for captured artifacts.

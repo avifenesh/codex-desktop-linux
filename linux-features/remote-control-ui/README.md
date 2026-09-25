@@ -5,7 +5,7 @@ Opt-in Linux UI patches for upstream `remote_control` and related settings surfa
 This feature only opens the Linux UI gates. It does not fake backend state such
 as connected clients, MFA completion, or remote control environments.
 
-Enable it locally with:
+Enable it locally in `linux-features/features.json` with:
 
 ```json
 {

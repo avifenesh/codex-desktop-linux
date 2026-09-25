@@ -18,8 +18,8 @@ Add the feature to `linux-features/features.json`:
 
 Then rebuild/package the app. The installed app remains silent until the user
 explicitly clicks a message's speech icon, uses conversation mode, or calls the
-Read Aloud MCP tool. For older builds, or to force-enable direct runtime calls,
-set the runtime opt-in:
+Read Aloud MCP tool. For scripted launches that need to force-enable direct
+runtime calls, set the runtime opt-in:
 
 ```bash
 mkdir -p ~/.config/codex-desktop
@@ -134,3 +134,9 @@ CODEX_LINUX_READ_ALOUD_NATIVE_FALLBACK=0 codex-desktop
 ```
 
 The handler never invokes a shell for response text.
+
+Validate the UI, Electron bridge, and Kokoro staging behavior with:
+
+```bash
+node --test linux-features/read-aloud/test.js
+```

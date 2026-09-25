@@ -276,7 +276,9 @@ function applyLinuxGlobalDictationMainProcessPatch(source) {
 
   try {
     const registerPattern = new RegExp(
-      `function (${IDENT})\\(e,t,n\\)\\{if\\((${IDENT})\\(e\\)\\)return (${IDENT})\\(e\\)\\?(${IDENT})\\(e,t,n\\?\\.bareModifierTrigger\\):null;`,
+      `function (${IDENT})\\(e,t,n\\)\\{[\\s\\S]{0,500}?;` +
+        `(?:if\\(process\\.platform===\`win32\`&&${IDENT}\\(e\\)\\)return ${IDENT}\\(e,${IDENT}\\);)?` +
+        `if\\((${IDENT})\\(e\\)\\)return (${IDENT})\\(e\\)(?:\\|\\|${IDENT}\\(e\\))?\\?(${IDENT})\\(e,(${IDENT}),n\\?\\.bareModifierTrigger\\):null;`,
       "u",
     );
     const registerMatch = source.match(registerPattern);
@@ -284,29 +286,44 @@ function applyLinuxGlobalDictationMainProcessPatch(source) {
       throw new Error("global shortcut registration function was not found");
     }
     const registerFunction = registerMatch[1];
+    const bareModifierTestFunction = registerMatch[2];
     const bareModifierSupportFunction = registerMatch[3];
     const registerFunctionPattern = escapeRegexLiteral(registerFunction);
-    const bareModifierSupportPattern = escapeRegexLiteral(bareModifierSupportFunction);
     let patched = replaceUnique(
       source,
       registerPattern,
-      (original) =>
-        original.replace(
-          "{",
-          "{if(process.platform===`linux`&&codexLinuxGlobalDictationUsesWayland())return codexLinuxGlobalDictationPortalRegistration(e,t);",
-        ),
+      (original, _functionName, _bareTest, _bareSupport, _bareRegister, callbacksVar) => {
+        const ownershipCallbacksPattern = new RegExp(
+          `let (${IDENT})=n\\?\\.ownership,(${IDENT})=t\\.onReleased,(${IDENT})=t\\.onCancelled,(${IDENT})=\\1==null\\?t:\\{` +
+            `onPressed:\\(\\)=>\\{\\1\\.isOwner\\(\\)&&t\\.onPressed\\(\\)\\},` +
+            `onReleased:\\2==null\\?void 0:\\(\\)=>\\{\\1\\.isOwner\\(\\)&&\\2\\(\\)\\},` +
+            `onCancelled:\\3==null\\?void 0:\\(\\)=>\\{\\1\\.isOwner\\(\\)&&\\3\\(\\)\\}\\}`,
+          "u",
+        );
+        const withUnavailable = replaceUnique(
+          original,
+          ownershipCallbacksPattern,
+          (match) => `${match.slice(0, -1)},onUnavailable:t.onUnavailable}`,
+          "ownership callback propagation",
+        );
+        return withUnavailable.replace(
+          ";if(",
+          `;if(process.platform===\`linux\`&&codexLinuxGlobalDictationUsesWayland())return codexLinuxGlobalDictationPortalRegistration(e,${callbacksVar});if(`,
+        );
+      },
       "global shortcut registration function",
     );
     patched = `${helperSource()}${patched}`;
 
+    const currentValidation = new RegExp(
+      `function (${IDENT})\\(e\\)\\{(?=if\\(process\\.platform===\`win32\`&&${IDENT}\\(e\\)\\)return[\\s\\S]{0,220}?;let ${IDENT}=${IDENT}\\(e,process\\.platform,\\{allowUnmodified:!0\\}\\))`,
+      "u",
+    );
     patched = replaceUnique(
       patched,
-      new RegExp(
-        `function (${IDENT})\\(e\\)\\{return (${IDENT})\\(e\\)\\?\\?\\(${bareModifierSupportPattern}\\(e\\)\\|\\|(${IDENT})\\(e,process\\.platform\\)\\?null:\u0060Shortcut key is not supported for global dictation\\.\u0060\\)\\}`,
-        "u",
-      ),
-      (_original, functionName, baseValidationFunction, releaseValidationFunction) =>
-        `function ${functionName}(e){return process.platform===\`linux\`&&${bareModifierSupportFunction}(e)?\`Modifier-only shortcuts are not supported for global dictation on Linux.\`:${baseValidationFunction}(e)??(${bareModifierSupportFunction}(e)||${releaseValidationFunction}(e,process.platform)?null:\`Shortcut key is not supported for global dictation.\`)}`,
+      currentValidation,
+      (_original, functionName) =>
+        `function ${functionName}(e){if(process.platform===\`linux\`&&${bareModifierTestFunction}(e))return\`Modifier-only shortcuts are not supported for global dictation on Linux.\`;`,
       "Linux modifier-only validation",
     );
 
@@ -317,16 +334,7 @@ function applyLinuxGlobalDictationMainProcessPatch(source) {
       "Linux release watcher platform branch",
     );
 
-    patched = replaceUnique(
-      patched,
-      new RegExp(
-        "function (" + IDENT + ")\\(e,t\\)\\{return t===`darwin`\\?(" + IDENT + ")\\(e\\)\\.length>0:(" + IDENT + ")\\(e,t\\)!=null\\}",
-        "u",
-      ),
-      (_original, functionName, modifierFunction, keyFunction) =>
-        "function " + functionName + "(e,t){return t===`darwin`||t===`linux`?" + modifierFunction + "(e).length>0:" + keyFunction + "(e,t)!=null}",
-      "global dictation release validation",
-    );
+
 
     patched = replaceUnique(
       patched,
@@ -347,24 +355,29 @@ function applyLinuxGlobalDictationMainProcessPatch(source) {
     );
 
     const holdRegistration = new RegExp(
-      `${registerFunctionPattern}\\(e,\\{onPressed:\\(\\)=>\\{this\\.handleHoldHotkeyPressed\\(\\)\\},onReleased:\\(\\)=>\\{this\\.handleHoldHotkeyReleased\\(\\)\\}\\}\\)`,
+      `${registerFunctionPattern}\\(e,\\{(onPressed:\\(\\)=>\\{this\\.handleHoldHotkeyPressed\\(\\)\\},onReleased:\\(\\)=>\\{this\\.handleHoldHotkeyReleased\\(\\)\\},onCancelled:\\(\\)=>\\{[\\s\\S]{0,800}?\\})\\},\\{ownership:(${IDENT})(,bareModifierTrigger:\`cancellablePress\`)\\}\\)`,
       "u",
     );
     patched = replaceUnique(
       patched,
       holdRegistration,
-      `${registerFunction}(e,{onPressed:()=>{this.handleHoldHotkeyPressed()},onReleased:()=>{this.handleHoldHotkeyReleased()},onUnavailable:t=>{this.handleLinuxHotkeyUnavailable(\`hold\`,t)}})`,
+      (_original, callbacks, ownershipVar, extraOptions) =>
+        `${registerFunction}(e,{${callbacks},onUnavailable:n=>{this.handleLinuxHotkeyUnavailable(\`hold\`,n)}},{ownership:${ownershipVar}${extraOptions}})`,
       "hold hotkey registration",
     );
 
     const toggleRegistration = new RegExp(
-      registerFunctionPattern + "\\(e,\\{onPressed:\\(\\)=>\\{this\\.handleToggleHotkeyPressed\\(\\)\\}\\},\\{bareModifierTrigger:`release`\\}\\)",
+      registerFunctionPattern +
+        `\\(e,\\{(onPressed:\\(\\)=>\\{this\\.handleTogglePress\\(\\)\\},` +
+        `onReleased:\\(\\)=>this\\.handleToggleRelease\\(\\),onCancelled:\\(\\)=>\\{` +
+        `[\\s\\S]{0,500}?this\\.toggleHotkeyPressedAtMs=void 0,this\\.lastToggleTapAtMs=void 0\\})\\},` +
+        `\\{bareModifierTrigger:\`cancellablePress\`,ownership:(${IDENT})\\}\\)`,
       "u",
     );
     patched = replaceUnique(
       patched,
       toggleRegistration,
-      registerFunction + "(e,{onPressed:()=>{this.handleToggleHotkeyPressed()},onUnavailable:t=>{this.handleLinuxHotkeyUnavailable(`toggle`,t)}},{bareModifierTrigger:`release`})",
+      (_original, callbacks, ownershipVar) => registerFunction + `(e,{${callbacks},onUnavailable:n=>{this.handleLinuxHotkeyUnavailable(\`toggle\`,n)}},{bareModifierTrigger:\`cancellablePress\`,ownership:${ownershipVar}})`,
       "toggle hotkey registration",
     );
 

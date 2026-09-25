@@ -2,10 +2,8 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
-const http = require("node:http");
-const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
@@ -19,13 +17,12 @@ const {
 const {
   RUNTIME_VERSION,
   STYLE_LINK_ID,
-  THEME_CSS_ENDPOINT,
+  THEME_CSS_ENV,
   applyOmarchyThemeLoader,
   omarchyThemeRuntimeSource,
 } = require("./patch.js");
 
 const FEATURE_DIR = __dirname;
-const REPO_ROOT = path.resolve(FEATURE_DIR, "..", "..");
 
 function commandPath(name) {
   for (const directory of (process.env.PATH || "").split(path.delimiter)) {
@@ -60,84 +57,6 @@ function withFeatureConfig(enabled, fn) {
   }
 }
 
-function getFreePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      server.close((error) => {
-        if (error) reject(error);
-        else resolve(address.port);
-      });
-    });
-  });
-}
-
-function request(port, requestPath) {
-  return new Promise((resolve, reject) => {
-    const req = http.get(
-      { host: "127.0.0.1", port, path: requestPath, timeout: 1000 },
-      (response) => {
-        const chunks = [];
-        response.on("data", (chunk) => chunks.push(chunk));
-        response.on("end", () =>
-          resolve({
-            status: response.statusCode,
-            headers: response.headers,
-            body: Buffer.concat(chunks),
-          }),
-        );
-      },
-    );
-    req.once("error", reject);
-    req.once("timeout", () => req.destroy(new Error("request timed out")));
-  });
-}
-
-async function waitForServer(proc, port) {
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    if (proc.exitCode != null) {
-      throw new Error(`webview server exited early with ${proc.exitCode}`);
-    }
-    try {
-      await request(port, "/index.html");
-      return;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-  }
-  throw new Error("webview server did not start");
-}
-
-async function withWebviewServer(serverPath, cwd, env, fn) {
-  const port = await getFreePort();
-  const proc = spawn("python3", [serverPath, String(port), "--bind", "127.0.0.1"], {
-    cwd,
-    env: { ...process.env, ...env },
-    stdio: ["ignore", "ignore", "pipe"],
-  });
-  let stderr = "";
-  proc.stderr.on("data", (chunk) => {
-    stderr += chunk.toString();
-  });
-  try {
-    await waitForServer(proc, port);
-    return await fn(port);
-  } finally {
-    proc.kill("SIGTERM");
-    await Promise.race([
-      new Promise((resolve) => proc.once("exit", resolve)),
-      new Promise((resolve) => setTimeout(resolve, 2000)),
-    ]);
-    if (proc.exitCode == null) {
-      proc.kill("SIGKILL");
-    }
-    assert.doesNotMatch(stderr, /Traceback|Exception/);
-  }
-}
-
 test("omarchy-theme stays disabled until selected", () => {
   withFeatureConfig([], (featuresRoot) => {
     assert.deepEqual(enabledLinuxFeatureIds({ featuresRoot }), []);
@@ -169,14 +88,14 @@ test("omarchy-theme exposes optional patches, resources, and hooks when enabled"
       [
         [
           "omarchy-theme",
-          "env",
-          ".codex-linux/env.d/omarchy-theme-user-stylesheet.env",
-          0o644,
+          "prelaunch",
+          ".codex-linux/prelaunch.d/omarchy-theme-install-template.sh",
+          0o755,
         ],
         [
           "omarchy-theme",
-          "prelaunch",
-          ".codex-linux/prelaunch.d/omarchy-theme-install-template.sh",
+          "launcher",
+          ".codex-linux/launcher.d/omarchy-theme-stylesheet-env.sh",
           0o755,
         ],
       ],
@@ -191,7 +110,7 @@ test("renderer patch is idempotent and installs one guarded runtime", () => {
   assert.equal(applyOmarchyThemeLoader(patched), patched);
   assert.match(patched, new RegExp(RUNTIME_VERSION));
   assert.match(patched, new RegExp(STYLE_LINK_ID));
-  assert.match(patched, new RegExp(THEME_CSS_ENDPOINT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(patched, new RegExp(THEME_CSS_ENV));
 
   const links = new Map();
   const windowListeners = new Map();
@@ -201,6 +120,7 @@ test("renderer patch is idempotent and installs one guarded runtime", () => {
   let appendCount = 0;
   const sandbox = {
     Date: { now: () => 1234 },
+    process: { env: { [THEME_CSS_ENV]: "file:///tmp/theme.css" } },
     document: {
       readyState: "complete",
       hidden: false,
@@ -249,7 +169,7 @@ test("renderer patch is idempotent and installs one guarded runtime", () => {
   assert.equal(intervalCount, 1);
   assert.equal(windowListeners.size, 1);
   assert.equal(documentListeners.size, 1);
-  assert.equal(links.get(STYLE_LINK_ID).href, `${THEME_CSS_ENDPOINT}?t=1234`);
+  assert.equal(links.get(STYLE_LINK_ID).href, "file:///tmp/theme.css?t=1234");
 
   sandbox.codexLinuxOmarchyThemeCleanup();
   assert.equal(clearIntervalCount, 1);
@@ -257,84 +177,16 @@ test("renderer patch is idempotent and installs one guarded runtime", () => {
   assert.equal(documentListeners.size, 0);
 });
 
-test("webview server safely serves default and overridden user stylesheets", async () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-omarchy-theme-server-"));
+test("launcher hook publishes the generated stylesheet as a file URI", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-omarchy-theme-uri-"));
   try {
-    const serverPath = path.join(REPO_ROOT, "launcher", "webview-server.py");
-    const webviewDir = path.join(tempDir, "webview");
-    const generatedCss = path.join(tempDir, "generated.css");
-    const configuredDefaultLine = fs
-      .readFileSync(path.join(FEATURE_DIR, "user-stylesheet.env"), "utf8")
-      .split("\n")
-      .find((line) => line.startsWith("CODEX_LINUX_WEBVIEW_USER_STYLESHEET_DEFAULT="));
-    assert.ok(configuredDefaultLine);
-    const configuredDefault = configuredDefaultLine.slice(configuredDefaultLine.indexOf("=") + 1);
-    fs.mkdirSync(webviewDir, { recursive: true });
-    fs.writeFileSync(path.join(webviewDir, "index.html"), "<!doctype html>");
-
-    fs.writeFileSync(generatedCss, ":root{--accent:#fabd2f}");
-    await withWebviewServer(
-      serverPath,
-      webviewDir,
-      { CODEX_LINUX_WEBVIEW_USER_STYLESHEET_DEFAULT: generatedCss },
-      async (port) => {
-        const existing = await request(port, `${THEME_CSS_ENDPOINT}?t=123`);
-        assert.equal(existing.status, 200);
-        assert.equal(existing.headers["content-type"], "text/css; charset=utf-8");
-        assert.equal(existing.body.toString(), ":root{--accent:#fabd2f}");
-
-        fs.rmSync(generatedCss);
-        const missing = await request(port, THEME_CSS_ENDPOINT);
-        assert.equal(missing.status, 200);
-        assert.equal(missing.body.length, 0);
-
-        fs.writeFileSync(generatedCss, Buffer.alloc(262145, 97));
-        const oversized = await request(port, THEME_CSS_ENDPOINT);
-        assert.equal(oversized.status, 200);
-        assert.equal(oversized.body.length, 0);
-      },
-    );
-
-    const defaultHome = path.join(tempDir, "default-home");
-    const defaultGeneratedCss = path.join(
-      defaultHome,
-      ".config",
-      "omarchy",
-      "current",
-      "theme",
-      "codex-desktop.css",
-    );
-    fs.mkdirSync(path.dirname(defaultGeneratedCss), { recursive: true });
-    fs.writeFileSync(defaultGeneratedCss, "body{color:default-config}");
-    await withWebviewServer(
-      serverPath,
-      webviewDir,
-      {
-        HOME: defaultHome,
-        CODEX_LINUX_WEBVIEW_USER_STYLESHEET_DEFAULT: configuredDefault,
-      },
-      async (port) => {
-        const defaultConfigured = await request(port, THEME_CSS_ENDPOINT);
-        assert.equal(defaultConfigured.status, 200);
-        assert.equal(defaultConfigured.body.toString(), "body{color:default-config}");
-      },
-    );
-
-    const overrideCss = path.join(tempDir, "override.css");
-    fs.writeFileSync(overrideCss, "body{color:papayawhip}");
-    await withWebviewServer(
-      serverPath,
-      webviewDir,
-      {
-        CODEX_LINUX_WEBVIEW_USER_STYLESHEET_DEFAULT: generatedCss,
-        CODEX_LINUX_WEBVIEW_USER_STYLESHEET: overrideCss,
-      },
-      async (port) => {
-        const overridden = await request(port, THEME_CSS_ENDPOINT);
-        assert.equal(overridden.status, 200);
-        assert.equal(overridden.body.toString(), "body{color:papayawhip}");
-      },
-    );
+    const stylesheet = path.join(tempDir, "theme.css");
+    const result = spawnSync(BASH, [path.join(FEATURE_DIR, "stylesheet-env.sh")], {
+      env: { ...process.env, CODEX_LINUX_OMARCHY_STYLESHEET: stylesheet },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), `env ${THEME_CSS_ENV}=${new URL(`file://${stylesheet}`).href}`);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
