@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Synchronize the embedded backend to standalone v0.7.2 as
+  `0.7.2-linux-alpha1`. `doctor` requires XDG portal methods before reporting
+  Screenshot, ScreenCast, or InputCapture, and readiness gains
+  `can_capture_screenshots`. Native X11 sessions gain a root-window `GetImage`
+  screenshot route and read EWMH window origins from the X server instead of
+  `wmctrl -lG`. The embedded crate adds the pure-Rust `x11rb` client. Codex
+  identities, DBus interfaces, the GNOME Shell extension screenshot route,
+  Chrome integration, and compositor behavior are preserved.
 - Synchronize the embedded backend to standalone v0.7.1 as
   `0.7.1-linux-alpha1`. `get_app_state` now returns screenshot pixels as an
   image content block instead of inline base64 JSON, X11 typing retains an
