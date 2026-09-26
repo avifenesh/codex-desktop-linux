@@ -12,7 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   from another app's snapshot; post-input focus feedback says when the search
   hit its limits or the app exposes no AT-SPI tree, instead of warning "no
   focused element"; and portal pointer input on scaled GNOME Wayland sends
-  physical stream coordinates, so clicks no longer land at 1/scale. Codex
+  physical stream coordinates, so clicks no longer land at 1/scale. The
+  index check records a snapshot pid only when the tree's roots were selected
+  by that pid; a tree from an app-name fallback is checked node by node
+  against its owner on the accessibility bus (standalone #178). Codex
   identities, DBus interfaces, and the extension screenshot route are
   preserved.
 - Carry the standalone KDE terminal paste fix as `0.7.2-linux-alpha3`. KDE
