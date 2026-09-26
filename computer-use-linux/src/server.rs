@@ -1,7 +1,8 @@
 use crate::atspi_tree::{
-    focused_element_summary, list_accessible_apps, perform_action as invoke_accessibility_action,
-    perform_named_action, set_element_value, snapshot_accessibility_tree, AccessibilityAction,
-    AccessibilityNode, AccessibleAppSummary, Bounds, FocusedElementSummary, ValueSetInvocation,
+    focused_element_summary, focused_element_summary_in_app, list_accessible_apps,
+    perform_action as invoke_accessibility_action, perform_named_action, set_element_value,
+    snapshot_accessibility_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary,
+    Bounds, FocusedElementSummary, ValueSetInvocation,
 };
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
@@ -15,7 +16,7 @@ use crate::screenshot::{
     capture_screenshot_raw, prepare_screenshot_payload, RawScreenshotCapture, ScreenshotCapture,
     ScreenshotOutputFormat, ScreenshotPayloadOptions,
 };
-use crate::terminal::uses_terminal_paste_shortcut;
+use crate::terminal::{terminal_paste_shortcut, TerminalPasteShortcut};
 use crate::windowing::registry;
 use crate::windows::{
     focus_window_target, focused_window, list_windows, resolve_window_target,
@@ -1830,8 +1831,8 @@ impl ComputerUseLinux {
                     } else {
                         focus.clone()
                     };
-                    let use_terminal_paste =
-                        kde_clipboard_uses_terminal_paste(&window_target, kde_focus.as_ref()).await;
+                    let paste_shortcut =
+                        kde_clipboard_paste_shortcut(&window_target, kde_focus.as_ref()).await;
                     let clipboard_guard = Arc::clone(&self.kde_clipboard_lock).lock_owned().await;
                     let session_for_input = session.clone();
                     let text = params.text.clone();
@@ -1841,7 +1842,7 @@ impl ComputerUseLinux {
                             run_kde_clipboard_paste_text(
                                 &session_for_input,
                                 &text,
-                                use_terminal_paste,
+                                paste_shortcut,
                                 portal_operation_guard,
                             )
                             .await
@@ -2096,7 +2097,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.7.2-linux-alpha2",
+    version = "0.7.2-linux-alpha3",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility. run_shell is absent unless CODEX_COMPUTER_USE_ENABLE_SHELL=1 or the standalone COMPUTER_USE_LINUX_ENABLE_SHELL=1 compatibility alias; when enabled it is same-user arbitrary host execution, not a sandbox, and hosts should require explicit approval."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -5371,6 +5372,7 @@ fn ydotool_type_timeout(text: &str) -> Duration {
 const EVDEV_KEY_LEFTCTRL: i32 = 29;
 const EVDEV_KEY_LEFTSHIFT: i32 = 42;
 const EVDEV_KEY_V: i32 = 47;
+const EVDEV_KEY_INSERT: i32 = 110;
 const KDE_CLIPBOARD_RESTORE_MIN_DELAY_MS: u64 = 1_500;
 const KDE_CLIPBOARD_RESTORE_MAX_DELAY_MS: u64 = 5_000;
 const KDE_CLIPBOARD_RESTORE_CHARS_PER_SECOND: u64 = 250;
@@ -5421,7 +5423,7 @@ impl KdeClipboardPasteError {
 async fn run_kde_clipboard_paste_text(
     session: &PortalKeyboardSession,
     text: &str,
-    use_terminal_paste: bool,
+    paste_shortcut: KdeClipboardPasteShortcut,
     operation_guard: InputOperationGuard,
 ) -> std::result::Result<String, KdeClipboardPasteError> {
     let previous = kde_clipboard_contents()
@@ -5440,14 +5442,10 @@ async fn run_kde_clipboard_paste_text(
         return Err(KdeClipboardPasteError::ambiguous_clipboard_set(message));
     }
 
-    let paste_result = press_keycode_chord(
-        session,
-        kde_clipboard_paste_modifiers(use_terminal_paste),
-        EVDEV_KEY_V,
-        Some(operation_guard),
-    )
-    .await
-    .map_err(|error| format!("{error:#}"));
+    let (modifiers, keycode) = kde_clipboard_paste_chord(paste_shortcut);
+    let paste_result = press_keycode_chord(session, modifiers, keycode, Some(operation_guard))
+        .await
+        .map_err(|error| format!("{error:#}"));
 
     sleep(kde_clipboard_restore_delay(text)).await;
     let restore_result = kde_set_clipboard_contents(&previous).await;
@@ -5464,35 +5462,93 @@ async fn run_kde_clipboard_paste_text(
     }
 }
 
-async fn kde_clipboard_uses_terminal_paste(
+/// Paste chord for KDE clipboard text input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KdeClipboardPasteShortcut {
+    /// Ctrl+V, for ordinary widgets.
+    Standard,
+    /// Ctrl+Shift+V, for most terminal emulators.
+    CtrlShiftV,
+    /// Shift+Insert, for the xterm and rxvt families.
+    ShiftInsert,
+}
+
+async fn kde_clipboard_paste_shortcut(
     target: &WindowTarget,
     focus: Option<&WindowFocusResult>,
-) -> bool {
-    if let Some(focus) = focus {
-        let window = focus
-            .focused_window
-            .as_ref()
-            .unwrap_or(&focus.requested_window);
-        return kde_clipboard_target_is_terminal(target, Some(window));
+) -> KdeClipboardPasteShortcut {
+    let current = match focus {
+        Some(_) => None,
+        None => focused_window().await.ok().flatten(),
+    };
+    let window = focus
+        .map(|focus| {
+            focus
+                .focused_window
+                .as_ref()
+                .unwrap_or(&focus.requested_window)
+        })
+        .or(current.as_ref());
+    let terminal = kde_clipboard_terminal_shortcut(target, window);
+    if terminal.is_none() {
+        return KdeClipboardPasteShortcut::Standard;
     }
-    if let Ok(Some(current)) = focused_window().await {
-        return kde_clipboard_target_is_terminal(target, Some(&current));
-    }
-    kde_clipboard_target_is_terminal(target, None)
+    // A terminal window can hold focus on a non-terminal widget (a search
+    // field, a tab rename box) that pastes with plain Ctrl+V. Only an answer
+    // from the terminal's own AT-SPI app may override the chord: without a pid,
+    // or when the terminal exposes no AT-SPI root, keep the terminal chord.
+    let Some(pid) = window.and_then(|window| window.pid) else {
+        return kde_clipboard_shortcut_for_focus(terminal, None);
+    };
+    let focused_element = timeout(
+        Duration::from_millis(1_500),
+        focused_element_summary_in_app(pid),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .flatten();
+    kde_clipboard_shortcut_for_focus(terminal, focused_element.as_ref())
 }
 
-fn kde_clipboard_target_is_terminal(target: &WindowTarget, window: Option<&WindowInfo>) -> bool {
+/// The terminal chord for the resolved window, or for an explicit terminal
+/// selector when no window resolved. A resolved window always wins over a
+/// possibly stale selector.
+fn kde_clipboard_terminal_shortcut(
+    target: &WindowTarget,
+    window: Option<&WindowInfo>,
+) -> Option<TerminalPasteShortcut> {
     match window {
-        Some(window) => uses_terminal_paste_shortcut(window),
-        None => target.has_terminal_target(),
+        Some(window) => terminal_paste_shortcut(window),
+        None => target
+            .has_terminal_target()
+            .then_some(TerminalPasteShortcut::CtrlShiftV),
     }
 }
 
-fn kde_clipboard_paste_modifiers(use_terminal_paste: bool) -> &'static [i32] {
-    if use_terminal_paste {
-        &[EVDEV_KEY_LEFTCTRL, EVDEV_KEY_LEFTSHIFT]
-    } else {
-        &[EVDEV_KEY_LEFTCTRL]
+fn kde_clipboard_shortcut_for_focus(
+    terminal: Option<TerminalPasteShortcut>,
+    focused_element: Option<&FocusedElementSummary>,
+) -> KdeClipboardPasteShortcut {
+    // No AT-SPI answer (xterm exposes none) keeps the terminal chord; a
+    // concrete non-terminal focused element switches back to Ctrl+V.
+    if focused_element.is_some_and(|element| !element.is_terminal) {
+        return KdeClipboardPasteShortcut::Standard;
+    }
+    match terminal {
+        Some(TerminalPasteShortcut::CtrlShiftV) => KdeClipboardPasteShortcut::CtrlShiftV,
+        Some(TerminalPasteShortcut::ShiftInsert) => KdeClipboardPasteShortcut::ShiftInsert,
+        None => KdeClipboardPasteShortcut::Standard,
+    }
+}
+
+fn kde_clipboard_paste_chord(shortcut: KdeClipboardPasteShortcut) -> (&'static [i32], i32) {
+    match shortcut {
+        KdeClipboardPasteShortcut::Standard => (&[EVDEV_KEY_LEFTCTRL], EVDEV_KEY_V),
+        KdeClipboardPasteShortcut::CtrlShiftV => {
+            (&[EVDEV_KEY_LEFTCTRL, EVDEV_KEY_LEFTSHIFT], EVDEV_KEY_V)
+        }
+        KdeClipboardPasteShortcut::ShiftInsert => (&[EVDEV_KEY_LEFTSHIFT], EVDEV_KEY_INSERT),
     }
 }
 
@@ -7129,16 +7185,67 @@ mod tests {
     }
 
     #[test]
-    fn kde_clipboard_uses_terminal_paste_shortcut_for_terminals() {
+    fn kde_clipboard_maps_each_paste_shortcut_to_its_chord() {
         assert_eq!(
-            kde_clipboard_paste_modifiers(true),
-            &[EVDEV_KEY_LEFTCTRL, EVDEV_KEY_LEFTSHIFT]
+            kde_clipboard_paste_chord(KdeClipboardPasteShortcut::Standard),
+            (&[EVDEV_KEY_LEFTCTRL][..], EVDEV_KEY_V)
+        );
+        assert_eq!(
+            kde_clipboard_paste_chord(KdeClipboardPasteShortcut::CtrlShiftV),
+            (&[EVDEV_KEY_LEFTCTRL, EVDEV_KEY_LEFTSHIFT][..], EVDEV_KEY_V)
+        );
+        assert_eq!(
+            kde_clipboard_paste_chord(KdeClipboardPasteShortcut::ShiftInsert),
+            (&[EVDEV_KEY_LEFTSHIFT][..], EVDEV_KEY_INSERT)
+        );
+    }
+
+    fn focused(role: &str, is_terminal: bool) -> FocusedElementSummary {
+        FocusedElementSummary {
+            role: role.to_string(),
+            name: None,
+            editable: false,
+            states: vec!["focused".to_string()],
+            is_terminal,
+        }
+    }
+
+    #[test]
+    fn kde_clipboard_focus_fallback_uses_the_role_enum_not_the_name() {
+        let ctrl_shift_v = Some(TerminalPasteShortcut::CtrlShiftV);
+        let shift_insert = Some(TerminalPasteShortcut::ShiftInsert);
+
+        // No AT-SPI answer (xterm exposes none) keeps the terminal chord.
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(shift_insert, None),
+            KdeClipboardPasteShortcut::ShiftInsert
+        );
+        // A terminal widget keeps it, whatever its localized role name.
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(ctrl_shift_v, Some(&focused("терминал", true))),
+            KdeClipboardPasteShortcut::CtrlShiftV
+        );
+        // A focused search field inside the terminal window pastes with Ctrl+V.
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(ctrl_shift_v, Some(&focused("text", false))),
+            KdeClipboardPasteShortcut::Standard
+        );
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(None, None),
+            KdeClipboardPasteShortcut::Standard
         );
     }
 
     #[test]
-    fn kde_clipboard_keeps_standard_paste_shortcut_for_other_apps() {
-        assert_eq!(kde_clipboard_paste_modifiers(false), &[EVDEV_KEY_LEFTCTRL]);
+    fn kde_clipboard_routes_xterm_family_to_shift_insert() {
+        for wm_class in ["xterm", "UXTerm", "urxvt", "rxvt-unicode", "koi8rxterm"] {
+            let window = window_info(1, Some("user@host"), None, Some(wm_class), Some(100));
+            assert_eq!(
+                kde_clipboard_terminal_shortcut(&WindowTarget::default(), Some(&window)),
+                Some(TerminalPasteShortcut::ShiftInsert),
+                "{wm_class} should paste with Shift+Insert"
+            );
+        }
     }
 
     #[test]
@@ -7147,7 +7254,11 @@ mod tests {
             tty: Some("/dev/pts/11".to_string()),
             ..Default::default()
         };
-        assert!(kde_clipboard_target_is_terminal(&target, None));
+
+        assert_eq!(
+            kde_clipboard_terminal_shortcut(&target, None),
+            Some(TerminalPasteShortcut::CtrlShiftV)
+        );
     }
 
     #[test]
@@ -7163,7 +7274,11 @@ mod tests {
             Some("firefox"),
             Some(100),
         );
-        assert!(!kde_clipboard_target_is_terminal(&target, Some(&window)));
+
+        assert_eq!(
+            kde_clipboard_terminal_shortcut(&target, Some(&window)),
+            None
+        );
     }
 
     #[tokio::test]
@@ -8400,6 +8515,7 @@ mod tests {
             name: Some("Message".to_string()),
             editable: true,
             states: vec!["focused".to_string()],
+            is_terminal: false,
         };
         let described = describe_focused_element(&element, true);
         assert!(described.contains("editable"));
@@ -8413,6 +8529,7 @@ mod tests {
             name: Some("OK".to_string()),
             editable: false,
             states: vec!["focused".to_string()],
+            is_terminal: false,
         };
         let described = describe_focused_element(&element, true);
         assert!(described.contains("WARNING"));
@@ -8426,6 +8543,7 @@ mod tests {
             name: None,
             editable: false,
             states: vec![],
+            is_terminal: false,
         };
         let described = describe_focused_element(&element, false);
         assert!(!described.contains("WARNING"));

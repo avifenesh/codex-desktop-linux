@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Carry the standalone KDE terminal paste fix as `0.7.2-linux-alpha3`. KDE
+  clipboard paste sends Shift+Insert to xterm, uxterm, rxvt, urxvt, and
+  koi8rxterm, which have no Ctrl+Shift+V binding; Klipper sets the selection
+  too, so the new text pastes. A focused non-terminal widget inside a terminal
+  window, reported by that terminal's own AT-SPI app, switches to Ctrl+V. The
+  check reads the AT-SPI role enum, not the localized name. This is the
+  behavior of this repo's upstream #1413, now in the standalone crate.
 - Carry the standalone post-v0.7.2 spawn fix as `0.7.2-linux-alpha2`. Helper
   launches (ydotool, wtype, xdotool, gnome-screenshot, and every supervised
   command) retry a transient `ETXTBSY` ("Text file busy") for up to 75 ms, so
