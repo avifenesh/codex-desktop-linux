@@ -1,8 +1,8 @@
 use crate::atspi_tree::{
-    focused_element_summary, focused_element_summary_in_app, list_accessible_apps,
-    perform_action as invoke_accessibility_action, perform_named_action, set_element_value,
-    snapshot_accessibility_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary,
-    Bounds, FocusedElementSummary, ValueSetInvocation,
+    focused_element_summary_in_app, list_accessible_apps, object_ref_owner_pid,
+    perform_action as invoke_accessibility_action, perform_named_action, probe_focused_element,
+    set_element_value, snapshot_accessibility_tree, AccessibilityAction, AccessibilityNode,
+    AccessibleAppSummary, Bounds, FocusProbe, FocusedElementSummary, ValueSetInvocation,
 };
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
@@ -81,6 +81,9 @@ const SHELL_RESPONSE_STREAM_BYTES: usize = 512 * 1024;
 #[derive(Clone, Default)]
 pub struct ComputerUseLinux {
     last_nodes: Arc<Mutex<Vec<AccessibilityNode>>>,
+    /// Pid the cached snapshot was taken for, when get_app_state had a target.
+    /// Element indices are only meaningful against that app (#167).
+    last_snapshot_pid: Arc<Mutex<Option<u32>>>,
     portal_pointer_session: Arc<Mutex<Option<PortalPointerSession>>>,
     portal_keyboard_session: Arc<Mutex<Option<PortalKeyboardSession>>>,
     /// Lazily-created uinput absolute pointer (preferred coordinate backend).
@@ -441,7 +444,16 @@ impl ComputerUseLinux {
                 )
             };
         if accessibility_error.is_none() {
-            self.cache_nodes(&accessibility_tree);
+            // Record the target only when the tree was actually scoped. A pid
+            // with no AT-SPI root falls back to every app (tree_scoped false);
+            // recording the pid then would let another app's index pass the
+            // target check instead of taking the per-node owner lookup.
+            let snapshot_pid = snapshot_target_pid(
+                tree_scoped,
+                window_context.as_ref().and_then(|window| window.pid),
+                params.pid,
+            );
+            self.cache_snapshot(&accessibility_tree, snapshot_pid);
         } else {
             self.clear_cached_nodes();
         }
@@ -683,6 +695,7 @@ impl ComputerUseLinux {
         let received = Some(serde_json::json!(params.clone()));
         let mut input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let mut portal_target_point = None;
+        let mut target_pid = params.pid;
         // Raise the target window first (if specified) so the click lands on the
         // intended app rather than whatever is stacked on top at that pixel.
         let window_target = params.window_target();
@@ -708,6 +721,7 @@ impl ComputerUseLinux {
                     });
                 }
             };
+            target_pid = focus_target_pid(focus.as_ref()).or(target_pid);
             tokio::time::sleep(Duration::from_millis(120)).await;
             // Window-relative coordinates: translate by the window's top-left so
             // the agent can click the pixel it saw in a window-cropped screenshot.
@@ -750,6 +764,23 @@ impl ComputerUseLinux {
                     .x
                     .zip(params.y)
                     .and_then(|(x, y)| coordinate_map.portal_point(x, y));
+            }
+        }
+        if params.x.zip(params.y).is_none() {
+            if let Some(node) = self.cached_node_for(
+                params.element_index,
+                &params.selector(),
+                ElementResolvePurpose::Click,
+            ) {
+                if let Err(message) = self.check_node_target(&node, target_pid).await {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "click".to_string(),
+                        message,
+                        received,
+                    });
+                }
             }
         }
         let target = match self.resolve_click_target(&params) {
@@ -1142,6 +1173,7 @@ impl ComputerUseLinux {
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let mut portal_target_point = None;
         let units = ((params.pages.unwrap_or(1.0).abs().max(0.1) * 5.0).round() as i32).max(1);
+        let mut target_pid = params.pid;
         // Raise/focus the target window first (parity with click) so wheel
         // events land on the intended app.
         let window_target = params.window_target();
@@ -1167,6 +1199,7 @@ impl ComputerUseLinux {
                     });
                 }
             };
+            target_pid = focus_target_pid(focus.as_ref()).or(target_pid);
             tokio::time::sleep(Duration::from_millis(120)).await;
             if params.relative == Some(true) {
                 let Some(focus) = focus.as_ref() else {
@@ -1250,6 +1283,23 @@ impl ComputerUseLinux {
                     .x
                     .zip(params.y)
                     .and_then(|(x, y)| coordinate_map.portal_point(x, y));
+            }
+        }
+        if params.x.is_none() && params.y.is_none() {
+            if let Some(node) = self.cached_node_for(
+                params.element_index,
+                &ElementSelector::default(),
+                ElementResolvePurpose::Click,
+            ) {
+                if let Err(message) = self.check_node_target(&node, target_pid).await {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "scroll".to_string(),
+                        message,
+                        received,
+                    });
+                }
             }
         }
         let target_point =
@@ -2097,7 +2147,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.7.2-linux-alpha3",
+    version = "0.7.3-linux-alpha1",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility. run_shell is absent unless CODEX_COMPUTER_USE_ENABLE_SHELL=1 or the standalone COMPUTER_USE_LINUX_ENABLE_SHELL=1 compatibility alias; when enabled it is same-user arbitrary host execution, not a sandbox, and hosts should require explicit approval."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -3717,17 +3767,15 @@ impl ComputerUseLinux {
             .as_ref()
             .and_then(|window| window.pid)
             .or(focus.requested_window.pid);
-        match timeout(Duration::from_millis(1500), focused_element_summary(pid)).await {
-            Ok(Ok(Some(element))) => Some(describe_focused_element(&element, expects_editable)),
-            Ok(Ok(None)) => Some(
-                "WARNING: AT-SPI reports no focused element in the target app — the input may have landed nowhere. If this is an Electron app, launch it with --force-renderer-accessibility to expose its UI tree."
-                    .to_string(),
-            ),
+        match timeout(Duration::from_millis(1500), probe_focused_element(pid)).await {
+            Ok(Ok(probe)) => Some(focus_probe_feedback(&probe, expects_editable)),
             Ok(Err(error)) => Some(format!(
                 "Focused-element feedback unavailable ({}).",
                 first_line(&format!("{error:#}"))
             )),
-            Err(_) => Some("Focused-element feedback unavailable (AT-SPI probe timed out).".to_string()),
+            Err(_) => {
+                Some("Focused-element feedback unavailable (AT-SPI probe timed out).".to_string())
+            }
         }
     }
 
@@ -3840,17 +3888,64 @@ impl ComputerUseLinux {
         notes
     }
 
+    #[cfg(test)]
     fn cache_nodes(&self, nodes: &[AccessibilityNode]) {
+        self.cache_snapshot(nodes, None);
+    }
+
+    fn cache_snapshot(&self, nodes: &[AccessibilityNode], target_pid: Option<u32>) {
         if let Ok(mut cached) = self.last_nodes.lock() {
             cached.clear();
             cached.extend_from_slice(nodes);
         }
+        if let Ok(mut pid) = self.last_snapshot_pid.lock() {
+            *pid = target_pid;
+        }
     }
 
     fn clear_cached_nodes(&self) {
-        if let Ok(mut cached) = self.last_nodes.lock() {
-            cached.clear();
+        self.cache_snapshot(&[], None);
+    }
+
+    /// Reject an element-targeted action whose cached node belongs to a
+    /// different app than the action's target. A snapshot taken for a pid is
+    /// judged by that pid; an untargeted snapshot mixes apps, so its node is
+    /// judged by the pid that owns it on the accessibility bus. When neither is
+    /// known the action proceeds, since a mismatch cannot be shown.
+    async fn check_node_target(
+        &self,
+        node: &AccessibilityNode,
+        target_pid: Option<u32>,
+    ) -> std::result::Result<(), String> {
+        let Some(target_pid) = target_pid else {
+            return Ok(());
+        };
+        let snapshot_pid = self.last_snapshot_pid.lock().ok().and_then(|pid| *pid);
+        let owner_pid = match snapshot_pid {
+            Some(pid) => Some(pid),
+            None => object_ref_owner_pid(&node.object_ref).await.ok().flatten(),
+        };
+        match owner_pid {
+            Some(owner_pid) if owner_pid != target_pid => Err(node_target_mismatch_message(
+                node.index, owner_pid, target_pid,
+            )),
+            _ => Ok(()),
         }
+    }
+
+    /// The cached node an element-targeted click or scroll would act on, when
+    /// the call names one. Resolution errors are left to the tool's own path.
+    fn cached_node_for(
+        &self,
+        element_index: Option<u32>,
+        selector: &ElementSelector<'_>,
+        purpose: ElementResolvePurpose,
+    ) -> Option<AccessibilityNode> {
+        if element_index.is_none() && selector.is_empty() {
+            return None;
+        }
+        self.resolve_cached_node(element_index, selector, purpose)
+            .ok()
     }
 
     fn resolve_optional_target_point(
@@ -5073,6 +5168,43 @@ fn with_focus_context(mut output: ActionOutput, focus: Option<WindowFocusResult>
         }
     }
     output
+}
+
+/// Post-input focus feedback. Only a complete search that finds nothing is a
+/// warning; a search that hit a limit, or an app without an AT-SPI tree, cannot
+/// tell whether the input landed, so it says that instead.
+fn focus_probe_feedback(probe: &FocusProbe, expects_editable: bool) -> String {
+    match probe {
+        FocusProbe::Found(element) => describe_focused_element(element, expects_editable),
+        FocusProbe::NoneFocused => "WARNING: AT-SPI reports no focused element in the target app; the input may have landed nowhere.".to_string(),
+        FocusProbe::Incomplete => "Focused-element feedback unavailable: the focused element was not reached within the AT-SPI search limits, so the input could not be verified. Its absence here does not mean the input was lost.".to_string(),
+        FocusProbe::NoAccessibleApp => "Focused-element feedback unavailable: the target app exposes no AT-SPI tree, so the input could not be verified. Electron apps need --force-renderer-accessibility.".to_string(),
+    }
+}
+
+/// The pid a get_app_state snapshot is recorded as belonging to: the target's
+/// window pid, else the requested pid, and only when the tree was scoped.
+fn snapshot_target_pid(
+    tree_scoped: bool,
+    window_pid: Option<u32>,
+    requested_pid: Option<u32>,
+) -> Option<u32> {
+    tree_scoped.then(|| window_pid.or(requested_pid)).flatten()
+}
+
+fn node_target_mismatch_message(element_index: u32, owner_pid: u32, target_pid: u32) -> String {
+    format!(
+        "element_index {element_index} comes from the latest get_app_state snapshot of pid {owner_pid}, not the target pid {target_pid}. Call get_app_state for the target app and use an index from that result."
+    )
+}
+
+fn focus_target_pid(focus: Option<&WindowFocusResult>) -> Option<u32> {
+    let focus = focus?;
+    focus
+        .focused_window
+        .as_ref()
+        .and_then(|window| window.pid)
+        .or(focus.requested_window.pid)
 }
 
 fn describe_focused_element(element: &FocusedElementSummary, expects_editable: bool) -> String {
@@ -8760,5 +8892,129 @@ mod accessibility_tree_note_tests {
             "shrinking the cap belongs to the unscoped warning, not the truncation note"
         );
         assert!(truncated_accessibility_tree_note(false).is_none());
+    }
+}
+
+#[cfg(test)]
+mod focus_probe_feedback_tests {
+    use super::{focus_probe_feedback, FocusProbe, FocusedElementSummary};
+
+    #[test]
+    fn only_a_complete_empty_search_warns() {
+        let none = focus_probe_feedback(&FocusProbe::NoneFocused, true);
+        assert!(none.starts_with("WARNING:"), "{none}");
+
+        for probe in [FocusProbe::Incomplete, FocusProbe::NoAccessibleApp] {
+            let text = focus_probe_feedback(&probe, true);
+            assert!(
+                !text.contains("WARNING"),
+                "{probe:?} must not claim lost input: {text}"
+            );
+            assert!(text.contains("could not be verified"), "{text}");
+        }
+        assert!(focus_probe_feedback(&FocusProbe::Incomplete, true).contains("search limits"));
+        assert!(focus_probe_feedback(&FocusProbe::NoAccessibleApp, true)
+            .contains("--force-renderer-accessibility"));
+    }
+
+    #[test]
+    fn found_element_is_described() {
+        let element = FocusedElementSummary {
+            role: "text".to_string(),
+            name: None,
+            editable: true,
+            states: vec!["focused".to_string()],
+            is_terminal: false,
+        };
+        let text = focus_probe_feedback(&FocusProbe::Found(element), true);
+        assert!(text.contains("text"), "{text}");
+        assert!(!text.starts_with("WARNING"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod node_target_scope_tests {
+    use super::*;
+
+    fn cached_node(index: u32, object_ref: &str) -> AccessibilityNode {
+        AccessibilityNode {
+            index,
+            parent_index: None,
+            depth: 1,
+            object_ref: object_ref.to_string(),
+            role: "push button".to_string(),
+            name: Some("Hit me".to_string()),
+            description: None,
+            child_count: 0,
+            bounds: None,
+            states: vec!["enabled".to_string()],
+            actions: Vec::new(),
+            value: None,
+            text: None,
+            supports_editable_text: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn index_from_another_apps_snapshot_is_rejected() {
+        let backend = ComputerUseLinux::default();
+        let node = cached_node(2, ":1.9/org/a11y/atspi/accessible/42");
+        backend.cache_snapshot(std::slice::from_ref(&node), Some(2_690_687));
+
+        let error = backend
+            .check_node_target(&node, Some(2_690_664))
+            .await
+            .unwrap_err();
+        assert!(error.contains("pid 2690687"), "{error}");
+        assert!(error.contains("target pid 2690664"), "{error}");
+        assert!(
+            error.contains("Call get_app_state for the target app"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_target_or_no_target_is_allowed() {
+        let backend = ComputerUseLinux::default();
+        let node = cached_node(2, ":1.9/org/a11y/atspi/accessible/42");
+        backend.cache_snapshot(std::slice::from_ref(&node), Some(2_690_664));
+
+        assert!(backend
+            .check_node_target(&node, Some(2_690_664))
+            .await
+            .is_ok());
+        assert!(backend.check_node_target(&node, None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn unscoped_snapshot_with_unknown_owner_is_allowed() {
+        // No snapshot pid, and the owner lookup cannot resolve this ref here,
+        // so a mismatch cannot be shown and the action proceeds.
+        let backend = ComputerUseLinux::default();
+        let node = cached_node(2, ":1.9999/org/a11y/atspi/accessible/42");
+        backend.cache_snapshot(std::slice::from_ref(&node), None);
+
+        assert!(backend.check_node_target(&node, Some(1)).await.is_ok());
+    }
+
+    #[test]
+    fn only_a_scoped_tree_records_its_target_pid() {
+        assert_eq!(snapshot_target_pid(true, Some(10), Some(20)), Some(10));
+        assert_eq!(snapshot_target_pid(true, None, Some(20)), Some(20));
+        assert_eq!(snapshot_target_pid(true, None, None), None);
+        // A pid with no AT-SPI root falls back to every app: record nothing,
+        // so each node is checked against its real owner instead.
+        assert_eq!(snapshot_target_pid(false, Some(10), Some(20)), None);
+    }
+
+    #[test]
+    fn a_new_snapshot_replaces_the_recorded_pid() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_snapshot(&[], Some(10));
+        backend.cache_snapshot(&[], None);
+        assert_eq!(*backend.last_snapshot_pid.lock().unwrap(), None);
+        backend.cache_snapshot(&[], Some(11));
+        backend.clear_cached_nodes();
+        assert_eq!(*backend.last_snapshot_pid.lock().unwrap(), None);
     }
 }

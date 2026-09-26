@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Synchronize the embedded backend to standalone v0.7.3 as
+  `0.7.3-linux-alpha1`. `click` and `scroll` refuse an element index taken
+  from another app's snapshot; post-input focus feedback says when the search
+  hit its limits or the app exposes no AT-SPI tree, instead of warning "no
+  focused element"; and portal pointer input on scaled GNOME Wayland sends
+  physical stream coordinates, so clicks no longer land at 1/scale. Codex
+  identities, DBus interfaces, and the extension screenshot route are
+  preserved.
 - Carry the standalone KDE terminal paste fix as `0.7.2-linux-alpha3`. KDE
   clipboard paste sends Shift+Insert to xterm, uxterm, rxvt, urxvt, and
   koi8rxterm, which have no Ctrl+Shift+V binding; Klipper sets the selection
