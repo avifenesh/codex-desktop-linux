@@ -35,7 +35,7 @@ methods already emit the image and should not be emitted a second time.
 
 ## Runtime Dependencies
 
-The embedded backend includes the standalone v0.7.3 accessibility setup,
+The embedded backend includes the standalone v0.7.4 accessibility setup,
 guard, native activation, coordinate-contract, completion-notification, and
 accessibility-tree scoping changes. Setup verifies GNOME's saved toolkit-accessibility key even when
 runtime AT-SPI is ready, and warns when the saved key cannot be verified.

@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Synchronize the embedded backend to standalone v0.7.4 as
+  `0.7.4-linux-alpha1`. v0.7.4 ships only standalone #178, which this copy
+  already carries, so the code is unchanged; the version follows the
+  standalone release. Remove `computer-use-linux/src/server.rs.orig`, a
+  leftover from applying the v0.7.3 port that was committed by mistake.
 - Synchronize the embedded backend to standalone v0.7.3 as
   `0.7.3-linux-alpha1`. `click` and `scroll` refuse an element index taken
   from another app's snapshot; post-input focus feedback says when the search
