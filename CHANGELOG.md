@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Synchronize the embedded backend to standalone v0.7.5 as
+  `0.7.5-linux-alpha1`. Native X11 `scroll` sends XTEST wheel buttons through
+  xdotool, so GTK 3 no longer drops the only wheel event of a call (standalone
+  #186). Opt-in `CODEX_COMPUTER_USE_PERSIST_REMOTE_DESKTOP=1` (standalone alias
+  `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP=1`) persists the GNOME
+  remote-control grant through `RemoteDesktop.SelectDevices` and a single-use
+  restore token under `codex-computer-use-linux/` in the XDG state directory,
+  separate from the standalone binary's tokens (standalone #188). Codex
+  identities, DBus interfaces, and the extension screenshot route are
+  preserved.
 - Synchronize the embedded backend to standalone v0.7.4 as
   `0.7.4-linux-alpha1`. v0.7.4 ships only standalone #178, which this copy
   already carries, so the code is unchanged; the version follows the
