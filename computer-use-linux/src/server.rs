@@ -1482,7 +1482,11 @@ impl ComputerUseLinux {
             let used_xdotool = result
                 .as_ref()
                 .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
-            let mut output = action_result("scroll", result.map(|result| result.outputs), received);
+            let mut output = pointer_action_result(action_result(
+                "scroll",
+                result.map(|result| result.outputs),
+                received,
+            ));
             if output.ok && used_xdotool {
                 output.message = "Action sent through xdotool (X11 XTEST).".to_string();
             }
