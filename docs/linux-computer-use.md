@@ -35,7 +35,7 @@ methods already emit the image and should not be emitted a second time.
 
 ## Runtime Dependencies
 
-The embedded backend includes the standalone v0.7.4 accessibility setup,
+The embedded backend includes the standalone v0.7.5 accessibility setup,
 guard, native activation, coordinate-contract, completion-notification, and
 accessibility-tree scoping changes. Setup verifies GNOME's saved toolkit-accessibility key even when
 runtime AT-SPI is ready, and warns when the saved key cannot be verified.
@@ -153,7 +153,20 @@ keyboard selection with `COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD=1` or
 `CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD=1`; the corresponding
 `*_FORCE_XDOTOOL_KEYBOARD=1` names force XTEST when available. Set
 `COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER=1` or
-`CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER=1` to skip native-X11 xdotool clicks.
+`CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER=1` to skip native-X11 xdotool clicks
+and scroll. Native X11 scroll sends XTEST wheel buttons (4 up, 5 down, 6 left,
+7 right) through xdotool, because GTK 3 drops the single wheel event that
+follows ydotool's absolute move.
+
+The Wayland RemoteDesktop portal asks for consent on every new process by
+default. Set `CODEX_COMPUTER_USE_PERSIST_REMOTE_DESKTOP=1` (standalone alias
+`COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP=1`) to request `persist_mode=2` on
+`SelectDevices` and reuse the single-use restore token that `Start` returns.
+Tokens are stored per device kind, mode `0600`, under
+`$XDG_STATE_HOME/codex-computer-use-linux/` or
+`~/.local/state/codex-computer-use-linux/`. The first grant still shows the
+dialog; later processes restore until the desktop revokes the grant. This needs
+RemoteDesktop interface version 2.
 
 Some distros name the unit `ydotool.service` instead of `ydotoold.service`, and
 some install `/usr/bin/ydotoold` without a service unit. If the system unit path
