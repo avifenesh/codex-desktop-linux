@@ -182,7 +182,7 @@ function currentBundlePair(t, overrides = {}) {
   const extractedDir = tempDirectory(t, "directory-watch-current-contract-");
   const buildDir = path.join(extractedDir, ".vite", "build");
   const sources = new Map([
-    ["src-Cz_uUmVl.js", overrides.src ?? currentSrcSource()],
+    [overrides.localName ?? "src-Cz_uUmVl.js", overrides.src ?? currentSrcSource()],
     ["worker.js", overrides.worker ?? currentWorkerSource()],
     ...Object.entries(overrides.extra ?? {}),
   ]);
@@ -421,6 +421,50 @@ test("bundle discovery patches the current src and worker copies", (t) => {
   assert.equal(second.matched, 2);
   assert.equal(second.changed, 0);
   assert.deepEqual(second.targets, first.targets);
+});
+
+test("bundle discovery patches the bootstrap and worker copies in the signed Linux layout", (t) => {
+  const candidate = currentBundlePair(t, {
+    localName: "bootstrap-C-A2NQZn.js",
+    extra: { "src-unrelated.js": "const unrelated=true;" },
+  });
+  const targets = [
+    path.join(".vite", "build", "bootstrap-C-A2NQZn.js"),
+    path.join(".vite", "build", "worker.js"),
+  ];
+
+  const discovery = findLocalFileWatchBundles(candidate.extractedDir, normalizedSettings());
+  assert.deepEqual(discovery.targets.map(({ bundlePath }) => bundlePath),
+    targets.map((target) => path.join(candidate.extractedDir, target)));
+
+  const first = patchWorker(candidate.extractedDir);
+  assert.equal(first.matched, 2);
+  assert.equal(first.changed, 2);
+  assert.deepEqual(first.targets, targets);
+  assert.equal(fs.readFileSync(path.join(candidate.buildDir, "src-unrelated.js"), "utf8"),
+    "const unrelated=true;");
+  for (const target of targets) {
+    assert.match(fs.readFileSync(path.join(candidate.extractedDir, target), "utf8"), /watchbound/u);
+  }
+
+  const second = patchWorker(candidate.extractedDir);
+  assert.equal(second.matched, 2);
+  assert.equal(second.changed, 0);
+  assert.deepEqual(second.targets, targets);
+});
+
+test("bundle discovery rejects ambiguous bootstrap and src local copies", (t) => {
+  const candidate = currentBundlePair(t, {
+    localName: "bootstrap-C-A2NQZn.js",
+    extra: { "src-other.js": currentSrcSource() },
+  });
+  const original = readBundlePair(candidate);
+  const result = captureWarns(() => patchWorker(candidate.extractedDir)).value;
+
+  assert.equal(result.matched, 0);
+  assert.equal(result.changed, 0);
+  assert.match(result.reason, /Found 3 current local startFileWatch bundles/u);
+  assert.deepEqual(readBundlePair(candidate), original);
 });
 
 test("bundle discovery rejects a missing Parcel route without changing either bundle", (t) => {
