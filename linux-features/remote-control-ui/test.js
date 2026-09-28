@@ -191,6 +191,12 @@ test("remote-control UI descriptors match the current app chunks", () => {
     ),
     true,
   );
+  assert.equal(
+    remoteControlConnectionsPatch.pattern.test(
+      "remote-control-connections-visibility-a07582a4850b.js",
+    ),
+    true,
+  );
 
   assert.ok(experimentalFeaturesPatch.pattern.test("settings-route-state-BwIfDYxh.js"));
   assert.equal(
@@ -254,9 +260,14 @@ test("remote-control UI feature patches matching webview assets and records patc
         fs.writeFileSync(path.join(tempApp, "package.json"), JSON.stringify({ name: "codex" }));
 
         const appInitialAsset = "app-initial-BTphDPeq.js";
+        const connectionsVisibilityAsset = "remote-control-connections-visibility-a07582a4850b.js";
         fs.writeFileSync(
           path.join(assetsDir, appInitialAsset),
-          "function Twt(){let e=(0,kwt.c)(3),{data:t}=Vr(y4,Br(B2)),n=BN(`4114442250`);if(t?.config[`features.remote_connections`]===!0)return!0;let r=t?.config.features;if(typeof r!=`object`||!r||Array.isArray(r))return n;let i;return e[0]!==r||e[1]!==n?(i=Object.getOwnPropertyDescriptor(r,`remote_connections`)?.value===!0||n,e[0]=r,e[1]=n,e[2]=i):i=e[2],i}function D8(e){return e(RN,`4114442250`)?`enabled`:`disabled`}function a({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&(e?.available??!0)&&e?.accessRequired!==!0}",
+          "function Twt(){let e=(0,kwt.c)(3),{data:t}=Vr(y4,Br(B2)),n=BN(`4114442250`);if(t?.config[`features.remote_connections`]===!0)return!0;let r=t?.config.features;if(typeof r!=`object`||!r||Array.isArray(r))return n;let i;return e[0]!==r||e[1]!==n?(i=Object.getOwnPropertyDescriptor(r,`remote_connections`)?.value===!0||n,e[0]=r,e[1]=n,e[2]=i):i=e[2],i}function D8(e){return e(RN,`4114442250`)?`enabled`:`disabled`}",
+        );
+        fs.writeFileSync(
+          path.join(assetsDir, connectionsVisibilityAsset),
+          "function a({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&(e?.available??!0)&&e?.accessRequired!==!0}",
         );
         fs.writeFileSync(
           path.join(assetsDir, "settings-route-state-BwIfDYxh.js"),
@@ -272,7 +283,7 @@ test("remote-control UI feature patches matching webview assets and records patc
 
         assert.match(
           fs.readFileSync(
-            path.join(assetsDir, appInitialAsset),
+            path.join(assetsDir, connectionsVisibilityAsset),
             "utf8",
           ),
           /navigator\.userAgent\.includes\(`Linux`\)/,
