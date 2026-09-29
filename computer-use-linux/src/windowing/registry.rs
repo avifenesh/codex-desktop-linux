@@ -10,7 +10,7 @@ pub use kwin::KWIN_BACKEND;
 pub use niri::NIRI_BACKEND;
 pub use x11::X11_BACKEND;
 
-pub const WINDOW_PERMISSION_HINT: &str = "Computer Use could not access a supported window list backend. Targeted window input requires session-bus access plus GNOME Shell Introspect, the Codex GNOME Shell extension, the COSMIC Wayland helper, KWin/Plasma DBus scripting, Hyprland hyprctl, Niri IPC, or i3-msg. On GNOME, run setup_window_targeting to install the extension backend.";
+pub const WINDOW_PERMISSION_HINT: &str = "Computer Use could not access a supported window list backend. Targeted window input requires session-bus access plus GNOME Shell Introspect, the Codex GNOME Shell extension, the COSMIC Wayland helper, KWin/Plasma DBus scripting, Hyprland hyprctl, the niri IPC socket, or i3-msg. On GNOME, run setup_window_targeting to install the extension backend.";
 
 #[derive(Debug, Clone, Copy)]
 pub struct BackendDescriptor {
@@ -93,9 +93,9 @@ const DESCRIPTORS: &[BackendDescriptor] = &[
     },
     BackendDescriptor {
         id: NIRI_BACKEND,
-        failure_label: "Niri",
-        list_note: "Window list came from Niri IPC. Terminal windows may include best-effort PTY and active-process context when the process tree is readable.",
-        missing_hint: "On Niri, ensure NIRI_SOCKET is available and niri msg can reach the active compositor.",
+        failure_label: "niri",
+        list_note: "Window list came from niri msg or its direct IPC fallback. Terminal windows may include best-effort PTY and active-process context when the process tree is readable.",
+        missing_hint: "On niri, export the session's NIRI_SOCKET or expose an unambiguous matching socket in XDG_RUNTIME_DIR. The niri binary is optional.",
         can_exact_focus: true,
     },
     BackendDescriptor {
