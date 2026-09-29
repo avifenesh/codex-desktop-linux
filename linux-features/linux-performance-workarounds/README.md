@@ -21,3 +21,7 @@ measured regression and run:
 ```bash
 node --test linux-features/linux-performance-workarounds/test.js
 ```
+
+The current mount contract includes the target-width collapsed state. Streaming
+text and marker fades are disabled in the uniquely matched stylesheet while
+adaptive-streaming duration rules and image entry animation remain unchanged.

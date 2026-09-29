@@ -7,6 +7,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 const {
   applyAppMainRoutePatch,
   applyGeneralSettingsPatch,
@@ -1041,23 +1042,45 @@ test("assistant render patch covers the current shared assistant message call", 
   assert.match(patched, /globalThis\.codexLinuxReadAloudClick\?\.\(n,b,d,e\.currentTarget\)/);
 });
 
-test("assistant runtime descriptor targets current shared assistant bundles", () => {
+test("shared assistant button preserves the render and speaks only after an explicit click", () => {
+  const source = "(0,$.jsx)(Vb,{item:n,assistantCopyText:w,conversationId:p,renderCodeBlocksAsWritingBlocks:Ye})";
+  const calls = [];
+  const item = { content: "response" };
+  const jsx = (component, props) => ({ component, props });
+  const context = {
+    $: { jsx, jsxs: jsx, Fragment: "fragment" },
+    Vb: "assistant", n: item, w: "copy text", p: "thread", Ye: true,
+    codexLinuxReadAloudClick: (...args) => calls.push(args),
+  };
+  const rendered = vm.runInNewContext(applyAssistantRenderPatch(source), context);
+  const [original, row] = rendered.props.children;
+  assert.equal(original.component, "assistant");
+  assert.equal(original.props.item, item);
+  assert.equal(original.props.renderCodeBlocksAsWritingBlocks, true);
+  assert.equal(calls.length, 0);
+  let stopped = false;
+  const button = row.props.children;
+  const target = {};
+  button.props.onClick({ currentTarget: target, stopPropagation() { stopped = true; } });
+  assert.equal(stopped, true);
+  assert.deepEqual(calls, [[item, "copy text", "thread", target]]);
+});
+
+test("assistant runtime descriptor selects the shared renderer by content after chunk renames", () => {
   const descriptor = featurePatches.find((patch) => patch.id === "assistant-runtime");
   assert.ok(descriptor);
-  assert.equal(
-    descriptor.pattern.test(
-      "conversation-blocks-BSHPwQLO.js",
-    ),
-    true,
-  );
-  for (const legacyName of [
-    "index-current.js",
-    "local-conversation-thread-current.js",
-    "app-initial-BHB6SClA.js",
-    "app-initial~app-main~onboarding-page-zcfEkMl-.js",
-    "app-initial~app-main~onboarding-page~hotkey-window-thread-page~editor-diff-page~thread-app-~current.js",
+  for (const name of ["sites-end-resource-5f5276fe8984.js", "renamed-shared-renderer.js"]) {
+    assert.equal(descriptor.pattern.test(name), true);
+  }
+  assert.equal(descriptor.assetMatch(
+    "(0,$.jsx)(Vb,{item:n,assistantCopyText:w,conversationId:p,renderCodeBlocksAsWritingBlocks:Ye})",
+  ), true);
+  for (const decoy of [
+    "console.log(`assistantCopyText: renderCodeBlocksAsWritingBlocks:`)",
+    "(0,$.jsx)(Turn,{item:n,assistantCopyText:w,conversationId:p})",
+    "(0,$.jsx)(Vb,{item:{content:w},assistantCopyText:w,conversationId:p,renderCodeBlocksAsWritingBlocks:Ye})",
   ]) {
-    assert.equal(descriptor.pattern.test(legacyName), false, legacyName);
+    assert.equal(descriptor.assetMatch(decoy), false, decoy);
   }
 });
 
@@ -1075,7 +1098,7 @@ test("assistant runtime descriptor fails soft and atomically when the current re
     fs.mkdirSync(assetsDir, { recursive: true });
     const assetPath = path.join(
       assetsDir,
-      "conversation-blocks-BSHPwQLO.js",
+      "sites-end-resource-5f5276fe8984.js",
     );
     const source = "console.log(`assistant render contract moved`);";
     fs.writeFileSync(assetPath, source);
@@ -1090,7 +1113,7 @@ test("assistant runtime descriptor fails soft and atomically when the current re
     assert.equal(fs.readFileSync(assetPath, "utf8"), source);
     assert.equal(report.patches.length, 1);
     assert.equal(report.patches[0].status, "skipped-optional");
-    assert.match(report.patches[0].reason, /Could not find assistant message render call/);
+    assert.match(report.patches[0].reason, /Could not find current primary thread assistant bundle/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -1103,7 +1126,7 @@ test("assistant runtime descriptor reports applied then already-applied for the 
     fs.mkdirSync(assetsDir, { recursive: true });
     const assetPath = path.join(
       assetsDir,
-      "conversation-blocks-BSHPwQLO.js",
+      "sites-end-resource-5f5276fe8984.js",
     );
     fs.writeFileSync(
       assetPath,
@@ -1124,6 +1147,27 @@ test("assistant runtime descriptor reports applied then already-applied for the 
     assert.doesNotMatch(patched, /codexLinuxReadAloudVersion/);
     assert.equal(firstReport.patches[0].status, "applied");
     assert.equal(secondReport.patches[0].status, "already-applied");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("assistant runtime descriptor rejects duplicate renderer assets without changing either", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-ambiguous-"));
+  try {
+    const assetsDir = path.join(root, "webview", "assets");
+    fs.mkdirSync(assetsDir, { recursive: true });
+    const source = "(0,$.jsx)(Vb,{item:n,assistantCopyText:w,conversationId:p,renderCodeBlocksAsWritingBlocks:Ye})";
+    const names = ["sites-end-resource-current.js", "another-shared-renderer.js"];
+    for (const name of names) fs.writeFileSync(path.join(assetsDir, name), source);
+    const descriptor = featurePatches.find((patch) => patch.id === "assistant-runtime");
+    const report = createPatchReport();
+    applyWebviewAssetPatchDescriptors(root, normalizePatchDescriptors([
+      { ...descriptor, featureId: "read-aloud", sourceKind: "feature" },
+    ]), {}, report);
+    assert.equal(report.patches[0].status, "skipped-optional");
+    assert.match(report.patches[0].reason, /ambiguous/i);
+    for (const name of names) assert.equal(fs.readFileSync(path.join(assetsDir, name), "utf8"), source);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -6,6 +6,10 @@ This feature stays thin. It does not bundle a voice model and it does not speak
 automatically. It adds an explicit icon button under assistant messages. A click
 is the only app-rendering path that starts speech.
 
+The assistant patch locates one shared renderer by its message properties,
+independent of the upstream chunk name. Missing or duplicate renderers reject
+the enabled feature build.
+
 ## Enable the feature
 
 Add the feature to `linux-features/features.json`:

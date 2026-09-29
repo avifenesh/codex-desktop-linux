@@ -851,7 +851,10 @@ module.exports = {
       phase: "webview-asset",
       order: 20620,
       ciPolicy: "optional",
-      pattern: /^conversation-blocks-[A-Za-z0-9_-]+\.js$/,
+      pattern: /\.js$/,
+      assetMatch: (source) =>
+        ASSISTANT_RENDER_CANDIDATE_PATTERN.test(source) &&
+        source.includes("renderCodeBlocksAsWritingBlocks:"),
       missingDescription: "current primary thread assistant bundle",
       skipDescription: "read aloud assistant runtime patch",
       apply: applyAssistantAssetPatch,

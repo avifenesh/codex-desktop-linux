@@ -77,7 +77,7 @@ function syntheticReasoningSummaryTurnStartBundle() {
 }
 
 function syntheticCurrentReasoningSummaryTurnStartBundle() {
-  return "async function HWt(e,t,n,r,i,a,o){let s=n.request,N=a.latestThreadSettings,S=a.initialParams,C=a.configRequirements,ye=N?.summary??`none`;S?.summary!==void 0&&(ye=S.summary),o.reasoningSummaryOverride!=null&&(ye=o.reasoningSummaryOverride),ye=C==null?null:C.model_reasoning_summary??ye,s.summary!==void 0&&(ye=s.summary);logger.info(`Reasoning summary turn-start config resolved`,{safe:{summary:ye}});return{summary:ye}}async function QWt(e,t,n,r,i,a){return await HWt(e,t,n,r,i,a,{canUseProjectlessWorkspace:!gh(e.getHostId()),canMaterializeCodexHomeRoots:!gh(e.getHostId())&&!0,preserveWorkspaceSandboxPolicyWithDefault:gh(e.getHostId()),carryProjectlessRuntimeRoots:!gh(e.getHostId()),latestUseAppServerPermissionDefault:!0,reasoningSummaryOverride:e.getDefaultFeatureOverride(`concurrent_reasoning_summaries`)===!0?`detailed`:null})}";
+  return "async function HWt(e,t,n,r,i,a,o){let s=n.request,N=a.latestThreadSettings,S=a.initialParams,C=a.configRequirements,ye=N?.summary??`none`;S?.summary!==void 0&&(ye=S.summary),o.reasoningSummaryOverride!=null&&(ye=o.reasoningSummaryOverride),ye=C==null?null:C.model_reasoning_summary??ye,s.summary!==void 0&&(ye=s.summary);logger.info(`Reasoning summary turn-start config resolved`,{safe:{summary:ye}});return{summary:ye}}async function QWt(e,t,n,r,i,a){let b=n.context?.threadStartKind===`aeon`;return await HWt(e,t,n,r,i,a,{canUseProjectlessWorkspace:!gh(e.getHostId()),canMaterializeCodexHomeRoots:!gh(e.getHostId())&&!0,preserveWorkspaceSandboxPolicyWithDefault:gh(e.getHostId()),carryProjectlessRuntimeRoots:!gh(e.getHostId()),latestUseAppServerPermissionDefault:!0,reasoningSummaryOverride:e.getDefaultFeatureOverride(`concurrent_reasoning_summaries`)===!0||b?`detailed`:null})}";
 }
 
 
@@ -1471,6 +1471,13 @@ test("reasoning-summary resolver without model configuration is rejected byte-id
   assert.ok(warnings.some((warning) => warning.includes("turn-start resolver")));
 });
 
+test("reasoning-summary caller without the current Aeon override is rejected byte-identically", () => {
+  const source = syntheticCurrentReasoningSummaryTurnStartBundle().replace("===!0||b?`detailed`", "===!0?`detailed`");
+  const { result, warnings } = captureWarnings(() => applyLinuxRemoteMobileReasoningSummaryPatch(source));
+  assert.equal(result, source);
+  assert.ok(warnings.some((warning) => warning.includes("incomplete reasoning-summary")));
+});
+
 test("duplicate reasoning-summary owner pairs are rejected byte-identically", () => {
   const owner = syntheticCurrentReasoningSummaryTurnStartBundle();
   const source = owner + owner.replaceAll("HWt", "AWt").replaceAll("QWt", "BWt");
@@ -1561,6 +1568,38 @@ test("current reasoning-summary owner keeps durable mobile summaries off and pre
     (await startTurn(manager("local"), ...args({ summary: "concise" }, "durable"))).summary,
     "concise",
   );
+});
+
+test("Aeon summaries keep their upstream override outside local Linux durable turns", async () => {
+  const patched = applyLinuxRemoteMobileReasoningSummaryPatch(syntheticCurrentReasoningSummaryTurnStartBundle());
+  const context = {
+    gh: (hostId) => hostId === "local",
+    logger: { info() {} },
+    module: { exports: {} },
+    navigator: { userAgent: "Linux" },
+  };
+  vm.runInNewContext(`${patched};module.exports=QWt;`, context);
+  for (const userAgent of ["Linux", "Macintosh"]) {
+    context.navigator.userAgent = userAgent;
+    for (const host of ["local", "remote-ssh:dev"]) {
+      for (const mode of ["durable", "default"]) {
+        for (const aeon of [true, false]) {
+          for (const explicit of [undefined, "concise", "none"]) {
+            const result = await context.module.exports(
+              { getHostId: () => host, getDefaultFeatureOverride: () => false },
+              null,
+              { request: { summary: explicit }, context: { threadStartKind: aeon ? "aeon" : "regular" } },
+              null, null,
+              { mode, configRequirements: {}, initialParams: { summary: "auto" } },
+            );
+            const expected = explicit ?? (userAgent === "Linux" && host === "local" && mode === "durable"
+              ? "none" : aeon ? "detailed" : "auto");
+            assert.equal(result.summary, expected, JSON.stringify({ userAgent, host, mode, aeon, explicit }));
+          }
+        }
+      }
+    }
+  }
 });
 
 test("Linux remote mobile reasoning-summary patch reports upstream drift", () => {

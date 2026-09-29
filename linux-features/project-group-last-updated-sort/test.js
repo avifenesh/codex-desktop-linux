@@ -11,7 +11,7 @@ const vm = require("node:vm");
 const {
   loadLinuxFeaturePatchDescriptors,
 } = require("../../scripts/lib/linux-features.js");
-const { patchAssetFiles } = require("../../scripts/patches/lib/assets.js");
+const { patchUniqueAssetFile } = require("../../scripts/patches/lib/assets.js");
 const {
   applyProjectGroupLastUpdatedSortPatch,
   descriptors,
@@ -24,13 +24,13 @@ const currentProjectSource = [
   "const prioritySortId=`sidebarElectron.sortMenu.priority`;",
   "const updatedSortId=`sidebarElectron.sortMenu.updated`;",
   "const manualSortId=`sidebarElectron.sortMenu.manual`;",
-  "let A=fon({groups:D,items:f}),{chatSortMode:j,projectSortMode:M}=t(xH),N=p5o({groups:A,projectOrder:jm(t,_u.PROJECT_ORDER)});",
+  "let {chatSortMode:j,projectSortMode:M}=t(xH),N=p5o({groups:fon({groups:D,items:f}),projectOrder:jm(t,_u.PROJECT_ORDER)}),p=Tcr({explicitChatThreadKeys:T,getRecencyAt:v,items:f,projectGroups:w,projectlessThreadIds:new Set(x??[])});",
 ].join("");
 
 const officialLinuxProjectSource = [
   "function A6i(e,t){return e}",
   "function O8o({groups:e,projectOrder:t}){return A6i(e,t)}",
-  "let A=fon({groups:D,items:f}),{chatSortMode:j,projectSortMode:M}=t(IH),N=O8o({groups:A,projectOrder:Dm(t,yu.PROJECT_ORDER)});",
+  "let {chatSortMode:j,projectSortMode:M}=t(IH),N=O8o({groups:fon({groups:D,items:f}),projectOrder:Dm(t,yu.PROJECT_ORDER)}),p=Tcr({explicitChatThreadKeys:T,getRecencyAt:v,items:f,projectGroups:w,projectlessThreadIds:new Set(x??[])});",
 ].join("");
 
 function captureWarns(fn) {
@@ -125,7 +125,7 @@ test("Last updated sorts project groups by their newest task", () => {
 
   assert.deepEqual(
     Array.from(
-      sortProjectGroups({ groups, items, projectOrder, sortMode: "updated_at" }),
+      sortProjectGroups({ groups, getRecencyAt: key => items.find(item => item.task.key === key)?.recencyAt, projectOrder, sortMode: "updated_at" }),
       (group) => group.projectId,
     ),
     ["tapas", "chezmoi", "multi", "delta", "nix"],
@@ -148,7 +148,7 @@ test("non-updated modes preserve the upstream saved project order", () => {
   for (const sortMode of ["manual", "priority"]) {
     assert.deepEqual(
       Array.from(
-        sortProjectGroups({ groups, items, projectOrder, sortMode }),
+        sortProjectGroups({ groups, getRecencyAt: key => items.find(item => item.task.key === key)?.recencyAt, projectOrder, sortMode }),
         (group) => group.projectId,
       ),
       ["older", "newer"],
@@ -160,21 +160,21 @@ test("patch passes the selected project sort mode into the group sorter", () => 
   const patched = applyPatchTwice(currentProjectSource);
   assert.ok(
     patched.includes(
-      "projectOrder:jm(t,_u.PROJECT_ORDER),items:f,sortMode:M",
+      "projectOrder:jm(t,_u.PROJECT_ORDER),getRecencyAt:v,sortMode:M",
     ),
   );
 });
 
-test("patch matches the official 26.803.81509 project sorter semantically", () => {
+test("patch matches the official 26.928.20755 project sorter semantically", () => {
   const patched = applyPatchTwice(officialLinuxProjectSource);
 
   assert.match(
     patched,
-    /function O8o\(\{groups:e,items:t,projectOrder:n,sortMode:codexLinuxProjectSortMode\}\)/,
+    /function O8o\(\{groups:e,getRecencyAt:t,projectOrder:n,sortMode:codexLinuxProjectSortMode\}\)/,
   );
   assert.match(
     patched,
-    /O8o\(\{groups:A,projectOrder:Dm\(t,yu\.PROJECT_ORDER\),items:f,sortMode:M\}\)/,
+    /O8o\(\{groups:fon\(\{groups:D,items:f\}\),projectOrder:Dm\(t,yu\.PROJECT_ORDER\),getRecencyAt:v,sortMode:M\}\)/,
   );
 });
 
@@ -232,14 +232,16 @@ test("descriptor targets and patches only the current project sidebar chunk", ()
     fs.mkdirSync(assetsDir, { recursive: true });
     fs.writeFileSync(assetPath, currentProjectSource);
 
-    const result = patchAssetFiles(
+    const result = patchUniqueAssetFile(
       tempDir,
       descriptors[0].pattern,
+      descriptors[0].assetMatch,
       descriptors[0].apply,
       "missing",
+      "ambiguous",
     );
 
-    assert.deepEqual(result, { matched: 1, changed: 1 });
+    assert.deepEqual(result, { matched: 1, changed: 1, assetName: "app-initial-Biw83Aiz.js" });
     assert.notEqual(fs.readFileSync(assetPath, "utf8"), currentProjectSource);
     assert.equal(
       descriptors[0].pattern.test(
@@ -249,5 +251,34 @@ test("descriptor targets and patches only the current project sidebar chunk", ()
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("group recency includes project timestamps, missing threads, and stable ties", () => {
+  const sortProjectGroups = evaluateGroupSorter(applyPatchTwice(currentProjectSource));
+  const groups = [
+    { projectId: "missing", threadKeys: ["missing"] },
+    { projectId: "first", threadKeys: ["first"] },
+    { projectId: "second", threadKeys: ["second"] },
+    { projectId: "project", threadKeys: [], projectUpdatedAt: 9 },
+  ];
+  assert.deepEqual(Array.from(sortProjectGroups({
+    groups, getRecencyAt: key => key === "missing" ? undefined : 5,
+    projectOrder: [], sortMode: "updated_at",
+  }), group => group.projectId), ["project", "first", "second", "missing"]);
+});
+
+test("different item lists, duplicate callers and partial patched context fail closed", () => {
+  const patched = applyPatchTwice(currentProjectSource);
+  for (const source of [
+    currentProjectSource.replace("getRecencyAt:v,items:f", "getRecencyAt:v,items:other"),
+    currentProjectSource + currentProjectSource.slice(currentProjectSource.indexOf("let {")),
+    patched.replace("getRecencyAt:v,sortMode:M", "getRecencyAt:other,sortMode:M"),
+    patched.replace("Math.max(e,t(n)??0)", "Math.max(e,0)"),
+  ]) {
+    const { value, warnings } = captureWarns(() => applyProjectGroupLastUpdatedSortPatch(source));
+    assert.equal(value, source);
+    assert.equal(warnings.length, 1);
+    assert.equal(descriptors[0].assetMatch(source), false);
   }
 });

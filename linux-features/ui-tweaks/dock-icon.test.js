@@ -8,6 +8,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
+const { findMatchingBrace } = require("../../scripts/patches/lib/minified-js.js");
 
 const {
   enabledLinuxFeatureInstallPlan,
@@ -24,18 +26,18 @@ const {
 
 const currentAppInfoSource = [
   "function d_(e){return`icon-chatgpt`}",
-  "function f_(e){return{dark:`icon-codex-dark-color.png`,light:`icon-codex-light.png`}}",
-  "function Gme(e){if(process.platform!==`darwin`)return null;let t=f_(e),n=g_(`${d_(e)}.png`),r=g_(t.dark),i=g_(t.light);return n==null||r==null||i==null?null:{appDefault:n,codexDark:r,codexLight:i}}",
+  "function f_(e){return{dark:`icon-codex-dark-color.png`,light:`icon-codex-light.png`,spaceDark:`icon-space-dark.png`,spaceLight:`icon-space-light.png`}}",
+  "function Gme(e){if(process.platform!==`darwin`)return null;let t=f_(e),n=g_(`${d_(e)}.png`),r=g_(t.dark),i=g_(t.light),a=g_(t.spaceDark),o=g_(t.spaceLight);return n==null||r==null||i==null||a==null||o==null?null:{appDefault:n,codexDark:r,codexLight:i,spaceDark:a,spaceLight:o}}",
   "function g_(e){if(e==null)return null;let t=d.app.isPackaged?(0,g.join)(process.resourcesPath,e):null;return __(t!=null&&(0,y.existsSync)(t)?t:(0,g.join)(d.app.getAppPath(),`src`,`icons`,e))}",
 ].join("");
 
 const currentRuntimeSource = [
   "function t5e({buildFlavor:i,settingsStore:f,repoRoot:h,isMacOS:_,isWindows:v,isDevMode:b,onWindowRegistered:w,disposables:T}){",
   "let D=(0,g.join)(h,`electron`,`src`,`icons`),O=e=>{if(!d.app.isPackaged)return null;let t=(0,g.join)(process.resourcesPath,e);return(0,y.existsSync)(t)?t:null},",
-  "k=e=>{let t=(0,g.join)(D,e);return(0,y.existsSync)(t)?t:null},A=e=>O(e)??k(e),j=()=>{switch(i){case o.i.Dev:case o.i.Nightly:case o.i.InternalAlpha:case o.i.PublicBeta:case o.i.Prod:return f.get(n.Xl.DOCK_ICON_PREFERENCE)??`app-default`;case o.i.Agent:return`app-default`}},M=()=>{switch(i){case o.i.Dev:return k(`icon-dev-outline.png`);case o.i.Agent:return A(`icon-agent.png`);case o.i.Nightly:case o.i.InternalAlpha:case o.i.PublicBeta:case o.i.Prod:return A(`${d_(i)}.png`)}},N=()=>v?m_(i,{localIconsDirectory:(0,g.join)(h,`electron`,`.generated`,`windows-app-icons`)}):null,P=process.platform===`linux`?p_(i,D):N(),F=f_(i),I=b?process.env.CODEX_ELECTRON_DEV_DOCK_ICONS_PATH:void 0,ee=()=>d.nativeTheme.shouldUseDarkColorsForSystemIntegratedUI?F.dark:F.light,",
-  "L=e=>{if(I){let t=`app-default`;e===`codex-system`&&(t=d.nativeTheme.shouldUseDarkColorsForSystemIntegratedUI?`codex-dark`:`codex-light`);let n=d.nativeImage.createFromPath((0,g.join)(I,`${t}.png`));if(!n.isEmpty()){d.app.dock?.setIcon(n);return}}if(e===`app-default`&&i!==o.i.Dev){let e=d.app.dock;e!=null&&Reflect.apply(e.setIcon.bind(e),e,[null]);return}let t=e===`codex-system`?ee():null,n=(t==null?null:A(t))??M(),r=n==null?d.nativeImage.createEmpty():d.nativeImage.createFromPath(n);if(!r.isEmpty()){if(e===`codex-system`){let{width:e,height:t}=r.getSize(),n=Math.round(e/128);r=r.crop({x:n,y:n,width:e-n*2,height:t-n*2})}d.app.dock?.setIcon(r)}},",
-  "R=()=>{if(!_)return;let e=j();L(e),aF({preference:e,resourceName:e===`codex-system`?F.light:null}).then(e=>{e&&L(j())})};",
-  "if(_){R();let e=()=>{let e=j();e===`codex-system`&&L(e)};d.nativeTheme.on(`updated`,e),T.add(()=>{d.nativeTheme.off(`updated`,e)})}",
+  "k=e=>{let t=(0,g.join)(D,e);return(0,y.existsSync)(t)?t:null},A=e=>O(e)??k(e),j=()=>{switch(i){case o.i.Dev:case o.i.Nightly:case o.i.InternalAlpha:case o.i.PublicBeta:case o.i.Prod:return f.get(n.Xl.DOCK_ICON_PREFERENCE)??`app-default`;case o.i.Agent:return`app-default`}},M=()=>{switch(i){case o.i.Dev:return k(`icon-dev-outline.png`);case o.i.Agent:return A(`icon-agent.png`);case o.i.Nightly:case o.i.InternalAlpha:case o.i.PublicBeta:case o.i.Prod:return A(`${d_(i)}.png`)}},N=()=>v?m_(i,{localIconsDirectory:(0,g.join)(h,`electron`,`.generated`,`windows-app-icons`)}):null,P=process.platform===`linux`?p_(i,D):N(),F=f_(i),I=b?process.env.CODEX_ELECTRON_DEV_DOCK_ICONS_PATH:void 0,ee=(e,t)=>{switch(e){case`app-default`:return null;case`codex-system`:return t?F.dark:F.light;case`space-system`:return t?F.spaceDark:F.spaceLight}},",
+  "L=e=>{if(I){let t=`app-default`;e===`codex-system`&&(t=d.nativeTheme.shouldUseDarkColorsForSystemIntegratedUI?`codex-dark`:`codex-light`);let n=d.nativeImage.createFromPath((0,g.join)(I,`${t}.png`));if(!n.isEmpty()){d.app.dock?.setIcon(n);return}}if(e===`app-default`&&i!==o.i.Dev){let e=d.app.dock;e!=null&&Reflect.apply(e.setIcon.bind(e),e,[null]);return}let t=ee(e,d.nativeTheme.shouldUseDarkColorsForSystemIntegratedUI),n=(t==null?null:A(t))??M(),r=n==null?d.nativeImage.createEmpty():d.nativeImage.createFromPath(n);if(!r.isEmpty()){if(e===`codex-system`||e===`space-system`){let{width:e,height:t}=r.getSize(),n=Math.round(e/128);r=r.crop({x:n,y:n,width:e-n*2,height:t-n*2})}d.app.dock?.setIcon(r)}},",
+  "R=()=>{if(!_)return;let e=j();L(e),aF({preference:e,resourceName:ee(e,!1)}).then(e=>{e&&L(j())})};",
+  "if(_){R();let e=()=>{let e=j();e!==`app-default`&&L(e)};d.nativeTheme.on(`updated`,e),T.add(()=>{d.nativeTheme.off(`updated`,e)})}",
   "let z=null,V=new H8e({onWindowRegistered:e=>{z?.registerWindow(e),w?.(e)}});return{updateDockIcon:R,windowManager:V}}",
 ].join("");
 
@@ -222,6 +224,44 @@ test("main patch captures every minified alias and preserves their contract rela
   assert.equal(applyDockIconMainPatch(patched), patched);
 });
 
+test("Codex and Space choices update Linux windows and tray without changing macOS cropping", () => {
+  const patched = applyDockIconMainPatch(currentMainSource);
+  const start = patched.indexOf("function codexLinuxApplyDockIcon(");
+  const end = findMatchingBrace(patched, patched.indexOf("{", start));
+  const applySource = patched.slice(start, end + 1);
+  for (const platform of ["linux", "darwin"]) {
+    for (const preference of ["codex-system", "space-system"]) {
+      for (const dark of [true, false]) {
+        const effects = [];
+        const image = {
+          isEmpty: () => false,
+          getSize: () => ({ width: 128, height: 128 }),
+          crop: () => { effects.push("crop"); return image; },
+        };
+        const context = {
+          process: { platform }, I: null, i: "prod", o: { i: { Dev: "dev" } },
+          ee: (value, useDark) => `${value}-${useDark ? "dark" : "light"}.png`,
+          A: (name) => name, M: () => "default.png",
+          codexLinuxDockIconResourcePath: (name) => name,
+          y: { existsSync: () => false },
+          U9: { tray: { isDestroyed: () => false, setImage: () => effects.push("tray") } },
+          d: {
+            nativeTheme: { shouldUseDarkColorsForSystemIntegratedUI: dark },
+            nativeImage: { createFromPath: (name) => { effects.push(name); return image; } },
+            BrowserWindow: { getAllWindows: () => [{ isDestroyed: () => false, setIcon: () => effects.push("window") }] },
+            app: { dock: { setIcon: () => effects.push("dock") } },
+          },
+        };
+        vm.runInNewContext(`${applySource};codexLinuxApplyDockIcon(${JSON.stringify(preference)})`, context);
+        assert.deepEqual(effects, [
+          `${preference}-${dark ? "dark" : "light"}.png`,
+          ...(platform === "linux" ? ["window", "tray"] : ["crop", "dock"]),
+        ]);
+      }
+    }
+  }
+});
+
 test("main patch ignores unrelated minified callback prefixes", () => {
   const decoy = "a=n=>{if(n){r.close(),t();return}};";
   const source = decoy + currentMainSource;
@@ -371,6 +411,10 @@ test("staging copies the signed-package icon and current package metadata contra
       fs.readFileSync(path.resolve(__dirname, "../../assets/codex-linux.png")),
     );
     assert.equal(fs.statSync(path.join(target, "sync-desktop-icon.sh")).mode & 0o777, 0o755);
+    for (const name of ["icon-space-dark.png", "icon-space-light.png"]) {
+      assert.deepEqual(fs.readFileSync(path.join(target, name)),
+        fs.readFileSync(path.resolve(__dirname, "../../assets/codex-linux.png")));
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
