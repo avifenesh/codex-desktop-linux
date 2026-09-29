@@ -53,6 +53,8 @@ What it changes:
 - Keeps local Linux Remote turns on `summary = "none"` unless a turn explicitly
   requests a reasoning summary, preventing Desktop's rollout gate from adding
   repeated English reasoning titles to the mobile transcript.
+  The current caller's Aeon summary override is preserved for other hosts,
+  platforms, and non-durable turns.
 - Keeps Chrome Browser Use available to remote/mobile controlled sessions when
   the local Chrome plugin and native host are healthy, and adds a diagnostic
   when the native browser bridge is not exposed to the session.
