@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Sync the embedded Computer Use backend to standalone v0.7.7 as
+  `0.7.7-linux-alpha1`. Niri window listing and exact focus fall back to direct
+  IPC when `niri msg` is unavailable. Socket discovery requires an unambiguous
+  session match; bounds stay unknown when position or scale data is missing.
+
 - Synchronize the embedded backend to standalone v0.7.6 as
   `0.7.6-linux-alpha1`. Portal `press_key` resolves modifiers and named keys
   through the active keymap, so Ctrl shortcuts work with remapped modifiers.

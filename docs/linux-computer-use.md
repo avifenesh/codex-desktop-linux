@@ -35,9 +35,10 @@ methods already emit the image and should not be emitted a second time.
 
 ## Runtime Dependencies
 
-The embedded backend includes the standalone v0.7.6 accessibility setup,
-guard, native activation, coordinate-contract, completion-notification, and
-accessibility-tree scoping changes. Setup verifies GNOME's saved toolkit-accessibility key even when
+The embedded backend includes the standalone v0.7.7 accessibility setup,
+guard, native activation, coordinate-contract, completion-notification,
+accessibility-tree scoping, and Niri window-targeting changes. Setup verifies
+GNOME's saved toolkit-accessibility key even when
 runtime AT-SPI is ready, and warns when the saved key cannot be verified.
 Other accessibility tools can change the key later; setup does not hold it on.
 
@@ -192,10 +193,16 @@ keyboard-only or pointer-only RemoteDesktop implementation remains useful when
 its supported modality is complete, but pointer-only support does not make
 keyboard readiness green.
 
-Niri window listing and exact focus use the `niri` command and the active
-session's `NIRI_SOCKET`. The Computer Use backend hydrates `NIRI_SOCKET` for GUI
-starts, but the socket must still belong to the active Niri session and be
-reachable by the desktop user.
+Niri window listing and exact focus prefer `niri msg` and fall back to direct
+JSON IPC over the active session socket. The Computer Use backend hydrates
+`NIRI_SOCKET` for GUI starts. If it is unset, socket discovery requires a
+unique socket matching `WAYLAND_DISPLAY`; ambiguous or stale sockets are
+refused. The `niri` binary is optional when the direct socket is reachable.
+Window positions account for output origin, window offsets and a uniform known
+scale. If niri omits a position or output scaling is unknown or mixed, bounds
+are absent or keep null coordinates rather than guessing. Listing and exact
+focus remain available in those cases; use fresh full-screen screenshot
+coordinates for input.
 
 The former `x11-ewmh-computer-use` alternative has been retired. The retained
 `computer-use-linux` backend owns generic X11/EWMH support on both official
