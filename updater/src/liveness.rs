@@ -4,6 +4,7 @@ use crate::config::RuntimeConfig;
 use anyhow::{Context, Result};
 use std::{
     fs,
+    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
 };
 
@@ -34,8 +35,14 @@ fn scan_proc_for_executable(expected: &Path) -> Result<bool> {
 fn process_matches(pid: u32, expected: &Path) -> bool {
     is_process_alive(pid)
         && read_exe_link(pid)
-            .map(|path| path == expected)
+            .map(|path| executable_path_matches(&path, expected))
             .unwrap_or(false)
+}
+
+fn executable_path_matches(actual: &Path, expected: &Path) -> bool {
+    actual == expected
+        || actual.as_os_str().as_bytes().strip_suffix(b" (deleted)")
+            == Some(expected.as_os_str().as_bytes())
 }
 
 fn is_process_alive(pid: u32) -> bool {
@@ -64,5 +71,32 @@ mod tests {
             &config.app_executable_path
         ));
         Ok(())
+    }
+
+    #[test]
+    fn deleted_executable_still_matches_exact_managed_path() {
+        let expected = Path::new("/opt/codex-desktop/ChatGPT");
+        assert!(executable_path_matches(expected, expected));
+        assert!(executable_path_matches(
+            Path::new("/opt/codex-desktop/ChatGPT (deleted)"),
+            expected
+        ));
+    }
+
+    #[test]
+    fn deleted_suffix_does_not_match_another_executable() {
+        let expected = Path::new("/opt/codex-desktop/ChatGPT");
+        assert!(!executable_path_matches(
+            Path::new("/other/codex-desktop/ChatGPT (deleted)"),
+            expected
+        ));
+        assert!(!executable_path_matches(
+            Path::new("/opt/codex-desktop/ChatGPT-helper (deleted)"),
+            expected
+        ));
+        assert!(!executable_path_matches(
+            Path::new("/opt/codex-desktop/ChatGPT (deleted) (deleted)"),
+            expected
+        ));
     }
 }
