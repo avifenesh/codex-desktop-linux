@@ -7,10 +7,10 @@ use crate::atspi_tree::{
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
 use crate::remote_desktop::{
-    click as portal_click, drag as portal_drag, keysyms_for_text, press_keycode_chord,
-    scroll as portal_scroll, start_portal_keyboard_session, start_portal_pointer_session,
-    type_text_with_keysyms, InputOperationGuard, PointerButton, PortalKeyboardSession,
-    PortalPointerSession, ScrollDirection,
+    click as portal_click, drag as portal_drag, keysyms_for_text, press_key_chord,
+    press_keycode_chord, scroll as portal_scroll, start_portal_keyboard_session,
+    start_portal_pointer_session, type_text_with_keysyms, InputOperationGuard, PointerButton,
+    PortalKey, PortalKeyboardSession, PortalPointerSession, ScrollDirection,
 };
 use crate::screenshot::{
     capture_screenshot_raw, prepare_screenshot_payload, RawScreenshotCapture, ScreenshotCapture,
@@ -55,6 +55,7 @@ use tokio::{
     process::Command as TokioCommand,
     time::{sleep, timeout},
 };
+use xkeysym::key as xkey;
 use zbus::{Connection as ZbusConnection, Proxy as ZbusProxy};
 
 const INPUT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1688,7 +1689,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "press_key",
-        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
+        description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). On Wayland, chords are sent through an active remote desktop portal keyboard session when one is available (or when ydotool is absent), falling back to ydotool otherwise. Portal chords send modifiers and named keys as keysyms so remapped keys (e.g. Caps Lock swapped with Control) follow the active keymap; letters and digits are physical US positions. Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1728,18 +1729,18 @@ impl ComputerUseLinux {
         if self.should_prefer_portal_keyboard_for_chords().await {
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
-                    let modifiers = chord_modifiers
-                        .iter()
-                        .map(|modifier| i32::from(*modifier))
-                        .collect::<Vec<_>>();
-                    match press_keycode_chord(
-                        &session,
-                        &modifiers,
-                        i32::from(chord_key),
-                        Some(input_guard),
-                    )
-                    .await
-                    {
+                    // KDE keeps physical keycodes: its keysym path is untested
+                    // here, and #191 was reported against mutter.
+                    let (modifiers, key) = portal_key_chord(&params.key)
+                        .filter(|_| !self.is_kde_wayland_session())
+                        .unwrap_or_else(|| {
+                            let modifiers = chord_modifiers
+                                .iter()
+                                .map(|m| PortalKey::Keycode(i32::from(*m)))
+                                .collect();
+                            (modifiers, PortalKey::Keycode(i32::from(chord_key)))
+                        });
+                    match press_key_chord(&session, &modifiers, key, Some(input_guard)).await {
                         Ok(()) => {
                             let notes = self.input_landing_notes(focus.as_ref(), false).await;
                             return Json(with_notes(
@@ -2168,7 +2169,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.7.5-linux-alpha1",
+    version = "0.7.6-linux-alpha1",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility. run_shell is absent unless CODEX_COMPUTER_USE_ENABLE_SHELL=1 or the standalone COMPUTER_USE_LINUX_ENABLE_SHELL=1 compatibility alias; when enabled it is same-user arbitrary host execution, not a sandbox, and hosts should require explicit approval."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -6247,6 +6248,76 @@ fn key_chord(key: &str) -> Option<(Vec<u16>, u16)> {
     Some((modifiers, keycode))
 }
 
+/// Portal form of [`key_chord`]. Modifiers and named keys go out as keysyms
+/// so the compositor resolves them against the active keymap: with Caps Lock
+/// and Control swapped, `Ctrl` presses whichever key produces `Control_L`
+/// (issue #191). Letters and digits stay physical keycodes: mutter drops a
+/// keysym missing from the current layout group, so `Ctrl+A` as a keysym
+/// would vanish under a non-Latin layout, while the US keycode is what GTK and
+/// Qt match shortcuts against there.
+fn portal_key_chord(key: &str) -> Option<(Vec<PortalKey>, PortalKey)> {
+    let parts = key
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let (key_part, modifier_parts) = parts.split_last()?;
+    let (_, keycode) = key_chord(key)?;
+    let mut modifiers = Vec::new();
+    for part in modifier_parts {
+        modifiers.push(PortalKey::Keysym(modifier_keysym(part)?));
+    }
+    let key = modifier_keysym(key_part)
+        .filter(|_| modifier_parts.is_empty())
+        .or_else(|| named_keysym(key_part))
+        .map_or(PortalKey::Keycode(i32::from(keycode)), PortalKey::Keysym);
+    Some((modifiers, key))
+}
+
+fn modifier_keysym(key: &str) -> Option<i32> {
+    let keysym = match normalize_key(key).as_str() {
+        "ctrl" | "control" => xkey::Control_L,
+        "alt" | "option" => xkey::Alt_L,
+        "shift" => xkey::Shift_L,
+        "meta" | "super" | "cmd" | "command" => xkey::Super_L,
+        _ => return None,
+    };
+    Some(keysym as i32)
+}
+
+fn named_keysym(key: &str) -> Option<i32> {
+    let keysym = match normalize_key(key).as_str() {
+        "enter" | "return" => xkey::Return,
+        "escape" | "esc" => xkey::Escape,
+        "tab" => xkey::Tab,
+        "backspace" => xkey::BackSpace,
+        "delete" | "del" => xkey::Delete,
+        "space" => xkey::space,
+        "home" => xkey::Home,
+        "end" => xkey::End,
+        "pageup" | "page_up" => xkey::Page_Up,
+        "pagedown" | "page_down" => xkey::Page_Down,
+        "arrowleft" | "left" => xkey::Left,
+        "arrowright" | "right" => xkey::Right,
+        "arrowup" | "up" => xkey::Up,
+        "arrowdown" | "down" => xkey::Down,
+        "f1" => xkey::F1,
+        "f2" => xkey::F2,
+        "f3" => xkey::F3,
+        "f4" => xkey::F4,
+        "f5" => xkey::F5,
+        "f6" => xkey::F6,
+        "f7" => xkey::F7,
+        "f8" => xkey::F8,
+        "f9" => xkey::F9,
+        "f10" => xkey::F10,
+        "f11" => xkey::F11,
+        "f12" => xkey::F12,
+        _ => return None,
+    };
+    Some(keysym as i32)
+}
+
 fn key_sequence(key: &str) -> Option<Vec<String>> {
     let (modifiers, keycode) = key_chord(key)?;
     let mut events = Vec::new();
@@ -8035,6 +8106,91 @@ mod tests {
         assert_eq!(key_chord("Enter"), Some((vec![], 28)));
         assert_eq!(key_chord("Super"), Some((vec![], 125)));
         assert_eq!(key_chord("NotAKey"), None);
+    }
+
+    #[test]
+    fn portal_key_chord_sends_modifiers_and_named_keys_as_keysyms() {
+        use PortalKey::{Keycode, Keysym};
+        // Modifiers resolve through the live keymap (#191); letters stay
+        // physical so non-Latin layout groups still see Ctrl+A.
+        assert_eq!(
+            portal_key_chord("Ctrl+A"),
+            Some((vec![Keysym(xkey::Control_L as i32)], Keycode(30)))
+        );
+        assert_eq!(
+            portal_key_chord("ctrl+shift+t"),
+            Some((
+                vec![Keysym(xkey::Control_L as i32), Keysym(xkey::Shift_L as i32)],
+                Keycode(20)
+            ))
+        );
+        assert_eq!(
+            portal_key_chord("Alt+F4"),
+            Some((vec![Keysym(xkey::Alt_L as i32)], Keysym(xkey::F4 as i32)))
+        );
+        assert_eq!(
+            portal_key_chord("Meta+Return"),
+            Some((
+                vec![Keysym(xkey::Super_L as i32)],
+                Keysym(xkey::Return as i32)
+            ))
+        );
+        assert_eq!(
+            portal_key_chord("Super"),
+            Some((vec![], Keysym(xkey::Super_L as i32)))
+        );
+        assert_eq!(
+            portal_key_chord("page-down"),
+            Some((vec![], Keysym(xkey::Page_Down as i32)))
+        );
+        assert_eq!(
+            portal_key_chord("Ctrl+1"),
+            Some((vec![Keysym(xkey::Control_L as i32)], Keycode(2)))
+        );
+        assert_eq!(portal_key_chord("Ctrl+NotAKey"), None);
+        assert_eq!(portal_key_chord("Hyper+A"), None);
+    }
+
+    #[test]
+    fn portal_key_chord_accepts_exactly_the_evdev_grammar() {
+        for key in [
+            "enter",
+            "Escape",
+            "tab",
+            "backspace",
+            "del",
+            "space",
+            "home",
+            "end",
+            "pageup",
+            "left",
+            "right",
+            "up",
+            "down",
+            "f1",
+            "f12",
+            "a",
+            "z",
+            "0",
+            "9",
+            "ctrl",
+            "alt",
+            "shift",
+            "cmd",
+            "Ctrl+Alt+Delete",
+            "Shift+Tab",
+            "ctrl+shift",
+            "?",
+            "F13",
+            "Ctrl+",
+            "",
+        ] {
+            assert_eq!(
+                portal_key_chord(key).is_some(),
+                key_chord(key).is_some(),
+                "{key}"
+            );
+        }
     }
 
     #[test]

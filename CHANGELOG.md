@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Synchronize the embedded backend to standalone v0.7.6 as
+  `0.7.6-linux-alpha1`. Portal `press_key` resolves modifiers and named keys
+  through the active keymap, so Ctrl shortcuts work with remapped modifiers.
+  Letters and digits retain physical US keycodes for non-Latin layouts, and
+  KDE retains physical keycodes for all chords (standalone #193, fixes #191).
+  The shared input-operation guard, cancellation cleanup, and avatar
+  notifications are preserved.
 - Synchronize the embedded backend to standalone v0.7.5 as
   `0.7.5-linux-alpha1`. Native X11 `scroll` sends XTEST wheel buttons through
   xdotool, so GTK 3 no longer drops the only wheel event of a call (standalone
