@@ -392,12 +392,16 @@ jobs:
             icon-chatgpt.png \
             icon-codex-dark-color.png \
             icon-codex-light.png \
+            icon-space-dark.png \
+            icon-space-light.png \
             sync-desktop-icon.sh | sort) \
             <(find "$payload" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
           for resource in \
             icon-chatgpt.png \
             icon-codex-dark-color.png \
             icon-codex-light.png \
+            icon-space-dark.png \
+            icon-space-light.png \
             sync-desktop-icon.sh; do
             test -f "$payload/$resource"
             test ! -L "$payload/$resource"
@@ -407,6 +411,8 @@ jobs:
           cmp "$upstream_root/usr/lib/chatgpt/resources/icon-chatgpt.png" "$payload/icon-chatgpt.png"
           cmp assets/codex-linux.png "$payload/icon-codex-dark-color.png"
           cmp assets/codex-linux.png "$payload/icon-codex-light.png"
+          cmp assets/codex-linux.png "$payload/icon-space-dark.png"
+          cmp assets/codex-linux.png "$payload/icon-space-light.png"
           cmp linux-features/ui-tweaks/sync-desktop-icon.sh "$payload/sync-desktop-icon.sh"
           test -x "$payload/sync-desktop-icon.sh"
           hook="$CODEX_INSTALL_DIR/.codex-linux/prelaunch.d/ui-tweaks-dock-icon-cleanup.sh"
