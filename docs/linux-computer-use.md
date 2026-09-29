@@ -35,7 +35,7 @@ methods already emit the image and should not be emitted a second time.
 
 ## Runtime Dependencies
 
-The embedded backend includes the standalone v0.7.5 accessibility setup,
+The embedded backend includes the standalone v0.7.6 accessibility setup,
 guard, native activation, coordinate-contract, completion-notification, and
 accessibility-tree scoping changes. Setup verifies GNOME's saved toolkit-accessibility key even when
 runtime AT-SPI is ready, and warns when the saved key cannot be verified.
@@ -69,6 +69,12 @@ Wayland with a scaled monitor, portal pointer input multiplies the stream point
 by the monitor scale, matching mutter's logical layout mode. After targeted
 typing, focus feedback reports an incomplete search or an app without an AT-SPI
 tree instead of a false "no focused element" warning.
+
+On Wayland, portal `press_key` sends modifiers and named keys as keysyms
+resolved by the compositor's active keymap, so Ctrl shortcuts still work when
+Caps Lock and Control are swapped. Letters and digits retain physical US
+keycodes so shortcuts also work under non-Latin layouts. KDE Plasma retains
+physical keycodes for all portal chords.
 
 On X11, `type_text` keeps xdotool's 12 ms per-character delay so XTEST events
 stay ordered. `CODEX_COMPUTER_USE_XDOTOOL_TYPE_DELAY_MS` overrides it; the
