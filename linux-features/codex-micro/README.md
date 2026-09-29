@@ -4,6 +4,10 @@ Disabled-by-default Work Louder Codex Micro support for the official Linux
 runtime. The official package already includes the Linux `node-hid` binding,
 so this feature only supplies the gate, watcher, and udev policy.
 
+The current signed bundle has three app-shell gate calls, two settings-page
+calls, one settings-visibility call, and one debug-panel call. All four bundles
+must match before any override is written.
+
 It retains only the locally useful feature-gate override, the narrow Linux
 hot-plug watcher, and the udev policy. Native packages install
 `/usr/lib/udev/rules.d/70-codex-micro.rules`; source and AppImage users can

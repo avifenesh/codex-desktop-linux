@@ -56,8 +56,9 @@ Each tweak documents its own config keys below.
 Exposes the upstream Appearance row on Linux and applies the selection to
 existing and newly registered windows, the official Linux tray, and a managed
 user-local desktop entry. The ChatGPT choice uses `icon-chatgpt.png` from the
-signed official Linux package. The alternate choice uses the existing ChatGPT
-Community package icon; retired macOS DMG icon resources are not imported.
+signed official Linux package. The Codex and Space choices use the existing
+ChatGPT Community package icon for both theme variants; retired macOS DMG icon
+resources are not imported. Both follow the current upstream theme resolver.
 
 Staging validates the official package's `chatgpt.desktop` identity before it
 copies the ChatGPT icon. Missing or changed package resources reject the

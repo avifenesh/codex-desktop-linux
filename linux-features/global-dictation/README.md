@@ -1,5 +1,9 @@
 # Global Dictation
 
+The main-process patch recognizes the current combined modifier and special-key
+registration branch. Linux portal routing preserves the upstream branches for
+other platforms.
+
 This optional feature enables the global dictation controls already present in the desktop app.
 
 X11 uses Electron for shortcut registration and a short-lived modifier-state

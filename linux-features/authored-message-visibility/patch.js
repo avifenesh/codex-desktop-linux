@@ -1,9 +1,9 @@
 "use strict";
 
-// Complete classifier template from official Linux 26.908.40834. Bind local
+// Complete classifier template from official Linux 26.928.20755. Bind local
 // aliases; only the final message branch changes. Tool exceptions stay intact.
-const currentPattern = new RegExp("function\\ ([A-Za-z_$][\\w$]*)\\(\\{unit:([A-Za-z_$][\\w$]*),keepMcpAppEntriesPersistent:([A-Za-z_$][\\w$]*),mcpServerStatuses:([A-Za-z_$][\\w$]*),renderMcpApps:([A-Za-z_$][\\w$]*)\\}\\)\\{if\\(\\2\\.kind!==`standalone`\\)return!1;let\\ ([A-Za-z_$][\\w$]*)=\\2\\.item\\.item;return\\ \\6\\.type===`dynamic\\-tool\\-call`\\&\\&([A-Za-z_$][\\w$]*)\\(\\6\\)\\|\\|\\3\\&\\&\\5\\&\\&\\6\\.type===`mcp\\-tool\\-call`\\&\\&([A-Za-z_$][\\w$]*)\\(\\{item:\\6,mcpServerStatuses:\\4\\}\\)\\?!0:\\6\\.type===`user\\-message`\\&\\&\\(\\6\\.steeringStatus!=null\\|\\|\\6\\.hookFeedback===!0\\)\\}", "g");
-const patchedPattern = new RegExp("function\\ ([A-Za-z_$][\\w$]*)\\(\\{unit:([A-Za-z_$][\\w$]*),keepMcpAppEntriesPersistent:([A-Za-z_$][\\w$]*),mcpServerStatuses:([A-Za-z_$][\\w$]*),renderMcpApps:([A-Za-z_$][\\w$]*)\\}\\)\\{if\\(\\2\\.kind!==`standalone`\\)return!1;let\\ ([A-Za-z_$][\\w$]*)=\\2\\.item\\.item;return\\ \\6\\.type===`dynamic\\-tool\\-call`\\&\\&([A-Za-z_$][\\w$]*)\\(\\6\\)\\|\\|\\3\\&\\&\\5\\&\\&\\6\\.type===`mcp\\-tool\\-call`\\&\\&([A-Za-z_$][\\w$]*)\\(\\{item:\\6,mcpServerStatuses:\\4\\}\\)\\?!0:\\6\\.type===`assistant\\-message`\\|\\|\\6\\.type===`user\\-message`\\}", "g");
+const currentPattern = new RegExp("function\\ ([A-Za-z_$][\\w$]*)\\(\\{unit:([A-Za-z_$][\\w$]*),keepMcpAppEntriesPersistent:([A-Za-z_$][\\w$]*),mcpServerStatuses:([A-Za-z_$][\\w$]*),renderMcpApps:([A-Za-z_$][\\w$]*)\\}\\)\\{if\\(\\2\\.kind!==`standalone`\\)return!1;let\\ ([A-Za-z_$][\\w$]*)=\\2\\.item\\.item;return\\ \\6\\.type===`assistant\\-message`\\&\\&[A-Za-z_$][\\w$]*\\(\\6\\)\\|\\|\\6\\.type===`dynamic\\-tool\\-call`\\&\\&([A-Za-z_$][\\w$]*)\\(\\6\\)\\|\\|\\3\\&\\&\\5\\&\\&\\6\\.type===`mcp\\-tool\\-call`\\&\\&([A-Za-z_$][\\w$]*)\\(\\{item:\\6,mcpServerStatuses:\\4\\}\\)\\?!0:\\6\\.type===`user\\-message`\\&\\&\\(\\6\\.steeringStatus!=null\\|\\|\\6\\.hookFeedback===!0\\)\\}", "g");
+const patchedPattern = new RegExp("function\\ ([A-Za-z_$][\\w$]*)\\(\\{unit:([A-Za-z_$][\\w$]*),keepMcpAppEntriesPersistent:([A-Za-z_$][\\w$]*),mcpServerStatuses:([A-Za-z_$][\\w$]*),renderMcpApps:([A-Za-z_$][\\w$]*)\\}\\)\\{if\\(\\2\\.kind!==`standalone`\\)return!1;let\\ ([A-Za-z_$][\\w$]*)=\\2\\.item\\.item;return\\ \\6\\.type===`assistant\\-message`\\&\\&[A-Za-z_$][\\w$]*\\(\\6\\)\\|\\|\\6\\.type===`dynamic\\-tool\\-call`\\&\\&([A-Za-z_$][\\w$]*)\\(\\6\\)\\|\\|\\3\\&\\&\\5\\&\\&\\6\\.type===`mcp\\-tool\\-call`\\&\\&([A-Za-z_$][\\w$]*)\\(\\{item:\\6,mcpServerStatuses:\\4\\}\\)\\?!0:\\6\\.type===`assistant\\-message`\\|\\|\\6\\.type===`user\\-message`\\}", "g");
 const recovery = "Disable authored-message-visibility and rebuild, or update its patch for the current official package.";
 
 function applyAuthoredMessageVisibilityPatch(source) {
@@ -28,7 +28,7 @@ module.exports = {
     phase: "webview-asset",
     order: 20_740,
     ciPolicy: "optional",
-    pattern: /^conversation-blocks-[A-Za-z0-9_-]+\.js$/,
+    pattern: /^[A-Za-z0-9_-]+\.js$/,
     assetMatch: (source) => source.includes("collapsibleUnits:") && source.includes("persistentUnits:"),
     missingWarning: `WARN: authored-message-visibility: activity partition bundle missing. ${recovery}`,
     ambiguousWarning: `WARN: authored-message-visibility: multiple activity partition bundles. ${recovery}`,

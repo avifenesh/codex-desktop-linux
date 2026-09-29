@@ -30,3 +30,7 @@ node --test linux-features/project-group-last-updated-sort/test.js
 
 The patch targets only the current upstream Projects sidebar chunk. Upstream
 bundle drift leaves the asset unchanged and reports an optional patch warning.
+
+The current sidebar uses normalized thread keys. Group recency uses upstream
+`getRecencyAt` for those keys, includes project update timestamps, and leaves
+pinned groups and manual ordering unchanged.

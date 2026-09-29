@@ -278,7 +278,7 @@ function applyLinuxGlobalDictationMainProcessPatch(source) {
     const registerPattern = new RegExp(
       `function (${IDENT})\\(e,t,n\\)\\{[\\s\\S]{0,500}?;` +
         `(?:if\\(process\\.platform===\`win32\`&&${IDENT}\\(e\\)\\)return ${IDENT}\\(e,${IDENT}\\);)?` +
-        `if\\((${IDENT})\\(e\\)\\)return (${IDENT})\\(e\\)(?:\\|\\|${IDENT}\\(e\\))?\\?(${IDENT})\\(e,(${IDENT}),n\\?\\.bareModifierTrigger\\):null;`,
+        `if\\((${IDENT})\\(e\\)\\|\\|${IDENT}\\(e\\)\\)return (${IDENT})\\(e\\)(?:\\|\\|${IDENT}\\(e\\))?\\?(${IDENT})\\(e,(${IDENT}),n\\?\\.bareModifierTrigger\\):null;`,
       "u",
     );
     const registerMatch = source.match(registerPattern);

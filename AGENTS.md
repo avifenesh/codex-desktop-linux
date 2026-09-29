@@ -122,7 +122,7 @@ nix flake check
 
 Package/update/launcher/framework changes are cross-format unless explicitly
 scoped. When changing payloads, inspect all supported output formats. Refresh
-Nix pins through `scripts/ci/update-official-linux-pins.sh`, never by inventing
+Nix pins through `scripts/ci/update-nix-hashes.sh`, never by inventing
 hashes.
 
 ## Change expectations

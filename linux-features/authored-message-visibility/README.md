@@ -28,3 +28,6 @@ in order after completion. Expand and collapse again: authored messages must not
 duplicate and ordinary tool activity must remain collapsible. Also check a turn
 without tools. Tests exercise the official partition/classifier and feature
 registration, idempotence, unique asset selection, and drift reporting.
+
+The current classifier preserves upstream assistant-message and interactive-tool
+exceptions. Asset selection uses the partition contract across hashed chunks.

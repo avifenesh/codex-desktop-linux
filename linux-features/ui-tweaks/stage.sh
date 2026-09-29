@@ -63,6 +63,8 @@ trap 'rm -rf -- "$temp_dir"' EXIT
 install -m 0644 "$official_icon" "$temp_dir/icon-chatgpt.png"
 install -m 0644 "$community_icon" "$temp_dir/icon-codex-dark-color.png"
 install -m 0644 "$community_icon" "$temp_dir/icon-codex-light.png"
+install -m 0644 "$community_icon" "$temp_dir/icon-space-dark.png"
+install -m 0644 "$community_icon" "$temp_dir/icon-space-light.png"
 install -m 0755 "$helper_source" "$temp_dir/sync-desktop-icon.sh"
 if [ -L "$target_dir" ]; then
     rm -f -- "$target_dir"
