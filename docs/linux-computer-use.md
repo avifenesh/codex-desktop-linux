@@ -63,6 +63,12 @@ X11/EWMH window origins come from the X server instead of `wmctrl -lG`, which
 counts the frame offset twice, so window crops and relative clicks line up
 with the client area.
 
+Native X11 connections and replies share a transport deadline; a stalled server
+closes the query connection instead of leaving a blocked worker behind. Unix
+sockets, literal IP addresses, and `localhost` need no resolver helper. A remote
+hostname in `DISPLAY` requires `getent ahosts` for bounded name resolution;
+missing or failed resolution reports the X11 route as unavailable.
+
 Element-targeted `click` and `scroll` refuse an `element_index` from another
 app's `get_app_state` snapshot and ask for a snapshot of the target. On GNOME
 Wayland with a scaled monitor, portal pointer input multiplies the stream point
@@ -112,6 +118,17 @@ when the Codex variable is unset; an explicit Codex value of `0` disables it.
 The tool uses `notify-send` with bounded execution and cleanup. Missing services,
 failures, and timeouts skip the cue without failing the task. It does not grant
 exclusive desktop ownership and is disabled by default.
+
+The direct MCP server also exposes `run_shell` only when explicitly started
+with `CODEX_COMPUTER_USE_ENABLE_SHELL=1`. The standalone
+`COMPUTER_USE_LINUX_ENABLE_SHELL=1` alias is used only when the Codex variable
+is unset; an explicit Codex value of `0` keeps it disabled. The in-app native
+adapter does not expose this tool. It runs `/bin/sh -c` with the current user's
+host permissions, without a sandbox or login profiles. The host must approve
+the requested command. Ambient credentials and agent sockets are removed from
+the environment; additional variables must be supplied explicitly. Execution
+defaults to 30 seconds (maximum 120), and returned output is bounded. An audit
+digest is written to backend stderr without logging command text.
 
 Install `ydotool` 1.0.3 or newer when you need the fallback input path. The
 backend probes the exact absolute move, wheel move, click, delayed key, and

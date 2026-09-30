@@ -7566,6 +7566,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn kde_clipboard_pty_metadata_does_not_change_editor_paste() {
+        let mut window = window_info(
+            1,
+            Some("xterm integration test"),
+            Some("example-ide"),
+            Some("ExampleIde"),
+            Some(100),
+        );
+        window.terminal = Some(crate::terminal::TerminalWindowContext {
+            tty: "/dev/pts/11".to_string(),
+            root_process: crate::terminal::TerminalProcess {
+                pid: 200,
+                command_name: "bash".to_string(),
+                command_line: "bash".to_string(),
+                cwd: None,
+            },
+            active_process: None,
+            process_count: 1,
+            confidence: "high".to_string(),
+            match_reason: "one child PTY".to_string(),
+        });
+        let terminal = kde_clipboard_terminal_shortcut(&WindowTarget::default(), Some(&window));
+        assert_eq!(terminal, None);
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(terminal, None),
+            KdeClipboardPasteShortcut::Standard
+        );
+    }
+
     #[tokio::test]
     async fn kde_clipboard_dbus_operation_times_out_when_pending() {
         let error = kde_clipboard_dbus_operation_with_timeout(
@@ -9084,6 +9114,41 @@ mod tests {
     fn run_shell_router_matches_operator_opt_in() {
         let router = ComputerUseLinux::default().mcp_tool_router();
         assert_eq!(router.get("run_shell").is_some(), shell_execution_enabled());
+    }
+
+    #[tokio::test]
+    async fn shell_execution_clears_ambient_credentials_and_accepts_explicit_env() {
+        let _enabled = EnvVarGuard::set(SHELL_ENABLE_ENV, "1");
+        let _credential = EnvVarGuard::set("OPENAI_API_KEY", "test-ambient-credential");
+        let output = execute_shell(RunShellParams {
+            command: "printf '%s|%s' \"${OPENAI_API_KEY-unset}\" \"$EXPLICIT_VALUE\"".into(),
+            cwd: None,
+            env: BTreeMap::from([("EXPLICIT_VALUE".into(), "test-explicit-value".into())]),
+            timeout_seconds: Some(2),
+        })
+        .await;
+        assert!(output.ok, "{:?}", output.error);
+        assert_eq!(output.stdout, "unset|test-explicit-value");
+        assert_eq!(output.exit_code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn shell_execution_disabled_never_runs_requested_command() {
+        let _disabled = EnvVarGuard::set(SHELL_ENABLE_ENV, "0");
+        let _alias = EnvVarGuard::set(SHELL_ENABLE_ENV_STANDALONE, "1");
+        let output = execute_shell(RunShellParams {
+            command: "printf must-not-run".into(),
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_seconds: None,
+        })
+        .await;
+        assert!(!output.ok);
+        assert!(output.stdout.is_empty());
+        assert!(output
+            .error
+            .unwrap()
+            .contains("shell execution is disabled"));
     }
 
     #[test]
