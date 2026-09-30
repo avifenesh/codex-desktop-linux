@@ -79,12 +79,16 @@ const SHELL_MAX_ENV_ENTRIES: usize = 64;
 const SHELL_MAX_ENV_BYTES: usize = 64 * 1024;
 const SHELL_RESPONSE_STREAM_BYTES: usize = 512 * 1024;
 
+/// Nodes and their app ownership must come from the same snapshot.
+#[derive(Default)]
+struct CachedAccessibilitySnapshot {
+    nodes: Vec<AccessibilityNode>,
+    pid: Option<u32>,
+}
+
 #[derive(Clone, Default)]
 pub struct ComputerUseLinux {
-    last_nodes: Arc<Mutex<Vec<AccessibilityNode>>>,
-    /// Pid the cached snapshot was taken for, when get_app_state had a target.
-    /// Element indices are only meaningful against that app (#167).
-    last_snapshot_pid: Arc<Mutex<Option<u32>>>,
+    last_snapshot: Arc<Mutex<CachedAccessibilitySnapshot>>,
     portal_pointer_session: Arc<Mutex<Option<PortalPointerSession>>>,
     portal_keyboard_session: Arc<Mutex<Option<PortalKeyboardSession>>>,
     /// Lazily-created uinput absolute pointer (preferred coordinate backend).
@@ -452,9 +456,10 @@ impl ComputerUseLinux {
             // match that can be another app entirely; recording the pid then
             // would let that app's index pass the target check instead of
             // taking the per-node owner lookup.
-            self.cache_snapshot(&accessibility_tree, tree_root_pid);
+            self.commit_snapshot(&accessibility_tree, tree_root_pid)
+                .await;
         } else {
-            self.clear_cached_nodes();
+            self.commit_snapshot(&[], None).await;
         }
         let mut message = if let Some(error) = &accessibility_error {
             format!("MCP registration is working, but AT-SPI tree extraction failed: {error}")
@@ -1113,6 +1118,7 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<SetValueParams>,
     ) -> Json<ActionOutput> {
+        let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let received = Some(serde_json::json!(params.clone()));
         let object_ref = match self.resolve_object_ref(
             params.element_index,
@@ -3916,16 +3922,24 @@ impl ComputerUseLinux {
         self.cache_snapshot(nodes, None);
     }
 
+    /// Readers may perform slow AT-SPI owner checks before resolving a click
+    /// or scroll again. Keep the snapshot stable for the whole input operation;
+    /// otherwise a checked index could resolve to a different app's node.
+    async fn commit_snapshot(&self, nodes: &[AccessibilityNode], target_pid: Option<u32>) {
+        let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        self.cache_snapshot(nodes, target_pid);
+    }
+
     fn cache_snapshot(&self, nodes: &[AccessibilityNode], target_pid: Option<u32>) {
-        if let Ok(mut cached) = self.last_nodes.lock() {
-            cached.clear();
-            cached.extend_from_slice(nodes);
-        }
-        if let Ok(mut pid) = self.last_snapshot_pid.lock() {
-            *pid = target_pid;
+        if let Ok(mut cached) = self.last_snapshot.lock() {
+            *cached = CachedAccessibilitySnapshot {
+                nodes: nodes.to_vec(),
+                pid: target_pid,
+            };
         }
     }
 
+    #[cfg(test)]
     fn clear_cached_nodes(&self) {
         self.cache_snapshot(&[], None);
     }
@@ -3943,7 +3957,11 @@ impl ComputerUseLinux {
         let Some(target_pid) = target_pid else {
             return Ok(());
         };
-        let snapshot_pid = self.last_snapshot_pid.lock().ok().and_then(|pid| *pid);
+        let snapshot_pid = self
+            .last_snapshot
+            .lock()
+            .ok()
+            .and_then(|snapshot| snapshot.pid);
         let owner_pid = match snapshot_pid {
             Some(pid) => Some(pid),
             None => object_ref_owner_pid(&node.object_ref).await.ok().flatten(),
@@ -4039,8 +4057,11 @@ impl ComputerUseLinux {
     }
 
     fn center_for_cached_node(&self, element_index: u32) -> Option<(i32, i32)> {
-        let cached = self.last_nodes.lock().ok()?;
-        let node = cached.iter().find(|node| node.index == element_index)?;
+        let cached = self.last_snapshot.lock().ok()?;
+        let node = cached
+            .nodes
+            .iter()
+            .find(|node| node.index == element_index)?;
         bounds_center(node.bounds.as_ref()?)
     }
 
@@ -4068,12 +4089,12 @@ impl ComputerUseLinux {
         selector: &ElementSelector<'_>,
         purpose: ElementResolvePurpose,
     ) -> std::result::Result<AccessibilityNode, String> {
-        let cached = self.last_nodes.lock().map_err(|_| {
+        let cached = self.last_snapshot.lock().map_err(|_| {
             "Could not read cached accessibility nodes. Call get_app_state and retry.".to_string()
         })?;
 
         if let Some(element_index) = element_index {
-            return cached
+            return cached.nodes
                 .iter()
                 .find(|node| node.index == element_index)
                 .cloned()
@@ -4091,7 +4112,7 @@ impl ComputerUseLinux {
             );
         }
 
-        resolve_semantic_node(cached.as_slice(), selector, purpose)
+        resolve_semantic_node(cached.nodes.as_slice(), selector, purpose)
     }
 
     async fn perform_element_action(
@@ -4099,6 +4120,7 @@ impl ComputerUseLinux {
         params: &ActionParams,
         requested_action: Option<&str>,
     ) -> Json<ActionOutput> {
+        let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let received = Some(serde_json::json!(params.clone()));
         let object_ref = match self.resolve_object_ref(
             params.element_index,
@@ -7870,7 +7892,7 @@ mod tests {
                     .unwrap(),
                 ClickTarget::Coordinates(60, 40)
             ));
-            let mut node = backend.last_nodes.lock().unwrap()[0].clone();
+            let mut node = backend.last_snapshot.lock().unwrap().nodes[0].clone();
             for bounds in [
                 None,
                 Some(Bounds {
@@ -9372,14 +9394,98 @@ mod node_target_scope_tests {
         assert!(backend.check_node_target(&node, Some(1)).await.is_ok());
     }
 
+    #[tokio::test]
+    async fn concurrent_snapshot_commit_waits_until_checked_action_finishes() {
+        let backend = ComputerUseLinux::default();
+        let mut original = cached_node(2, ":1.9/org/a11y/atspi/accessible/42");
+        original.bounds = Some(Bounds {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 40,
+        });
+        original.actions = vec![AccessibilityAction {
+            index: 0,
+            name: "click".into(),
+            description: String::new(),
+            keybinding: String::new(),
+        }];
+        backend
+            .commit_snapshot(std::slice::from_ref(&original), Some(10))
+            .await;
+        // Model the click/scroll operation: it holds this same lock while its
+        // target ownership check awaits and until the action has been resolved.
+        let input_guard = Arc::clone(&backend.input_operation_lock).lock_owned().await;
+        let checked_node = backend
+            .cached_node_for(
+                Some(2),
+                &ElementSelector::default(),
+                ElementResolvePurpose::Click,
+            )
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let writer_backend = backend.clone();
+        let writer_barrier = Arc::clone(&barrier);
+        let writer = tokio::spawn(async move {
+            let replacement = cached_node(2, ":1.20/org/a11y/atspi/accessible/99");
+            writer_barrier.wait().await;
+            writer_backend
+                .commit_snapshot(&[replacement], Some(20))
+                .await;
+        });
+        barrier.wait().await;
+        tokio::task::yield_now().await;
+        assert!(
+            !writer.is_finished(),
+            "snapshot publication must wait for input"
+        );
+        assert!(backend
+            .check_node_target(&checked_node, Some(10))
+            .await
+            .is_ok());
+        let params = ClickParams {
+            element_index: Some(2),
+            ..Default::default()
+        };
+        assert!(matches!(backend.resolve_click_target(&params).unwrap(),
+            ClickTarget::PrimaryAction { object_ref, .. } if object_ref == original.object_ref));
+        assert_eq!(
+            backend
+                .resolve_optional_target_point(None, None, Some(2))
+                .unwrap(),
+            Some((60, 40))
+        );
+        // perform_action/set_value resolve the same snapshot while holding the
+        // input lock; their explicit object identifiers remain independent.
+        for purpose in [
+            ElementResolvePurpose::Action,
+            ElementResolvePurpose::SetValue,
+        ] {
+            assert_eq!(
+                backend
+                    .resolve_object_ref(Some(2), None, &ElementSelector::default(), purpose)
+                    .unwrap(),
+                original.object_ref
+            );
+        }
+        drop(input_guard);
+        writer.await.unwrap();
+        let snapshot = backend.last_snapshot.lock().unwrap();
+        assert_eq!(snapshot.pid, Some(20));
+        assert_eq!(
+            snapshot.nodes[0].object_ref,
+            ":1.20/org/a11y/atspi/accessible/99"
+        );
+    }
+
     #[test]
     fn a_new_snapshot_replaces_the_recorded_pid() {
         let backend = ComputerUseLinux::default();
         backend.cache_snapshot(&[], Some(10));
         backend.cache_snapshot(&[], None);
-        assert_eq!(*backend.last_snapshot_pid.lock().unwrap(), None);
+        assert_eq!(backend.last_snapshot.lock().unwrap().pid, None);
         backend.cache_snapshot(&[], Some(11));
         backend.clear_cached_nodes();
-        assert_eq!(*backend.last_snapshot_pid.lock().unwrap(), None);
+        assert_eq!(backend.last_snapshot.lock().unwrap().pid, None);
     }
 }
