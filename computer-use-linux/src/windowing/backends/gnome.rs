@@ -4,23 +4,36 @@ use crate::terminal::enrich_terminal_windows;
 use crate::windowing::registry::BackendProbe;
 use crate::windowing::types::{WindowBounds, WindowInfo};
 use anyhow::{bail, Context, Result};
-use std::collections::HashMap;
-use std::process::Command;
-use zbus::{zvariant::OwnedValue, Proxy};
+use std::{collections::HashMap, process::Command};
+use zbus::{
+    names::{BusName, OwnedUniqueName},
+    zvariant::OwnedValue,
+    Proxy,
+};
 
 pub const GNOME_SHELL_INTROSPECT_BACKEND: &str = "gnome-shell-introspect";
 pub const GNOME_SHELL_EXTENSION_BACKEND: &str = "gnome-shell-extension";
 pub const GNOME_SHELL_EXTENSION_SERVICE: &str = identity::DBUS_SERVICE;
 pub const GNOME_SHELL_EXTENSION_OBJECT_PATH: &str = identity::DBUS_OBJECT_PATH;
+const GNOME_SHELL_SERVICE: &str = "org.gnome.Shell";
 
 pub fn probe_extension() -> BackendProbe {
+    hydrate_session_bus_env();
+    let owner = match probe_verified_extension_owner() {
+        Ok(owner) => owner,
+        Err(detail) => {
+            return BackendProbe {
+                id: GNOME_SHELL_EXTENSION_BACKEND,
+                ok: false,
+                can_list_windows: false,
+                can_focus_apps: false,
+                can_focus_windows: false,
+                detail,
+            };
+        }
+    };
     let method = format!("{GNOME_SHELL_EXTENSION_SERVICE}.ListWindows");
-    let check = gdbus_call_check(
-        GNOME_SHELL_EXTENSION_SERVICE,
-        GNOME_SHELL_EXTENSION_OBJECT_PATH,
-        &method,
-        &[],
-    );
+    let check = gdbus_call_check(&owner, GNOME_SHELL_EXTENSION_OBJECT_PATH, &method, &[]);
     BackendProbe {
         id: GNOME_SHELL_EXTENSION_BACKEND,
         ok: check.ok,
@@ -119,18 +132,10 @@ async fn call_extension_json(method: &str) -> Result<String> {
     let connection = zbus::Connection::session()
         .await
         .context("failed to connect to session bus")?;
-    let proxy = Proxy::new(
-        &connection,
-        GNOME_SHELL_EXTENSION_SERVICE,
-        GNOME_SHELL_EXTENSION_OBJECT_PATH,
-        GNOME_SHELL_EXTENSION_SERVICE,
-    )
-    .await
-    .context("failed to create Codex GNOME Shell extension proxy")?;
-    let json: String = proxy
-        .call(method, &())
-        .await
-        .with_context(|| format!("Codex GNOME Shell extension {method} call failed"))?;
+    let proxy = verified_extension_proxy(&connection).await?;
+    let json: String = proxy.call(method, &()).await.with_context(|| {
+        format!("Codex GNOME Shell extension {method} call failed")
+    })?;
     Ok(json)
 }
 
@@ -164,14 +169,7 @@ pub async fn extension_monitor_layout() -> Result<Vec<MonitorInfo>> {
     let connection = zbus::Connection::session()
         .await
         .context("failed to connect to session bus")?;
-    let proxy = Proxy::new(
-        &connection,
-        GNOME_SHELL_EXTENSION_SERVICE,
-        GNOME_SHELL_EXTENSION_OBJECT_PATH,
-        GNOME_SHELL_EXTENSION_SERVICE,
-    )
-    .await
-    .context("failed to create computer-use-linux GNOME Shell extension proxy")?;
+    let proxy = verified_extension_proxy(&connection).await?;
     let json: String = proxy
         .call("GetMonitorLayout", &())
         .await
@@ -202,14 +200,7 @@ async fn extension_window_op<B: serde::Serialize + zbus::zvariant::DynamicType>(
     let connection = zbus::Connection::session()
         .await
         .context("failed to connect to session bus")?;
-    let proxy = Proxy::new(
-        &connection,
-        GNOME_SHELL_EXTENSION_SERVICE,
-        GNOME_SHELL_EXTENSION_OBJECT_PATH,
-        GNOME_SHELL_EXTENSION_SERVICE,
-    )
-    .await
-    .context("failed to create computer-use-linux GNOME Shell extension proxy")?;
+    let proxy = verified_extension_proxy(&connection).await?;
     let (ok, message): (bool, String) = proxy
         .call(method, body)
         .await
@@ -230,14 +221,7 @@ pub(crate) async fn activate_extension_window(window_id: u64) -> Result<()> {
     let connection = zbus::Connection::session()
         .await
         .context("failed to connect to session bus")?;
-    let proxy = Proxy::new(
-        &connection,
-        GNOME_SHELL_EXTENSION_SERVICE,
-        GNOME_SHELL_EXTENSION_OBJECT_PATH,
-        GNOME_SHELL_EXTENSION_SERVICE,
-    )
-    .await
-    .context("failed to create Codex GNOME Shell extension proxy")?;
+    let proxy = verified_extension_proxy(&connection).await?;
     let (ok, message): (bool, String) = proxy
         .call("ActivateWindow", &(window_id))
         .await
@@ -249,6 +233,81 @@ pub(crate) async fn activate_extension_window(window_id: u64) -> Result<()> {
     } else {
         bail!("Codex GNOME Shell extension refused activation: {message}");
     }
+}
+
+async fn verified_extension_proxy(connection: &zbus::Connection) -> Result<Proxy<'_>> {
+    let owner = verified_extension_owner(connection).await?;
+    Proxy::new(
+        connection,
+        owner,
+        GNOME_SHELL_EXTENSION_OBJECT_PATH,
+        GNOME_SHELL_EXTENSION_SERVICE,
+    )
+    .await
+    .context("failed to create verified computer-use-linux GNOME Shell extension proxy")
+}
+
+async fn verified_extension_owner(connection: &zbus::Connection) -> Result<OwnedUniqueName> {
+    let dbus = zbus::fdo::DBusProxy::new(connection)
+        .await
+        .context("failed to create session-bus identity proxy")?;
+    let extension_owner = dbus
+        .get_name_owner(BusName::try_from(GNOME_SHELL_EXTENSION_SERVICE)?)
+        .await
+        .context("failed to resolve the GNOME Shell extension bus owner")?;
+    let shell_owner = dbus
+        .get_name_owner(BusName::try_from(GNOME_SHELL_SERVICE)?)
+        .await
+        .context("failed to resolve the GNOME Shell bus owner")?;
+    ensure_extension_owner_matches_shell(extension_owner.as_str(), shell_owner.as_str())?;
+    Ok(extension_owner)
+}
+
+fn ensure_extension_owner_matches_shell(extension_owner: &str, shell_owner: &str) -> Result<()> {
+    if extension_owner != shell_owner {
+        bail!(
+            "GNOME Shell extension bus owner {extension_owner} does not match GNOME Shell owner {shell_owner}"
+        );
+    }
+    Ok(())
+}
+
+fn probe_verified_extension_owner() -> std::result::Result<String, String> {
+    let extension_owner = gdbus_name_owner(GNOME_SHELL_EXTENSION_SERVICE)?;
+    let shell_owner = gdbus_name_owner(GNOME_SHELL_SERVICE)?;
+    ensure_extension_owner_matches_shell(&extension_owner, &shell_owner)
+        .map_err(|error| error.to_string())?;
+    Ok(extension_owner)
+}
+
+fn gdbus_name_owner(name: &str) -> std::result::Result<String, String> {
+    let check = gdbus_call_check(
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus.GetNameOwner",
+        &[name],
+    );
+    if !check.ok {
+        return Err(format!(
+            "failed to resolve D-Bus owner for {name}: {}",
+            check.detail
+        ));
+    }
+    parse_gdbus_unique_name(&check.detail).ok_or_else(|| {
+        format!(
+            "D-Bus returned an invalid owner for {name}: {}",
+            check.detail
+        )
+    })
+}
+
+fn parse_gdbus_unique_name(output: &str) -> Option<String> {
+    let start = output.find("':")? + 1;
+    let remainder = &output[start..];
+    let end = remainder.find('\'')?;
+    let candidate = &remainder[..end];
+    OwnedUniqueName::try_from(candidate).ok()?;
+    Some(candidate.to_string())
 }
 
 pub(crate) fn window_from_properties(
@@ -394,5 +453,26 @@ fn run_probe_command(mut command: Command) -> ProbeCheck {
             ok: false,
             detail: error.to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_owner_must_match_shell_owner() {
+        assert!(ensure_extension_owner_matches_shell(":1.42", ":1.42").is_ok());
+        assert!(ensure_extension_owner_matches_shell(":1.42", ":1.99").is_err());
+    }
+
+    #[test]
+    fn parses_only_valid_gdbus_unique_name_results() {
+        assert_eq!(
+            parse_gdbus_unique_name("(':1.42',)"),
+            Some(":1.42".to_string())
+        );
+        assert_eq!(parse_gdbus_unique_name("('org.gnome.Shell',)"), None);
+        assert_eq!(parse_gdbus_unique_name("garbage"), None);
     }
 }

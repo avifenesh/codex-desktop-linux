@@ -24,7 +24,7 @@ use crate::windows::{
     GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND, KWIN_BACKEND,
 };
 use crate::ydotool;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rmcp::{
     handler::server::wrapper::{Json, Parameters},
     model::{CallToolResult, ContentBlock},
@@ -42,7 +42,6 @@ use std::{
     os::unix::{
         ffi::OsStrExt,
         fs::{FileTypeExt, MetadataExt, PermissionsExt},
-        net::UnixDatagram,
     },
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
@@ -59,6 +58,7 @@ use xkeysym::key as xkey;
 use zbus::{Connection as ZbusConnection, Proxy as ZbusProxy};
 
 const INPUT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_SCROLL_PAGES: f64 = 100.0;
 const YDOTOOL_TYPE_CHARS_PER_SECOND: u64 = 20;
 const KDE_CLIPBOARD_DBUS_TIMEOUT: Duration = Duration::from_secs(3);
 const KDE_KLIPPER_SERVICE: &str = "org.kde.klipper";
@@ -79,12 +79,16 @@ const SHELL_MAX_ENV_ENTRIES: usize = 64;
 const SHELL_MAX_ENV_BYTES: usize = 64 * 1024;
 const SHELL_RESPONSE_STREAM_BYTES: usize = 512 * 1024;
 
+/// Nodes and their app ownership must come from the same snapshot.
+#[derive(Default)]
+struct CachedAccessibilitySnapshot {
+    nodes: Vec<AccessibilityNode>,
+    pid: Option<u32>,
+}
+
 #[derive(Clone, Default)]
 pub struct ComputerUseLinux {
-    last_nodes: Arc<Mutex<Vec<AccessibilityNode>>>,
-    /// Pid the cached snapshot was taken for, when get_app_state had a target.
-    /// Element indices are only meaningful against that app (#167).
-    last_snapshot_pid: Arc<Mutex<Option<u32>>>,
+    last_snapshot: Arc<Mutex<CachedAccessibilitySnapshot>>,
     portal_pointer_session: Arc<Mutex<Option<PortalPointerSession>>>,
     portal_keyboard_session: Arc<Mutex<Option<PortalKeyboardSession>>>,
     /// Lazily-created uinput absolute pointer (preferred coordinate backend).
@@ -452,9 +456,10 @@ impl ComputerUseLinux {
             // match that can be another app entirely; recording the pid then
             // would let that app's index pass the target check instead of
             // taking the per-node owner lookup.
-            self.cache_snapshot(&accessibility_tree, tree_root_pid);
+            self.commit_snapshot(&accessibility_tree, tree_root_pid)
+                .await;
         } else {
-            self.clear_cached_nodes();
+            self.commit_snapshot(&[], None).await;
         }
         let mut message = if let Some(error) = &accessibility_error {
             format!("MCP registration is working, but AT-SPI tree extraction failed: {error}")
@@ -541,21 +546,20 @@ impl ComputerUseLinux {
             open_world_hint = true
         )
     )]
-    async fn screenshot(
-        &self,
-        Parameters(params): Parameters<ScreenshotParams>,
-    ) -> Result<CallToolResult, ErrorData> {
+    async fn screenshot(&self, Parameters(params): Parameters<ScreenshotParams>) -> CallToolResult {
+        match self.capture_screenshot(params).await {
+            Ok(result) => result,
+            Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))]),
+        }
+    }
+
+    async fn capture_screenshot(&self, params: ScreenshotParams) -> Result<CallToolResult> {
         let target = params.window_target();
         let target_window = match target.as_ref() {
             Some(target) => Some(
                 self.resolve_screenshot_window(target, params.raise_window.unwrap_or(true))
                     .await
-                    .map_err(|error| {
-                        ErrorData::internal_error(
-                            format!("targeted screenshot failed: {error:#}"),
-                            None,
-                        )
-                    })?,
+                    .context("targeted screenshot failed")?,
             ),
             None => None,
         };
@@ -568,7 +572,7 @@ impl ComputerUseLinux {
 
         let raw_capture = capture_screenshot_raw()
             .await
-            .map_err(|e| ErrorData::internal_error(format!("screenshot failed: {e}"), None))?;
+            .context("screenshot failed")?;
         self.cache_desktop_size(raw_capture.width, raw_capture.height);
 
         // Warn when the target window extends past the visible desktop: the
@@ -584,19 +588,9 @@ impl ComputerUseLinux {
                 let (x, y, width, height) = self
                     .window_crop_rect_for_capture(window, &raw_capture)
                     .await
-                    .map_err(|error| {
-                        ErrorData::internal_error(
-                            format!("targeted screenshot crop failed: {error:#}"),
-                            None,
-                        )
-                    })?;
+                    .context("targeted screenshot crop failed")?;
                 let (bytes, width, height) = crop_png(&raw_capture.bytes, x, y, width, height)
-                    .map_err(|error| {
-                        ErrorData::internal_error(
-                            format!("targeted screenshot crop failed: {error}"),
-                            None,
-                        )
-                    })?;
+                    .map_err(|error| anyhow::anyhow!("targeted screenshot crop failed: {error}"))?;
                 (
                     RawScreenshotCapture {
                         mime_type: raw_capture.mime_type,
@@ -610,10 +604,8 @@ impl ComputerUseLinux {
             }
             None => (raw_capture, false),
         };
-        let capture =
-            prepare_screenshot_payload(capture, params.screenshot_options()).map_err(|e| {
-                ErrorData::internal_error(format!("screenshot resize failed: {e}"), None)
-            })?;
+        let capture = prepare_screenshot_payload(capture, params.screenshot_options())
+            .context("screenshot resize failed")?;
 
         let mut caption = serde_json::json!({
             "width": capture.width,
@@ -1113,6 +1105,7 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<SetValueParams>,
     ) -> Json<ActionOutput> {
+        let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let received = Some(serde_json::json!(params.clone()));
         let object_ref = match self.resolve_object_ref(
             params.element_index,
@@ -1169,9 +1162,20 @@ impl ComputerUseLinux {
     )]
     async fn scroll(&self, Parameters(mut params): Parameters<ScrollParams>) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params.clone()));
+        let units = match scroll_units(params.pages) {
+            Ok(units) => units,
+            Err(message) => {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "scroll".to_string(),
+                    message,
+                    received,
+                });
+            }
+        };
         let input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let mut portal_target_point = None;
-        let units = ((params.pages.unwrap_or(1.0).abs().max(0.1) * 5.0).round() as i32).max(1);
         let mut target_pid = params.pid;
         // Raise/focus the target window first (parity with click) so wheel
         // events land on the intended app.
@@ -2169,8 +2173,8 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.7.7-linux-alpha1",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility. run_shell is absent unless CODEX_COMPUTER_USE_ENABLE_SHELL=1 or the standalone COMPUTER_USE_LINUX_ENABLE_SHELL=1 compatibility alias; when enabled it is same-user arbitrary host execution, not a sandbox, and hosts should require explicit approval."
+    version = "0.7.10-linux-alpha1",
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -3037,6 +3041,7 @@ struct ScrollParams {
     y: Option<i32>,
     direction: String,
     #[serde(default)]
+    #[schemars(range(min = -100, max = 100))]
     pages: Option<f64>,
     // Optional window target (parity with click): the window is raised/focused
     // before scrolling so the wheel events land on the intended app.
@@ -3056,6 +3061,16 @@ struct ScrollParams {
     /// Requires a window target; missing targets are rejected.
     #[serde(default)]
     relative: Option<bool>,
+}
+
+fn scroll_units(pages: Option<f64>) -> std::result::Result<i32, String> {
+    let pages = pages.unwrap_or(1.0);
+    if !pages.is_finite() || pages.abs() > MAX_SCROLL_PAGES {
+        return Err(format!(
+            "pages must be finite and have an absolute value no greater than {MAX_SCROLL_PAGES}"
+        ));
+    }
+    Ok(((pages.abs().max(0.1) * 5.0).round() as i32).max(1))
 }
 
 impl ScrollParams {
@@ -3916,16 +3931,24 @@ impl ComputerUseLinux {
         self.cache_snapshot(nodes, None);
     }
 
+    /// Readers may perform slow AT-SPI owner checks before resolving a click
+    /// or scroll again. Keep the snapshot stable for the whole input operation;
+    /// otherwise a checked index could resolve to a different app's node.
+    async fn commit_snapshot(&self, nodes: &[AccessibilityNode], target_pid: Option<u32>) {
+        let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        self.cache_snapshot(nodes, target_pid);
+    }
+
     fn cache_snapshot(&self, nodes: &[AccessibilityNode], target_pid: Option<u32>) {
-        if let Ok(mut cached) = self.last_nodes.lock() {
-            cached.clear();
-            cached.extend_from_slice(nodes);
-        }
-        if let Ok(mut pid) = self.last_snapshot_pid.lock() {
-            *pid = target_pid;
+        if let Ok(mut cached) = self.last_snapshot.lock() {
+            *cached = CachedAccessibilitySnapshot {
+                nodes: nodes.to_vec(),
+                pid: target_pid,
+            };
         }
     }
 
+    #[cfg(test)]
     fn clear_cached_nodes(&self) {
         self.cache_snapshot(&[], None);
     }
@@ -3943,7 +3966,11 @@ impl ComputerUseLinux {
         let Some(target_pid) = target_pid else {
             return Ok(());
         };
-        let snapshot_pid = self.last_snapshot_pid.lock().ok().and_then(|pid| *pid);
+        let snapshot_pid = self
+            .last_snapshot
+            .lock()
+            .ok()
+            .and_then(|snapshot| snapshot.pid);
         let owner_pid = match snapshot_pid {
             Some(pid) => Some(pid),
             None => object_ref_owner_pid(&node.object_ref).await.ok().flatten(),
@@ -4039,8 +4066,11 @@ impl ComputerUseLinux {
     }
 
     fn center_for_cached_node(&self, element_index: u32) -> Option<(i32, i32)> {
-        let cached = self.last_nodes.lock().ok()?;
-        let node = cached.iter().find(|node| node.index == element_index)?;
+        let cached = self.last_snapshot.lock().ok()?;
+        let node = cached
+            .nodes
+            .iter()
+            .find(|node| node.index == element_index)?;
         bounds_center(node.bounds.as_ref()?)
     }
 
@@ -4068,12 +4098,12 @@ impl ComputerUseLinux {
         selector: &ElementSelector<'_>,
         purpose: ElementResolvePurpose,
     ) -> std::result::Result<AccessibilityNode, String> {
-        let cached = self.last_nodes.lock().map_err(|_| {
+        let cached = self.last_snapshot.lock().map_err(|_| {
             "Could not read cached accessibility nodes. Call get_app_state and retry.".to_string()
         })?;
 
         if let Some(element_index) = element_index {
-            return cached
+            return cached.nodes
                 .iter()
                 .find(|node| node.index == element_index)
                 .cloned()
@@ -4091,7 +4121,7 @@ impl ComputerUseLinux {
             );
         }
 
-        resolve_semantic_node(cached.as_slice(), selector, purpose)
+        resolve_semantic_node(cached.nodes.as_slice(), selector, purpose)
     }
 
     async fn perform_element_action(
@@ -4099,6 +4129,7 @@ impl ComputerUseLinux {
         params: &ActionParams,
         requested_action: Option<&str>,
     ) -> Json<ActionOutput> {
+        let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let received = Some(serde_json::json!(params.clone()));
         let object_ref = match self.resolve_object_ref(
             params.element_index,
@@ -5343,9 +5374,9 @@ fn xdotool_pointer_button_code(button: Option<&str>) -> Option<&'static str> {
 
 /// Gap between XTEST wheel-button clicks, in milliseconds.
 ///
-/// xdotool's own default is 100ms. One page is five clicks and `pages` is
-/// not capped, so that default blows the flat input timeout past about 20
-/// pages. 12ms is the same pacing as `xdotool type`.
+/// xdotool's own default is 100ms. One page is five clicks and valid requests
+/// can ask for up to 100 pages, so 12ms keeps the bounded operation responsive
+/// while matching the pacing used by `xdotool type`.
 const XDOTOOL_SCROLL_CLICK_DELAY_MS: u64 = 12;
 
 /// X11 wheel buttons: 4 up, 5 down, 6 left, 7 right. `repeat` is the notch
@@ -5533,11 +5564,10 @@ async fn run_ydotool_drag(
 
 async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
     let support = ydotool::ensure_supported_async().await?;
+    let socket = ydotool::socket_path_for_command()?;
     let mut command = TokioCommand::new(&support.executable);
     command.args(args);
-    if let Some(socket) = ydotool_socket() {
-        command.env("YDOTOOL_SOCKET", socket);
-    }
+    command.env("YDOTOOL_SOCKET", socket);
     let output =
         crate::command_runner::output_with_timeout(command, "run ydotool", INPUT_COMMAND_TIMEOUT)
             .await
@@ -5555,11 +5585,10 @@ async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
 
 async fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String> {
     let support = ydotool::ensure_supported_async().await?;
+    let socket = ydotool::socket_path_for_command()?;
     let mut command = TokioCommand::new(&support.executable);
     command.args(["type", "--file", "-"]);
-    if let Some(socket) = ydotool_socket() {
-        command.env("YDOTOOL_SOCKET", socket);
-    }
+    command.env("YDOTOOL_SOCKET", socket);
     let output = crate::command_runner::output_with_stdin(
         command,
         "run ydotool type",
@@ -6151,27 +6180,11 @@ fn command_output_error(command: &str, output: Output) -> String {
     }
 }
 
-fn ydotool_socket() -> Option<String> {
-    if let Some(socket) = explicit_ydotool_socket() {
-        return Some(socket);
-    }
-
-    connectable_ydotool_socket_from(fallback_ydotool_socket_candidates())
-        .map(|path| path.display().to_string())
-}
-
 async fn ydotool_backend_available() -> bool {
     ydotool_backend_available_from(
-        ydotool_socket_connectable(),
+        ydotool::connectable_socket_path().is_ok(),
         ydotool::ensure_supported_async().await.is_ok(),
     )
-}
-
-fn ydotool_socket_connectable() -> bool {
-    if let Some(socket) = explicit_ydotool_socket() {
-        return ydotool_socket_connects(&PathBuf::from(socket));
-    }
-    connectable_ydotool_socket_from(fallback_ydotool_socket_candidates()).is_some()
 }
 
 fn ydotool_backend_available_from(socket_available: bool, cli_supported: bool) -> bool {
@@ -6180,39 +6193,6 @@ fn ydotool_backend_available_from(socket_available: bool, cli_supported: bool) -
 
 fn should_prefer_portal_backend_by_default(is_wayland: bool, ydotool_available: bool) -> bool {
     is_wayland && !ydotool_available
-}
-
-fn explicit_ydotool_socket() -> Option<String> {
-    if let Ok(socket) = env::var("YDOTOOL_SOCKET") {
-        let socket = socket.trim();
-        if !socket.is_empty() {
-            return Some(socket.to_string());
-        }
-    }
-    None
-}
-
-fn fallback_ydotool_socket_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(runtime) = env::var("XDG_RUNTIME_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| user_id().map(|uid| PathBuf::from(format!("/run/user/{uid}"))))
-    {
-        candidates.push(runtime.join(".ydotool_socket"));
-    }
-    candidates.push(PathBuf::from("/tmp/.ydotool_socket"));
-    candidates
-}
-
-fn connectable_ydotool_socket_from(candidates: Vec<PathBuf>) -> Option<PathBuf> {
-    candidates.into_iter().find(ydotool_socket_connects)
-}
-
-fn ydotool_socket_connects(path: &PathBuf) -> bool {
-    UnixDatagram::unbound()
-        .and_then(|socket| socket.connect(path))
-        .is_ok()
 }
 
 fn mouse_button_code(button: Option<&str>) -> String {
@@ -6430,15 +6410,6 @@ fn keycode_for_ascii(value: char) -> Option<u16> {
     }
 }
 
-fn user_id() -> Option<String> {
-    let output = Command::new("id").arg("-u").output().ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 fn list_process_apps() -> Vec<AppCandidate> {
     let output = Command::new("ps")
         .args(["-eo", "pid=,comm=,args="])
@@ -6496,6 +6467,39 @@ mod tests {
     use crate::atspi_tree::{AccessibilityAction, Bounds};
     use crate::windows::{WindowBounds, GNOME_SHELL_EXTENSION_BACKEND};
     use std::os::unix::fs::PermissionsExt;
+
+    /// Restores an environment variable when a test ends, including on panic.
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// The run_shell tests change the same process-wide variable, so they
+    /// take turns instead of racing each other under the parallel test runner.
+    static SHELL_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn completion_tool_is_explicitly_opt_in_and_has_side_effect_annotations() {
@@ -6555,28 +6559,6 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     use tokio::io::AsyncReadExt;
-
-    struct EnvVarGuard {
-        key: &'static str,
-        original: Option<std::ffi::OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, original }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match &self.original {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
 
     #[test]
     fn avatar_cursor_socket_path_is_instance_scoped_and_bounded() {
@@ -7567,6 +7549,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kde_clipboard_async_routing_prefers_focus_over_stale_terminal_selector() {
+        let target = WindowTarget {
+            tty: Some("/dev/pts/11".to_string()),
+            ..Default::default()
+        };
+        let window = window_info(
+            1,
+            Some("Browser"),
+            Some("firefox"),
+            Some("firefox"),
+            Some(100),
+        );
+        let focus = WindowFocusResult {
+            requested_window: window.clone(),
+            focused_window: Some(window),
+            exact_window_focused: true,
+            app_focused: true,
+            backend: KWIN_BACKEND.to_string(),
+            note: "test".to_string(),
+        };
+
+        assert_eq!(
+            kde_clipboard_paste_shortcut(&target, Some(&focus)).await,
+            KdeClipboardPasteShortcut::Standard
+        );
+    }
+
+    #[test]
+    fn kde_clipboard_routes_konsole_identity_to_terminal_paste() {
+        let window = window_info(
+            1,
+            Some("unflappable-donkey"),
+            Some("org.kde.konsole"),
+            Some("konsole"),
+            Some(100),
+        );
+
+        assert_eq!(
+            kde_clipboard_terminal_shortcut(&WindowTarget::default(), Some(&window)),
+            Some(TerminalPasteShortcut::CtrlShiftV)
+        );
+    }
+
+    #[test]
+    fn kde_clipboard_does_not_classify_terminal_words_in_browser_titles() {
+        let window = window_info(
+            1,
+            Some("xterm documentation"),
+            Some("firefox"),
+            Some("firefox"),
+            Some(100),
+        );
+
+        assert_eq!(
+            kde_clipboard_terminal_shortcut(&WindowTarget::default(), Some(&window)),
+            None
+        );
+    }
+
+    #[test]
+    fn kde_clipboard_pty_metadata_does_not_change_editor_paste() {
+        let mut window = window_info(
+            1,
+            Some("xterm integration test"),
+            Some("example-ide"),
+            Some("ExampleIde"),
+            Some(100),
+        );
+        window.terminal = Some(crate::terminal::TerminalWindowContext {
+            tty: "/dev/pts/11".to_string(),
+            root_process: crate::terminal::TerminalProcess {
+                pid: 200,
+                command_name: "bash".to_string(),
+                command_line: "bash".to_string(),
+                cwd: None,
+            },
+            active_process: None,
+            process_count: 1,
+            confidence: "high".to_string(),
+            match_reason: "one child PTY".to_string(),
+        });
+        let terminal = kde_clipboard_terminal_shortcut(&WindowTarget::default(), Some(&window));
+        assert_eq!(terminal, None);
+        assert_eq!(
+            kde_clipboard_shortcut_for_focus(terminal, None),
+            KdeClipboardPasteShortcut::Standard
+        );
+    }
+
+    #[tokio::test]
     async fn kde_clipboard_dbus_operation_times_out_when_pending() {
         let error = kde_clipboard_dbus_operation_with_timeout(
             "proxy creation",
@@ -7840,7 +7912,7 @@ mod tests {
                     .unwrap(),
                 ClickTarget::Coordinates(60, 40)
             ));
-            let mut node = backend.last_nodes.lock().unwrap()[0].clone();
+            let mut node = backend.last_snapshot.lock().unwrap().nodes[0].clone();
             for bounds in [
                 None,
                 Some(Bounds {
@@ -8033,6 +8105,38 @@ mod tests {
                 "1".to_string(),
                 "7".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn scroll_pages_are_bounded_before_unit_conversion() {
+        assert_eq!(scroll_units(None).unwrap(), 5);
+        assert_eq!(scroll_units(Some(1.0)).unwrap(), 5);
+        assert_eq!(scroll_units(Some(-1.0)).unwrap(), 5);
+        assert_eq!(scroll_units(Some(0.0)).unwrap(), 1);
+        assert_eq!(scroll_units(Some(0.1)).unwrap(), 1);
+        assert_eq!(scroll_units(Some(100.0)).unwrap(), 500);
+        assert_eq!(scroll_units(Some(-100.0)).unwrap(), 500);
+
+        for pages in [
+            100.000_001,
+            -100.000_001,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert!(scroll_units(Some(pages)).is_err(), "accepted {pages}");
+        }
+    }
+
+    #[test]
+    fn maximum_scroll_timeout_is_bounded() {
+        let repeat = u32::try_from(scroll_units(Some(MAX_SCROLL_PAGES)).unwrap()).unwrap();
+
+        assert_eq!(repeat, 500);
+        assert_eq!(
+            xdotool_scroll_timeout(repeat, XDOTOOL_SCROLL_CLICK_DELAY_MS),
+            Duration::from_secs(16)
         );
     }
 
@@ -8720,47 +8824,6 @@ mod tests {
     }
 
     #[test]
-    fn ydotool_socket_selection_rejects_legacy_stream_socket() {
-        let dir =
-            std::env::temp_dir().join(format!("codex-computer-use-server-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp server dir");
-        let stale_socket = dir.join("stale.sock");
-        std::fs::write(&stale_socket, b"not a socket").expect("write stale socket placeholder");
-        let usable_socket = dir.join("usable.sock");
-        let listener =
-            std::os::unix::net::UnixListener::bind(&usable_socket).expect("bind usable socket");
-
-        let selected = connectable_ydotool_socket_from(vec![stale_socket, usable_socket.clone()]);
-
-        assert!(selected.is_none());
-        drop(listener);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn ydotool_socket_selection_accepts_datagram_socket() {
-        let dir = std::env::temp_dir().join(format!(
-            "codex-computer-use-server-dgram-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp server dir");
-        let stale_socket = dir.join("stale.sock");
-        std::fs::write(&stale_socket, b"not a socket").expect("write stale socket placeholder");
-        let usable_socket = dir.join("usable.sock");
-        let datagram =
-            std::os::unix::net::UnixDatagram::bind(&usable_socket).expect("bind usable socket");
-
-        let selected = connectable_ydotool_socket_from(vec![stale_socket, usable_socket.clone()])
-            .expect("usable socket should be selected");
-
-        assert_eq!(selected, usable_socket);
-        drop(datagram);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn perform_action_defaults_to_primary_action_index() {
         assert_eq!(requested_or_primary_action(None), "0");
         assert_eq!(requested_or_primary_action(Some("   ")), "0");
@@ -8768,15 +8831,6 @@ mod tests {
             requested_or_primary_action(Some(" show-menu ")),
             "show-menu"
         );
-    }
-
-    #[test]
-    fn explicit_ydotool_socket_is_used_without_connectability_probe() {
-        let _guard = EnvVarGuard::set("YDOTOOL_SOCKET", " /does/not/exist.sock ");
-
-        let selected = explicit_ydotool_socket();
-
-        assert_eq!(selected.as_deref(), Some("/does/not/exist.sock"));
     }
 
     #[test]
@@ -9080,10 +9134,50 @@ mod tests {
         }
     }
 
-    #[test]
-    fn run_shell_router_matches_operator_opt_in() {
-        let router = ComputerUseLinux::default().mcp_tool_router();
-        assert_eq!(router.get("run_shell").is_some(), shell_execution_enabled());
+    #[tokio::test]
+    async fn shell_execution_clears_ambient_credentials_and_accepts_explicit_env() {
+        let _serial = SHELL_ENV_TEST_LOCK.lock().await;
+        let _enabled = EnvVarGuard::set(SHELL_ENABLE_ENV, "1");
+        let _credential = EnvVarGuard::set("OPENAI_API_KEY", "test-ambient-credential");
+        let output = execute_shell(RunShellParams {
+            command: "printf '%s|%s' \"${OPENAI_API_KEY-unset}\" \"$EXPLICIT_VALUE\"".into(),
+            cwd: None,
+            env: BTreeMap::from([("EXPLICIT_VALUE".into(), "test-explicit-value".into())]),
+            timeout_seconds: Some(2),
+        })
+        .await;
+        assert!(output.ok, "{:?}", output.error);
+        assert_eq!(output.stdout, "unset|test-explicit-value");
+        assert_eq!(output.exit_code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn shell_execution_disabled_never_runs_requested_command() {
+        async fn assert_refused() {
+            let output = execute_shell(RunShellParams {
+                command: "printf must-not-run".into(),
+                cwd: None,
+                env: BTreeMap::new(),
+                timeout_seconds: None,
+            })
+            .await;
+            assert!(!output.ok);
+            assert!(output.stdout.is_empty());
+            assert!(output
+                .error
+                .unwrap()
+                .contains("shell execution is disabled"));
+        }
+
+        let _serial = SHELL_ENV_TEST_LOCK.lock().await;
+        {
+            let _disabled = EnvVarGuard::set(SHELL_ENABLE_ENV, "0");
+            assert_refused().await;
+        }
+        {
+            let _unset = EnvVarGuard::unset(SHELL_ENABLE_ENV);
+            assert_refused().await;
+        }
     }
 
     #[test]
@@ -9307,14 +9401,98 @@ mod node_target_scope_tests {
         assert!(backend.check_node_target(&node, Some(1)).await.is_ok());
     }
 
+    #[tokio::test]
+    async fn concurrent_snapshot_commit_waits_until_checked_action_finishes() {
+        let backend = ComputerUseLinux::default();
+        let mut original = cached_node(2, ":1.9/org/a11y/atspi/accessible/42");
+        original.bounds = Some(Bounds {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 40,
+        });
+        original.actions = vec![AccessibilityAction {
+            index: 0,
+            name: "click".into(),
+            description: String::new(),
+            keybinding: String::new(),
+        }];
+        backend
+            .commit_snapshot(std::slice::from_ref(&original), Some(10))
+            .await;
+        // Model the click/scroll operation: it holds this same lock while its
+        // target ownership check awaits and until the action has been resolved.
+        let input_guard = Arc::clone(&backend.input_operation_lock).lock_owned().await;
+        let checked_node = backend
+            .cached_node_for(
+                Some(2),
+                &ElementSelector::default(),
+                ElementResolvePurpose::Click,
+            )
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let writer_backend = backend.clone();
+        let writer_barrier = Arc::clone(&barrier);
+        let writer = tokio::spawn(async move {
+            let replacement = cached_node(2, ":1.20/org/a11y/atspi/accessible/99");
+            writer_barrier.wait().await;
+            writer_backend
+                .commit_snapshot(&[replacement], Some(20))
+                .await;
+        });
+        barrier.wait().await;
+        tokio::task::yield_now().await;
+        assert!(
+            !writer.is_finished(),
+            "snapshot publication must wait for input"
+        );
+        assert!(backend
+            .check_node_target(&checked_node, Some(10))
+            .await
+            .is_ok());
+        let params = ClickParams {
+            element_index: Some(2),
+            ..Default::default()
+        };
+        assert!(matches!(backend.resolve_click_target(&params).unwrap(),
+            ClickTarget::PrimaryAction { object_ref, .. } if object_ref == original.object_ref));
+        assert_eq!(
+            backend
+                .resolve_optional_target_point(None, None, Some(2))
+                .unwrap(),
+            Some((60, 40))
+        );
+        // perform_action/set_value resolve the same snapshot while holding the
+        // input lock; their explicit object identifiers remain independent.
+        for purpose in [
+            ElementResolvePurpose::Action,
+            ElementResolvePurpose::SetValue,
+        ] {
+            assert_eq!(
+                backend
+                    .resolve_object_ref(Some(2), None, &ElementSelector::default(), purpose)
+                    .unwrap(),
+                original.object_ref
+            );
+        }
+        drop(input_guard);
+        writer.await.unwrap();
+        let snapshot = backend.last_snapshot.lock().unwrap();
+        assert_eq!(snapshot.pid, Some(20));
+        assert_eq!(
+            snapshot.nodes[0].object_ref,
+            ":1.20/org/a11y/atspi/accessible/99"
+        );
+    }
+
     #[test]
     fn a_new_snapshot_replaces_the_recorded_pid() {
         let backend = ComputerUseLinux::default();
         backend.cache_snapshot(&[], Some(10));
         backend.cache_snapshot(&[], None);
-        assert_eq!(*backend.last_snapshot_pid.lock().unwrap(), None);
+        assert_eq!(backend.last_snapshot.lock().unwrap().pid, None);
         backend.cache_snapshot(&[], Some(11));
         backend.clear_cached_nodes();
-        assert_eq!(*backend.last_snapshot_pid.lock().unwrap(), None);
+        assert_eq!(backend.last_snapshot.lock().unwrap().pid, None);
     }
 }

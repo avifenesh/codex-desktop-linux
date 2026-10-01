@@ -5,8 +5,6 @@ use cosmic_protocols::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use wayland_client::{
     event_created_child,
     globals::{registry_queue_init, GlobalListContents},
@@ -22,7 +20,6 @@ use wayland_protocols_wlr::output_management::v1::client::{
 
 const HELP: &str = "codex-computer-use-cosmic\n\nUsage:\n  codex-computer-use-cosmic probe\n  codex-computer-use-cosmic list-windows\n  codex-computer-use-cosmic focused-window\n  codex-computer-use-cosmic monitor-layout\n  codex-computer-use-cosmic activate-window --window-id <id>";
 const BACKEND: &str = "cosmic-wayland";
-const ACTIVATION_STATE_TTL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WindowInfo {
@@ -59,12 +56,6 @@ struct ProbeOutput {
 struct ActivationOutput {
     ok: bool,
     detail: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ActivationState {
-    window_id: u64,
-    timestamp_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -216,29 +207,11 @@ fn collect_windows() -> Result<Vec<WindowInfo>> {
 }
 
 fn focused_window() -> Result<Option<WindowInfo>> {
-    let snapshot = Snapshot::collect()?;
-    if let Some(window) = snapshot.windows().into_iter().find(|window| window.focused) {
-        clear_activation_state();
-        return Ok(Some(window));
-    }
+    Ok(protocol_focused_window(Snapshot::collect()?.windows()))
+}
 
-    let Some(state) = read_activation_state() else {
-        return Ok(None);
-    };
-
-    if state_is_stale(&state) {
-        clear_activation_state();
-        return Ok(None);
-    }
-
-    let mut window = snapshot
-        .windows()
-        .into_iter()
-        .find(|window| window.window_id == state.window_id);
-    if let Some(window) = window.as_mut() {
-        window.focused = true;
-    }
-    Ok(window)
+fn protocol_focused_window(windows: Vec<WindowInfo>) -> Option<WindowInfo> {
+    windows.into_iter().find(|window| window.focused)
 }
 
 fn monitor_layout() -> Result<Vec<MonitorInfo>> {
@@ -248,7 +221,6 @@ fn monitor_layout() -> Result<Vec<MonitorInfo>> {
 fn activate_window(window_id: u64) -> Result<ActivationOutput> {
     let mut snapshot = Snapshot::collect()?;
     snapshot.activate(window_id)?;
-    write_activation_state(window_id)?;
     Ok(ActivationOutput {
         ok: true,
         detail: format!("Requested COSMIC activation for window_id {window_id}."),
@@ -785,49 +757,6 @@ fn print_json<T: Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
-fn activation_state_path() -> PathBuf {
-    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime_dir).join("codex-computer-use-cosmic-last-activation.json")
-    } else {
-        std::env::temp_dir().join("codex-computer-use-cosmic-last-activation.json")
-    }
-}
-
-fn write_activation_state(window_id: u64) -> Result<()> {
-    let state = ActivationState {
-        window_id,
-        timestamp_ms: now_timestamp_ms()?,
-    };
-    let path = activation_state_path();
-    let json = serde_json::to_vec(&state).context("failed to serialize activation state")?;
-    std::fs::write(&path, json)
-        .with_context(|| format!("failed to write activation state to {}", path.display()))
-}
-
-fn read_activation_state() -> Option<ActivationState> {
-    let path = activation_state_path();
-    let contents = std::fs::read(&path).ok()?;
-    serde_json::from_slice(&contents).ok()
-}
-
-fn clear_activation_state() {
-    let _ = std::fs::remove_file(activation_state_path());
-}
-
-fn state_is_stale(state: &ActivationState) -> bool {
-    let Ok(now_ms) = now_timestamp_ms() else {
-        return false;
-    };
-    now_ms.saturating_sub(state.timestamp_ms) > ACTIVATION_STATE_TTL.as_millis() as u64
-}
-
-fn now_timestamp_ms() -> Result<u64> {
-    Ok(SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock is before UNIX_EPOCH")?
-        .as_millis() as u64)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -956,23 +885,32 @@ mod tests {
     }
 
     #[test]
-    fn activation_state_expires_after_ttl() {
-        let state = ActivationState {
-            window_id: 7,
-            timestamp_ms: now_timestamp_ms().unwrap()
-                - (ACTIVATION_STATE_TTL.as_millis() as u64 + 1),
-        };
+    fn focus_selection_requires_compositor_activated_state() {
+        let windows = vec![test_window(7, false), test_window(9, false)];
 
-        assert!(state_is_stale(&state));
+        assert!(protocol_focused_window(windows).is_none());
     }
 
     #[test]
-    fn activation_state_is_fresh_within_ttl() {
-        let state = ActivationState {
-            window_id: 7,
-            timestamp_ms: now_timestamp_ms().unwrap(),
-        };
+    fn focus_selection_returns_compositor_activated_window() {
+        let windows = vec![test_window(7, false), test_window(9, true)];
 
-        assert!(!state_is_stale(&state));
+        assert_eq!(protocol_focused_window(windows).unwrap().window_id, 9);
+    }
+
+    fn test_window(window_id: u64, focused: bool) -> WindowInfo {
+        WindowInfo {
+            window_id,
+            title: None,
+            app_id: None,
+            wm_class: None,
+            pid: None,
+            bounds: None,
+            workspace: None,
+            focused,
+            hidden: false,
+            client_type: Some("wayland".to_string()),
+            backend: BACKEND.to_string(),
+        }
     }
 }
