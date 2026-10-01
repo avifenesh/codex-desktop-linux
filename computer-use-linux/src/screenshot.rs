@@ -1,5 +1,5 @@
 use crate::x11_display::{is_native_x11_session, with_x11_display, X11_CAPTURE_TIMEOUT};
-use crate::{diagnostics::hydrate_session_bus_env, identity};
+use crate::{diagnostics::hydrate_session_bus_env, windowing::backends::gnome};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::StreamExt;
@@ -388,14 +388,7 @@ async fn capture_with_gnome_extension() -> Result<RawScreenshotCapture> {
     let connection = zbus::Connection::session()
         .await
         .context("failed to connect to session bus")?;
-    let proxy = Proxy::new(
-        &connection,
-        identity::DBUS_SERVICE,
-        identity::DBUS_OBJECT_PATH,
-        identity::DBUS_SERVICE,
-    )
-    .await
-    .context("failed to create Codex GNOME Shell extension proxy")?;
+    let proxy = gnome::verified_extension_proxy(&connection).await?;
     let (ok, message): (bool, String) = match proxy.call("CaptureScreenshot", &(filename)).await {
         Ok(result) => result,
         Err(error) => {
