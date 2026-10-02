@@ -423,11 +423,21 @@ impl KwinWindowCallback {
 
 fn temporary_kwin_plugin_name() -> Result<String> {
     let pid = std::process::id();
-    let sequence = KWIN_PLUGIN_SEQUENCE
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            value.checked_add(1)
-        })
-        .map_err(|_| anyhow::anyhow!("temporary KWin plugin sequence exhausted"))?;
+    let mut sequence = KWIN_PLUGIN_SEQUENCE.load(Ordering::Relaxed);
+    loop {
+        let next = sequence
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("temporary KWin plugin sequence exhausted"))?;
+        match KWIN_PLUGIN_SEQUENCE.compare_exchange_weak(
+            sequence,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(observed) => sequence = observed,
+        }
+    }
     let mut nonce = [0_u8; 16];
     getrandom::fill(&mut nonce).map_err(|error| {
         anyhow::anyhow!("failed to generate temporary KWin plugin nonce: {error}")

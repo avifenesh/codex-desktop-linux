@@ -5,7 +5,7 @@ use std::{
     fs, io,
     os::unix::{
         ffi::{OsStrExt, OsStringExt},
-        fs::{DirBuilderExt, MetadataExt, PermissionsExt},
+        fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt},
         net::UnixDatagram,
     },
     path::{Path, PathBuf},
@@ -25,6 +25,82 @@ const PROBE_DIRECTORY_ATTEMPTS: usize = 8;
 const PROBE_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const FAILED_PROBE_CACHE_TTL: Duration = Duration::from_secs(5);
 const UNSUPPORTED_MESSAGE: &str = "unsupported ydotool CLI; Computer Use requires ydotool 1.0.3 or newer with raw key events, wheel movement, stdin typing, and absolute mouse movement";
+const YDOTOOL_SOCKET_NAME: &str = ".ydotool_socket";
+
+/// Resolve the socket used for real input. An explicit `YDOTOOL_SOCKET` is an
+/// operator trust override; implicit discovery is restricted to an owner-only
+/// runtime directory and socket so a different local UID cannot capture input.
+pub(crate) fn socket_path_for_command() -> Result<PathBuf, String> {
+    if let Ok(socket) = env::var("YDOTOOL_SOCKET") {
+        let socket = socket.trim();
+        if !socket.is_empty() {
+            return Ok(PathBuf::from(socket));
+        }
+    }
+
+    let uid = unsafe { libc::geteuid() };
+    implicit_socket_path(env::var_os("XDG_RUNTIME_DIR").as_deref(), uid)
+}
+
+pub(crate) fn connectable_socket_path() -> Result<PathBuf, String> {
+    let path = socket_path_for_command()?;
+    UnixDatagram::unbound()
+        .and_then(|socket| socket.connect(&path))
+        .map_err(|error| format!("{}: datagram: {error}", path.display()))?;
+    Ok(path)
+}
+
+fn implicit_socket_path(runtime_dir: Option<&OsStr>, uid: libc::uid_t) -> Result<PathBuf, String> {
+    let runtime_dir = runtime_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{uid}")));
+    validate_private_runtime_dir(&runtime_dir, uid)?;
+    let socket = runtime_dir.join(YDOTOOL_SOCKET_NAME);
+    validate_private_socket(&socket, uid)?;
+    Ok(socket)
+}
+
+fn validate_private_runtime_dir(path: &Path, uid: libc::uid_t) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!(
+            "ydotool runtime directory is not absolute: {}",
+            path.display()
+        ));
+    }
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "ydotool runtime path is not a real directory: {}",
+            path.display()
+        ));
+    }
+    if metadata.uid() != uid || metadata.permissions().mode() & 0o022 != 0 {
+        return Err(format!(
+            "ydotool runtime directory must be owned by uid {uid} and not group/world-writable: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_private_socket(path: &Path, uid: libc::uid_t) -> Result<(), String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() {
+        return Err(format!(
+            "ydotool path is not a real Unix socket: {}",
+            path.display()
+        ));
+    }
+    if metadata.uid() != uid || metadata.permissions().mode() & 0o077 != 0 {
+        return Err(format!(
+            "ydotool socket must be owned by uid {uid} with no group/other access: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
 
 struct ProbeSocket {
     _socket: UnixDatagram,
@@ -566,6 +642,72 @@ esac
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
             .expect("make fake ydotool executable");
         path
+    }
+
+    fn bind_test_datagram(path: &Path) -> Option<UnixDatagram> {
+        match UnixDatagram::bind(path) {
+            Ok(socket) => Some(socket),
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping Unix datagram assertion in restricted sandbox: {error}");
+                None
+            }
+            Err(error) => panic!("bind datagram socket: {error}"),
+        }
+    }
+
+    #[test]
+    fn implicit_socket_requires_private_runtime_directory_and_socket() {
+        let root = TestDirectory::new("implicit-socket");
+        let socket_path = root.0.join(YDOTOOL_SOCKET_NAME);
+        let Some(socket) = bind_test_datagram(&socket_path) else {
+            return;
+        };
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+            .expect("secure socket");
+        let uid = unsafe { libc::geteuid() };
+
+        assert_eq!(
+            implicit_socket_path(Some(root.0.as_os_str()), uid).unwrap(),
+            socket_path
+        );
+
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666))
+            .expect("make socket unsafe");
+        assert!(implicit_socket_path(Some(root.0.as_os_str()), uid).is_err());
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+            .expect("restore socket mode");
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o777))
+            .expect("make runtime directory unsafe");
+        assert!(implicit_socket_path(Some(root.0.as_os_str()), uid).is_err());
+        drop(socket);
+    }
+
+    #[test]
+    fn implicit_socket_rejects_shared_tmp_and_wrong_owner() {
+        let uid = unsafe { libc::geteuid() };
+        assert!(implicit_socket_path(Some(OsStr::new("/tmp")), uid).is_err());
+
+        let root = TestDirectory::new("wrong-owner");
+        let socket_path = root.0.join(YDOTOOL_SOCKET_NAME);
+        let Some(_socket) = bind_test_datagram(&socket_path) else {
+            return;
+        };
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+            .expect("secure socket");
+        assert!(implicit_socket_path(Some(root.0.as_os_str()), uid.saturating_add(1)).is_err());
+    }
+
+    #[test]
+    fn implicit_socket_rejects_symlinked_runtime_directory() {
+        let root = TestDirectory::new("symlink-runtime");
+        let real = root.0.join("real");
+        let link = root.0.join("link");
+        fs::create_dir(&real).expect("create real runtime directory");
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o700))
+            .expect("secure real runtime directory");
+        std::os::unix::fs::symlink(&real, &link).expect("create runtime symlink");
+
+        assert!(implicit_socket_path(Some(link.as_os_str()), unsafe { libc::geteuid() }).is_err());
     }
 
     #[test]

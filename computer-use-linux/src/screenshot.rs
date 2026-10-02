@@ -1,5 +1,5 @@
 use crate::x11_display::{is_native_x11_session, with_x11_display, X11_CAPTURE_TIMEOUT};
-use crate::{diagnostics::hydrate_session_bus_env, identity};
+use crate::{diagnostics::hydrate_session_bus_env, windowing::backends::gnome};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::StreamExt;
@@ -9,8 +9,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs,
-    io::Cursor,
+    fs::{self, OpenOptions},
+    io::{Cursor, Read},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -18,12 +19,18 @@ use std::{
 use tokio::process::Command;
 use zbus::{
     message::{Message, Type as MessageType},
+    names::{BusName, OwnedUniqueName, WellKnownName},
     zvariant::{OwnedObjectPath, OwnedValue, Value},
     MatchRule, MessageStream, Proxy,
 };
 
+const PORTAL_DESKTOP_SERVICE: &str = "org.freedesktop.portal.Desktop";
+const PORTAL_DESKTOP_PATH: &str = "/org/freedesktop/portal/desktop";
+const PORTAL_SCREENSHOT_INTERFACE: &str = "org.freedesktop.portal.Screenshot";
 const PORTAL_REQUEST_INTERFACE: &str = "org.freedesktop.portal.Request";
 const PORTAL_REQUEST_PATH_NAMESPACE: &str = "/org/freedesktop/portal/desktop/request";
+const MAX_SCREENSHOT_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SCREENSHOT_SOURCE_PIXELS: u64 = 128 * 1024 * 1024;
 
 pub const DEFAULT_SCREENSHOT_MAX_DIMENSION: u32 = 1920;
 pub const DEFAULT_SCREENSHOT_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -381,14 +388,7 @@ async fn capture_with_gnome_extension() -> Result<RawScreenshotCapture> {
     let connection = zbus::Connection::session()
         .await
         .context("failed to connect to session bus")?;
-    let proxy = Proxy::new(
-        &connection,
-        identity::DBUS_SERVICE,
-        identity::DBUS_OBJECT_PATH,
-        identity::DBUS_SERVICE,
-    )
-    .await
-    .context("failed to create Codex GNOME Shell extension proxy")?;
+    let proxy = gnome::verified_extension_proxy(&connection).await?;
     let (ok, message): (bool, String) = match proxy.call("CaptureScreenshot", &(filename)).await {
         Ok(result) => result,
         Err(error) => {
@@ -413,16 +413,17 @@ async fn capture_with_portal() -> Result<RawScreenshotCapture> {
     let connection = zbus::Connection::session()
         .await
         .context("failed to connect to session bus")?;
+    let portal_owner = portal_desktop_owner(&connection).await?;
     let token = request_token();
     // Some portals rewrite the request handle, so subscribe before calling Screenshot
     // and filter by the returned handle instead of subscribing after the call.
-    let mut response_stream = portal_response_stream(&connection).await?;
+    let mut response_stream = portal_response_stream(&connection, &portal_owner).await?;
 
     let portal_proxy = Proxy::new(
         &connection,
-        "org.freedesktop.portal.Desktop",
-        "/org/freedesktop/portal/desktop",
-        "org.freedesktop.portal.Screenshot",
+        portal_owner.clone(),
+        PORTAL_DESKTOP_PATH,
+        PORTAL_SCREENSHOT_INTERFACE,
     )
     .await
     .context("failed to create XDG portal screenshot proxy")?;
@@ -436,7 +437,7 @@ async fn capture_with_portal() -> Result<RawScreenshotCapture> {
 
     let (response_code, results) = tokio::time::timeout(
         Duration::from_secs(20),
-        wait_for_portal_response(&mut response_stream, handle.as_str()),
+        wait_for_portal_response(&mut response_stream, handle.as_str(), portal_owner.as_str()),
     )
     .await
     .context("timed out waiting for XDG portal screenshot response")??;
@@ -513,9 +514,26 @@ async fn capture_with_gnome_screenshot() -> Result<RawScreenshotCapture> {
     .await
 }
 
-async fn portal_response_stream(connection: &zbus::Connection) -> Result<MessageStream> {
+async fn portal_desktop_owner(connection: &zbus::Connection) -> Result<OwnedUniqueName> {
+    let dbus = zbus::fdo::DBusProxy::new(connection)
+        .await
+        .context("failed to create session-bus identity proxy")?;
+    let _: u32 = dbus
+        .start_service_by_name(WellKnownName::try_from(PORTAL_DESKTOP_SERVICE)?, 0)
+        .await
+        .context("failed to activate the XDG desktop portal")?;
+    dbus.get_name_owner(BusName::try_from(PORTAL_DESKTOP_SERVICE)?)
+        .await
+        .context("failed to resolve the XDG desktop portal owner")
+}
+
+async fn portal_response_stream(
+    connection: &zbus::Connection,
+    portal_owner: &OwnedUniqueName,
+) -> Result<MessageStream> {
     let response_rule = MatchRule::builder()
         .msg_type(MessageType::Signal)
+        .sender(portal_owner.clone())?
         .interface(PORTAL_REQUEST_INTERFACE)?
         .member("Response")?
         .path_namespace(PORTAL_REQUEST_PATH_NAMESPACE)?
@@ -529,6 +547,7 @@ async fn portal_response_stream(connection: &zbus::Connection) -> Result<Message
 async fn wait_for_portal_response(
     response_stream: &mut MessageStream,
     request_path: &str,
+    portal_owner: &str,
 ) -> Result<(u32, HashMap<String, OwnedValue>)> {
     loop {
         let response = response_stream
@@ -537,7 +556,7 @@ async fn wait_for_portal_response(
             .context("XDG portal screenshot response stream ended")?
             .context("XDG portal screenshot response stream failed")?;
 
-        if !portal_response_matches_path(&response, request_path) {
+        if !portal_response_matches(&response, request_path, portal_owner) {
             continue;
         }
 
@@ -548,11 +567,14 @@ async fn wait_for_portal_response(
     }
 }
 
-fn portal_response_matches_path(response: &Message, request_path: &str) -> bool {
-    response
-        .header()
-        .path()
-        .is_some_and(|path| path.as_str() == request_path)
+fn portal_response_matches(response: &Message, request_path: &str, portal_owner: &str) -> bool {
+    let header = response.header();
+    header
+        .sender()
+        .is_some_and(|sender| sender.as_str() == portal_owner)
+        && header
+            .path()
+            .is_some_and(|path| path.as_str() == request_path)
 }
 
 async fn read_png_as_capture(
@@ -568,8 +590,34 @@ async fn read_png_as_capture(
 }
 
 fn read_png_as_capture_inner(path: &Path, source: &str) -> Result<RawScreenshotCapture> {
-    let bytes = fs::read(path)
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("failed to open screenshot file {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect screenshot file {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!("screenshot path is not a regular file: {}", path.display());
+    }
+    if metadata.len() > MAX_SCREENSHOT_SOURCE_BYTES {
+        bail!(
+            "screenshot file is {} bytes, over the {}-byte source limit",
+            metadata.len(),
+            MAX_SCREENSHOT_SOURCE_BYTES
+        );
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_SCREENSHOT_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)
         .with_context(|| format!("failed to read screenshot file {}", path.display()))?;
+    if bytes.len() as u64 > MAX_SCREENSHOT_SOURCE_BYTES {
+        bail!(
+            "screenshot file grew beyond the {}-byte source limit",
+            MAX_SCREENSHOT_SOURCE_BYTES
+        );
+    }
     if bytes.is_empty() {
         bail!("screenshot file was empty: {}", path.display());
     }
@@ -701,6 +749,12 @@ fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
     if width == 0 || height == 0 {
         bail!("screenshot PNG had invalid dimensions {width}x{height}");
     }
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > MAX_SCREENSHOT_SOURCE_PIXELS {
+        bail!(
+            "screenshot PNG has {pixels} pixels, over the {MAX_SCREENSHOT_SOURCE_PIXELS}-pixel source limit"
+        );
+    }
     Ok((width, height))
 }
 
@@ -708,7 +762,11 @@ fn file_uri_to_path(uri: &str) -> Result<PathBuf> {
     let Some(rest) = uri.strip_prefix("file://") else {
         bail!("unsupported screenshot uri: {uri}");
     };
-    Ok(PathBuf::from(percent_decode(rest)))
+    let path = PathBuf::from(percent_decode(rest));
+    if !path.is_absolute() {
+        bail!("screenshot uri did not contain an absolute file path: {uri}");
+    }
+    Ok(path)
 }
 
 fn percent_decode(value: &str) -> String {
@@ -816,6 +874,30 @@ mod tests {
             file_uri_to_path("file:///tmp/Codex%20Screenshot.png").unwrap(),
             PathBuf::from("/tmp/Codex Screenshot.png")
         );
+    }
+
+    #[test]
+    fn file_uri_requires_an_absolute_path() {
+        assert!(file_uri_to_path("file://relative/path.png").is_err());
+    }
+
+    #[test]
+    fn portal_response_requires_the_pinned_sender_and_exact_path() {
+        let request_path = "/org/freedesktop/portal/desktop/request/1_7/token";
+        let response = Message::signal(request_path, PORTAL_REQUEST_INTERFACE, "Response")
+            .unwrap()
+            .sender(":1.42")
+            .unwrap()
+            .build(&())
+            .unwrap();
+
+        assert!(portal_response_matches(&response, request_path, ":1.42"));
+        assert!(!portal_response_matches(&response, request_path, ":1.99"));
+        assert!(!portal_response_matches(
+            &response,
+            "/org/freedesktop/portal/desktop/request/1_7/other",
+            ":1.42"
+        ));
     }
 
     #[test]
@@ -1001,6 +1083,46 @@ mod tests {
         assert!(error.to_string().contains("screenshot file was empty"));
         assert!(path.exists());
         let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn screenshot_reader_rejects_symlinks() {
+        let target = test_path("symlink-target");
+        let link = test_path("symlink-link");
+        fs::write(&target, valid_png(1, 1)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let error = read_png_as_capture(link.clone(), "test", ScreenshotCleanup::Preserve)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("failed to open screenshot file"));
+        let _ = fs::remove_file(link);
+        let _ = fs::remove_file(target);
+    }
+
+    #[tokio::test]
+    async fn screenshot_reader_rejects_oversized_source_files() {
+        let path = test_path("oversized-source");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_SCREENSHOT_SOURCE_BYTES + 1).unwrap();
+
+        let error = read_png_as_capture(path.clone(), "test", ScreenshotCleanup::Preserve)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("over the"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn png_dimensions_reject_decompression_bomb_dimensions() {
+        let png = valid_png(u32::MAX, u32::MAX);
+
+        assert!(png_dimensions(&png)
+            .unwrap_err()
+            .to_string()
+            .contains("pixel source limit"));
     }
 
     #[tokio::test]
