@@ -343,13 +343,16 @@ impl HostState {
 }
 
 fn try_reserve_queue_bytes(counter: &AtomicUsize, bytes: usize, max_bytes: usize) -> bool {
-    counter
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            current
-                .checked_add(bytes)
-                .filter(|total| *total <= max_bytes)
-        })
-        .is_ok()
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        let Some(total) = current.checked_add(bytes).filter(|total| *total <= max_bytes) else {
+            return false;
+        };
+        match counter.compare_exchange_weak(current, total, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1416,6 +1419,17 @@ fn log(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_byte_reservation_is_bounded_and_does_not_overflow() {
+        let counter = AtomicUsize::new(3);
+
+        assert!(try_reserve_queue_bytes(&counter, 5, 8));
+        assert_eq!(counter.load(Ordering::Acquire), 8);
+        assert!(!try_reserve_queue_bytes(&counter, 1, 8));
+        assert!(!try_reserve_queue_bytes(&counter, usize::MAX, usize::MAX));
+        assert_eq!(counter.load(Ordering::Acquire), 8);
+    }
 
     #[test]
     fn socket_directory_default_is_scoped_by_uid() {
