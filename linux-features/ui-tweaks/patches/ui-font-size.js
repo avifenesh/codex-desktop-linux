@@ -7,7 +7,7 @@ const DEFAULT_MAX_UI_FONT_SIZE = 24;
 const MAX_CONFIGURABLE_UI_FONT_SIZE = 64;
 const MIN_EXTENDED_UI_FONT_SIZE = 17;
 const RUNTIME_MARKER = "codex-linux-ui-font-size-max";
-const EXPECTED_FONT_SIZE_BUNDLE_COUNT = 3;
+const EXPECTED_FONT_SIZE_BUNDLE_COUNT = 4;
 const UPSTREAM_FONT_SIZE_LIMITS_PATTERN =
   /([A-Za-z_$][\w$]*)=\{sans:\{min:(11),max:(16)\},code:\{min:(8),max:(24)\}\}/g;
 const APPLIED_FONT_SIZE_LIMITS_PATTERN =
@@ -155,7 +155,7 @@ function findUiFontSizeBundles(extractedDir) {
   if (
     candidates.length !== EXPECTED_FONT_SIZE_BUNDLE_COUNT ||
     buildCount !== 2 ||
-    webviewCount !== 1 ||
+    webviewCount !== 2 ||
     states.has("drifted") ||
     states.size !== 1 ||
     appliedMaxes.size > 1

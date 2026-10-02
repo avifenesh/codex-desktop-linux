@@ -192,6 +192,7 @@ function createUiFontSizeExtractedApp() {
     path.join(buildDir, "src-fixture.js"),
     path.join(buildDir, "worker.js"),
     path.join(webviewDir, "app-shared-fixture.js"),
+    path.join(webviewDir, "settings-fixture.js"),
   ];
   for (const target of targets) {
     fs.writeFileSync(target, uiFontSizeBundleFixture());
@@ -324,7 +325,7 @@ test("UI font size tweak raises the shared input and schema maximum", () => {
   assert.equal(applyUiFontSizePatch(patched, uiFontSizeContext()), patched);
 });
 
-test("UI font size tweak atomically patches all three runtime registries", () => {
+test("UI font size tweak atomically patches all four runtime registries", () => {
   const { extractedDir, targets } = createUiFontSizeExtractedApp();
   try {
     const discovery = findUiFontSizeBundles(extractedDir);
