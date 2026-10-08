@@ -483,8 +483,9 @@ async function defaultMaterializePackage(request) {
       );
       let packResult;
       try {
-        const packResults = JSON.parse(packOutput);
-        if (!Array.isArray(packResults) || packResults.length !== 1) {
+        const packed = JSON.parse(packOutput);
+        const packResults = Array.isArray(packed) ? packed : Object.values(packed);
+        if (packResults.length !== 1) {
           throw new Error("npm pack did not return exactly one archive");
         }
         [packResult] = packResults;
@@ -966,12 +967,16 @@ function copyPackageIntoReservation(sourceDir, targetDir, identity) {
   // Linux procfs resolves this path through the already-open directory
   // descriptor. A concurrent rename of the public target pathname therefore
   // cannot redirect package bytes into a replacement directory.
-  fs.cpSync(sourceDir, `/proc/self/fd/${identity.descriptor}/.`, {
-    recursive: true,
-    dereference: false,
-    errorOnExist: true,
-    force: false,
-  });
+  // The reservation already exists. Copy its children through the held
+  // descriptor, retaining no-replace checks for every target entry.
+  for (const name of fs.readdirSync(sourceDir)) {
+    fs.cpSync(path.join(sourceDir, name), `/proc/self/fd/${identity.descriptor}/${name}`, {
+      recursive: true,
+      dereference: false,
+      errorOnExist: true,
+      force: false,
+    });
+  }
   assertHeldDirectoryIdentity(
     identity,
     `Watchbound package reservation descriptor identity changed during copy: ${targetDir}`,

@@ -78,7 +78,7 @@ function overflowMeasurements(source) {
     const owner = enclosingFunction(source, callback.index);
     if (owner == null) continue;
     const ownerSource = source.slice(owner.start, owner.end);
-    if (!ownerSource.includes("data-app-shell-tab-close-button") || !ownerSource.includes("@max-[4rem]/app-shell-tab")) continue;
+    if (!ownerSource.includes("data-app-shell-tab-close-button")) continue;
     candidates.push({
       callbackStart: callback.index,
       callbackEnd: callback.index + callback[0].length,
@@ -101,7 +101,7 @@ function mountAnimations(source) {
     const initialVar = controller[2];
     if (!ownerSource.includes("@container/app-shell-tab")) continue;
     const assignmentPattern = new RegExp(
-      `(?:let |,)${escapeRegExp(initialVar)}=(?<expression>!1|(?<animate>[A-Za-z_$][\\w$]*)\\?(?<collapsed>[A-Za-z_$][\\w$]*):!1),`,
+      `(?:let |,)${escapeRegExp(initialVar)}=(?<expression>!1|(?<animate>[A-Za-z_$][\\w$]*)(?:&&[A-Za-z_$][\\w$]*\\?\\.initial!==!1)?\\?[A-Za-z_$][\\w$]*:!1),`,
       "u",
     );
     const assignment = assignmentPattern.exec(ownerSource);
@@ -111,13 +111,7 @@ function mountAnimations(source) {
       if (!/animateLayout:[A-Za-z_$][\w$]*(?:[,}])/u.test(ownerSource)) continue;
     } else {
       if (!new RegExp(`animateLayout:${escapeRegExp(assignment.groups.animate)}(?:[,}])`, "u").test(ownerSource)) continue;
-      const collapsedVar = assignment.groups.collapsed;
-      const collapsedSelection = ownerSource.match(
-        new RegExp(`(?:let |,)${escapeRegExp(collapsedVar)}=([A-Za-z_$][\\w$]*)==null\\?([A-Za-z_$][\\w$]*)\\?([A-Za-z_$][\\w$]*):([A-Za-z_$][\\w$]*):([A-Za-z_$][\\w$]*),`, "u"),
-      );
-      if (collapsedSelection == null || !collapsedSelection.slice(3, 5).every((name) =>
-        new RegExp("(?:var |,)" + escapeRegExp(name) + "=\\{maxWidth:`0px`", "u").test(source)
-      ) || !new RegExp("(?:var |,)" + escapeRegExp(collapsedSelection[5]) + "=\\{width:`0px`\\}", "u").test(source)) continue;
+
     }
     const relativeExpressionStart = assignment.index + assignment[0].indexOf(assignment.groups.expression);
     candidates.push({

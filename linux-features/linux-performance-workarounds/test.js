@@ -14,8 +14,8 @@ const {
 
 function currentAppShellTabLayoutFixture() {
   return [
-    "function o9a(){let re=(e,t)=>{K(t.scrollWidth>t.clientWidth)},ie=Xu(re),ye=`@max-[4rem]/app-shell-tab:invisible`;return jsx(`button`,{ref:ie,\"data-app-shell-tab-close-button\":!0})}",
-    "function m9a(e){let{animateLayout:n}=e,m=!0,O=null,N=O==null?m?MZt:jZt:pZt,ie={maxWidth:`160px`},se=n?N:!1,ve={},te=`@container/app-shell-tab`;return jsx(kf.div,{className:te,animate:ie,\"data-app-shell-tab-controller\":ke,initial:se,style:{},transition:ve,onAnimationComplete:Re})}",
+    "function o9a(){let re=(e,t)=>{K(t.scrollWidth>t.clientWidth)},ie=Xu(re),ye=`data-app-shell-tab-capture`;return jsx(`button`,{ref:ie,\"data-app-shell-tab-close-button\":!0})}",
+    "function m9a(e){let{animateLayout:n}=e,m=!0,O=null,N=O==null?m?MZt:jZt:pZt,ie={maxWidth:`160px`},se=n&&N?.initial!==!1?MZt:!1,ve={},te=`@container/app-shell-tab`;return jsx(kf.div,{className:te,animate:ie,\"data-app-shell-tab-controller\":ke,initial:se,style:{},transition:ve,onAnimationComplete:Re})}",
     "var pZt={width:`0px`},jZt={maxWidth:`0px`,minWidth:`0px`},MZt={maxWidth:`0px`,\"--tab-size-progress\":0};",
   ].join("");
 }

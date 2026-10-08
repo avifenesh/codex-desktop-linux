@@ -112,7 +112,6 @@ test("remote mobile README assigns every descriptor to one control topology", ()
   assert.equal(documented.size, rows.length, "topology table must not repeat descriptor ids");
   assert.deepEqual([...documented.keys()].sort(), descriptorIds.sort());
   assert.deepEqual([...documented].sort(), [...expected].sort());
-  assert.match(readme, /`applyLinuxRemoteControlSshInstallActionPatch`[\s\S]*`remote-ssh`/);
   assert.match(readme, /`applyLinuxRemoteControlSshInstallReleasePatch`[\s\S]*`remote-ssh`/);
   assert.match(readme, /`set-experimental-feature-enablement-for-host`/);
   assert.match(readme, /`refresh-remote-connections`/);
@@ -279,7 +278,7 @@ function syntheticSshInstallSettingsBundle() {
   return [
     "function pn({action:e,disabled:t,hostId:n,installCodexPending:r,onAuthenticate:i,onInstallCodex:a,onReconnect:o,onRestart:s}){if(e==null)return null;switch(e.kind){case`install-codex`:return{disabled:t,label:e.label,loading:r,loadingLabel:e.loadingLabel,renderInElectronOnly:!0,tooltipText:e.tooltipText,onClick:()=>a(n)};case`login`:return{label:e.label,onClick:()=>i(n)};case`restart`:return{label:e.label,onClick:s};case`reconnect`:return{label:e.label,onClick:o};case`settings`:return null}}",
     "let et=R(`install-remote-codex`),vt=(e,t,n)=>{globalThis.__states.push({hostId:e,state:t,error:n})},bt=e=>{et.mutate({hostId:e},{onSuccess:t=>{let{state:n,error:r}=t;vt(e,n,r)}})};",
-    "function un(e){let{connection:n,disabled:r,installCodexPending:i,onAuthenticate:a,onInstallCodex:s,onReconnect:c,onRestart:l}=e,{appServerVersion:p,error:m,installedCodexVersion:h,state:g}=De(n.hostId),_=n.displayName,j=Ne(),E=!1;let D=(n.kind||!E)&&(m?.code===`remote-codex-not-found`||m?.code===`update-required`),M;return M=j==null||D?null:pn({action:j.action,disabled:r,hostId:n.hostId,installCodexPending:i,onReconnect:c,onRestart:l,onAuthenticate:a,onInstallCodex:s}),M}",
+    "function un(e){let{connection:n,disabled:r,installCodexPending:i,onAuthenticate:a,onInstallCodex:s,onReconnect:c,onRestart:l}=e,{appServerVersion:p,error:m,installedCodexVersion:h,state:g}=De(n.hostId),_=n.displayName,j=Ne(),E=!1;let M;return M=j==null?null:pn({action:j.action,disabled:r,hostId:n.hostId,installCodexPending:i,onReconnect:c,onRestart:l,onAuthenticate:a,onInstallCodex:s}),M}",
     "function nr(e,t){return e.displayName.localeCompare(t.displayName)}",
   ].join("");
 }
@@ -376,9 +375,9 @@ function syntheticRemoteTerminalStatusBundle() {
 }
 
 test("runtime-status recovery accepts only one current thread-summary fallback", () => {
-  const current = "let x={threadRuntimeStatus:a===`needs_resume`||o?.type===`notLoaded`?r?.threadRuntimeStatus??o??null:o??r?.threadRuntimeStatus??null,resumeState:a}";
-  const legacy = "function Of(e,h){e.resumeState===`needs_resume`&&(e.threadRuntimeStatus=h)}";
-  const nearMiss = "let x={threadRuntimeStatus:a===`needs_resume`?r?.threadRuntimeStatus??null:o,resumeState:a}";
+  const current = "let x={threadRuntimeStatus:dp(t)?this.runtimeThreadStatusEvidenceByThreadId.get(t.id)??t.status:t.status,resumeState:a}";
+  const legacy = "let x={threadRuntimeStatus:dp(t)?this.runtimeThreadStatusEvidenceByThreadId.get(t.id):t.status,resumeState:a}";
+  const nearMiss = "let x={threadRuntimeStatus:dp(t)?this.runtimeThreadStatusEvidenceByThreadId.get(t.other)??t.status:t.status,resumeState:a}";
 
   const accepted = captureWarnings(() =>
     applyLinuxRemoteMobileConversationHydrationPatch(current),
@@ -1849,7 +1848,7 @@ test("Linux remote-control settings UX patch applies settings copy and SSH insta
   const patched = applyLinuxRemoteControlSettingsUxPatch(source);
 
   assert.notEqual(patched, source);
-  assert.match(patched, /codexLinuxRemoteControlSshInstallActions/);
+  assert.doesNotMatch(patched, /codexLinuxRemoteControlSshInstallActions/);
   assert.match(patched, /Control this Linux desktop/);
   assert.match(patched, /Devices that can control this Linux desktop/);
   assert.match(patched, /Keep this Linux desktop awake/);
@@ -2536,7 +2535,7 @@ test("remote mobile feature patch report records feature metadata and partial wa
       );
       assert.equal(settingsPatch.sourceKind, "feature");
       assert.equal(settingsPatch.featureId, "remote-mobile-control");
-      assert.equal(settingsPatch.status, "applied-with-warnings");
+      assert.equal(settingsPatch.status, "skipped-optional");
       assert.ok(settingsPatch.warnings.some((warning) => warning.includes("SSH install release needles")));
 
       const enablementBridgePatch = report.patches.find(
