@@ -345,7 +345,10 @@ impl HostState {
 fn try_reserve_queue_bytes(counter: &AtomicUsize, bytes: usize, max_bytes: usize) -> bool {
     let mut current = counter.load(Ordering::Acquire);
     loop {
-        let Some(total) = current.checked_add(bytes).filter(|total| *total <= max_bytes) else {
+        let Some(total) = current
+            .checked_add(bytes)
+            .filter(|total| *total <= max_bytes)
+        else {
             return false;
         };
         match counter.compare_exchange_weak(current, total, Ordering::AcqRel, Ordering::Acquire) {

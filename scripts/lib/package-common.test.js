@@ -137,6 +137,7 @@ test("update-builder copies staged native feature artifacts without Cargo worksp
   for (const artifact of [
     "codex-computer-use-linux",
     "codex-computer-use-cosmic",
+    "codex-computer-use-indicator",
     "codex-global-dictation-linux",
     "codex-mcp-helper-reaper",
     "codex-read-aloud-linux",
@@ -186,6 +187,8 @@ test("Chronicle-only native helper setup builds the shared backend", (t) => {
     env: {
       ...process.env,
       CARGO_LOG: cargoLog,
+      // Bash startup files must not replace the fixture's executable PATH.
+      BASH_ENV: "",
       CODEX_LINUX_FEATURES_CONFIG: config,
       PATH: `${binDir}:${process.env.PATH}`,
     },

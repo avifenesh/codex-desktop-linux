@@ -99,6 +99,8 @@ pub struct ComputerUseLinux {
     /// Cached physical desktop size from the most recent full-frame capture;
     /// used for off-screen warnings and portal logical-coordinate mapping.
     desktop_size: Arc<Mutex<Option<(u32, u32)>>>,
+    /// On-screen activity overlay (opt-out via `COMPUTER_USE_LINUX_INDICATOR=0`).
+    indicator: Arc<crate::indicator::Indicator>,
 }
 
 fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
@@ -321,6 +323,7 @@ impl ComputerUseLinux {
     ) -> Json<ActivateWindowOutput> {
         let target = params.into_target();
         let received = Some(serde_json::json!(target.clone()));
+        self.indicator.action("activate_window").await;
         match focus_window_target(&target).await {
             Ok(focus) => {
                 let ok = focus_satisfies_target(&focus, &target);
@@ -365,8 +368,17 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<GetAppStateParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let captures = params.include_screenshot.unwrap_or(true);
+        let result = self.app_state(params).await;
+        if captures {
+            self.indicator.action("get_app_state").await;
+        }
+        result
+    }
+
+    async fn app_state(&self, params: GetAppStateParams) -> Result<CallToolResult, ErrorData> {
         let verbose = params.verbose.unwrap_or(false);
-        let diagnostics = tokio::task::spawn_blocking(doctor_report)
+        let mut diagnostics = tokio::task::spawn_blocking(doctor_report)
             .await
             .expect("diagnostics task panicked");
         let (window_context, window_error, window_permissions_hint) =
@@ -389,25 +401,29 @@ impl ComputerUseLinux {
             .await;
         let (screenshot, screenshot_error) = if include_screenshot {
             let result: Result<ScreenshotCapture> = async {
-                let raw = capture_screenshot_raw().await?;
+                let _pipeline = crate::screenshot::screenshot_pipeline_permit().await?;
+                let raw = {
+                    let _hold = self.indicator.hold_for_capture().await?;
+                    capture_screenshot_raw().await
+                };
+                diagnostics.readiness.record_screenshot_result(raw.is_ok());
+                let raw = raw?;
                 self.cache_desktop_size(raw.width, raw.height);
-                if let Some(window) = window_context.as_ref() {
+                let crop = if let Some(window) = window_context.as_ref() {
                     ensure_readonly_screenshot_target_is_visible(window)?;
-                    let crop = self.window_crop_rect_for_capture(window, &raw).await?;
-                    prepare_app_state_screenshot(
-                        raw,
-                        Some(crop),
-                        screenshot_target_requested,
-                        screenshot_options,
-                    )
+                    Some(self.window_crop_rect_for_capture(window, &raw).await?)
                 } else {
+                    None
+                };
+                crate::screenshot::run_image_task(move || {
                     prepare_app_state_screenshot(
                         raw,
-                        None,
+                        crop,
                         screenshot_target_requested,
                         screenshot_options,
                     )
-                }
+                })
+                .await
             }
             .await;
             match result {
@@ -547,13 +563,16 @@ impl ComputerUseLinux {
         )
     )]
     async fn screenshot(&self, Parameters(params): Parameters<ScreenshotParams>) -> CallToolResult {
-        match self.capture_screenshot(params).await {
+        let result = match self.capture_screenshot(params).await {
             Ok(result) => result,
             Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))]),
-        }
+        };
+        self.indicator.action("screenshot").await;
+        result
     }
 
     async fn capture_screenshot(&self, params: ScreenshotParams) -> Result<CallToolResult> {
+        let _pipeline = crate::screenshot::screenshot_pipeline_permit().await?;
         let target = params.window_target();
         let target_window = match target.as_ref() {
             Some(target) => Some(
@@ -570,9 +589,12 @@ impl ComputerUseLinux {
             .as_ref()
             .and_then(|window| window.title.clone());
 
-        let raw_capture = capture_screenshot_raw()
-            .await
-            .context("screenshot failed")?;
+        let raw_capture = {
+            let _hold = self.indicator.hold_for_capture().await?;
+            capture_screenshot_raw()
+                .await
+                .context("screenshot failed")?
+        };
         self.cache_desktop_size(raw_capture.width, raw_capture.height);
 
         // Warn when the target window extends past the visible desktop: the
@@ -589,8 +611,15 @@ impl ComputerUseLinux {
                     .window_crop_rect_for_capture(window, &raw_capture)
                     .await
                     .context("targeted screenshot crop failed")?;
-                let (bytes, width, height) = crop_png(&raw_capture.bytes, x, y, width, height)
-                    .map_err(|error| anyhow::anyhow!("targeted screenshot crop failed: {error}"))?;
+                let (raw_capture, bytes, width, height) =
+                    crate::screenshot::run_image_task(move || {
+                        let (bytes, width, height) =
+                            crop_png(&raw_capture.bytes, x, y, width, height).map_err(|error| {
+                                anyhow::anyhow!("targeted screenshot crop failed: {error}")
+                            })?;
+                        Ok((raw_capture, bytes, width, height))
+                    })
+                    .await?;
                 (
                     RawScreenshotCapture {
                         mime_type: raw_capture.mime_type,
@@ -604,8 +633,11 @@ impl ComputerUseLinux {
             }
             None => (raw_capture, false),
         };
-        let capture = prepare_screenshot_payload(capture, params.screenshot_options())
-            .context("screenshot resize failed")?;
+        let options = params.screenshot_options();
+        let capture =
+            crate::screenshot::run_image_task(move || prepare_screenshot_payload(capture, options))
+                .await
+                .context("screenshot resize failed")?;
 
         let mut caption = serde_json::json!({
             "width": capture.width,
@@ -634,14 +666,21 @@ impl ComputerUseLinux {
     }
 
     /// Lazily create the uinput absolute pointer, sizing its ABS range to the
-    /// logical desktop (the portal screenshot dimensions). Returns `false` if it
-    /// can't be created or is disabled via `CU_DISABLE_ABS_POINTER` (or the
-    /// Codex embedded-build alias).
+    /// full capture's pixel dimensions. This preserves the coordinate space
+    /// used by click/scroll/drag, independently of logical monitor scaling.
+    /// Explicit backend overrides skip this device, including a cached one.
     async fn ensure_abs_pointer(&self) -> bool {
         if env_flag_enabled_any(&[
             "CU_DISABLE_ABS_POINTER",
             "CODEX_COMPUTER_USE_DISABLE_ABS_POINTER",
-        ]) {
+        ]) || env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
+            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER",
+        ]) || (env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
+            "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER",
+        ]) && self.is_wayland_session())
+        {
             return false;
         }
         if self
@@ -792,6 +831,7 @@ impl ComputerUseLinux {
             action_index,
         } = target
         {
+            self.indicator.action("click").await;
             let invocation = if let Some(name) = action_name
                 .as_deref()
                 .filter(|name| !name.trim().is_empty())
@@ -838,6 +878,9 @@ impl ComputerUseLinux {
         let ClickTarget::Coordinates(x, y) = target else {
             unreachable!("click target must resolve to coordinates or an AT-SPI action");
         };
+        self.indicator
+            .pointer("click", (x, y), self.indicator_space())
+            .await;
         let button = mouse_button_code(params.button.as_deref());
         let click_count = params.click_count.unwrap_or(1).clamp(1, 10).to_string();
         // Preferred backend: the uinput absolute pointer. Unlike ydotool's
@@ -1008,11 +1051,14 @@ impl ComputerUseLinux {
                 }
                 Err(error) => {
                     return Json(with_notes(
-                        pointer_action_result(portal_action_error("click", error, received)),
+                        pointer_action_result(portal_start_error("click", error, received)),
                         off_screen_note,
                     ));
                 }
             }
+        }
+        if self.is_wayland_session() {
+            return Json(unsafe_pointer_fallback("click", received));
         }
         if self.should_prefer_xdotool_pointer() {
             if let Some(xdotool_args) = xdotool_pointer_click_args(
@@ -1125,6 +1171,7 @@ impl ComputerUseLinux {
             }
         };
 
+        self.indicator.text("set_value", &params.value, false).await;
         match set_element_value(&object_ref, &params.value).await {
             Ok(ValueSetInvocation::Numeric { value }) => Json(ActionOutput {
                 ok: true,
@@ -1334,6 +1381,40 @@ impl ComputerUseLinux {
                 });
             }
         };
+        match target_point {
+            Some(point) => {
+                self.indicator
+                    .pointer("scroll", point, self.indicator_space())
+                    .await
+            }
+            None => self.indicator.action("scroll").await,
+        }
+        let (dx, dy) = match direction {
+            ScrollDirection::Up => (0, units),
+            ScrollDirection::Down => (0, -units),
+            ScrollDirection::Left => (units, 0),
+            ScrollDirection::Right => (-units, 0),
+        };
+        // Coordinate scroll needs the same accurate positioning as click. Keep
+        // the move and wheel event under one cancellation-safe input guard.
+        if let Some((x, y)) = target_point {
+            if self.is_wayland_session()
+                && ydotool_backend_available().await
+                && self.ensure_abs_pointer().await
+            {
+                let pointer = Arc::clone(&self.abs_pointer);
+                let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
+                    let landing =
+                        run_abs_pointer(pointer, move |pointer| pointer.move_to(x, y)).await?;
+                    sleep(Duration::from_millis(35)).await;
+                    run_ydotool(&wheel_mousemove_args(dx, dy)).await?;
+                    Ok(landing)
+                })
+                .await;
+                let _input_guard = input_guard;
+                return Json(abs_pointer_result("scroll", result, received));
+            }
+        }
         let off_screen_note = match target_point {
             Some((x, y)) => self.off_screen_note_for_point(x, y).await,
             None => None,
@@ -1447,18 +1528,15 @@ impl ComputerUseLinux {
                 }
                 Err(error) => {
                     return Json(with_notes(
-                        pointer_action_result(portal_action_error("scroll", error, received)),
+                        pointer_action_result(portal_start_error("scroll", error, received)),
                         off_screen_note,
                     ));
                 }
             }
         }
-        let (dx, dy) = match direction {
-            ScrollDirection::Up => (0, units),
-            ScrollDirection::Down => (0, -units),
-            ScrollDirection::Left => (units, 0),
-            ScrollDirection::Right => (-units, 0),
-        };
+        if target_point.is_some() && self.is_wayland_session() {
+            return Json(unsafe_pointer_fallback("scroll", received));
+        }
         let mut sequence = Vec::new();
         if let Some((x, y)) = target_point {
             sequence.push(absolute_mousemove_args(x, y));
@@ -1521,6 +1599,14 @@ impl ComputerUseLinux {
     async fn drag(&self, Parameters(params): Parameters<DragParams>) -> Json<ActionOutput> {
         let received = Some(serde_json::json!(params));
         let mut input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        let space = self.indicator_space();
+        self.indicator
+            .pointer("drag", (params.start_x, params.start_y), space)
+            .await;
+        // Lead the overlay cursor to the drop point while the drag runs.
+        self.indicator
+            .follow("drag", (params.end_x, params.end_y), space)
+            .await;
         // Preferred backend: the uinput absolute pointer (accurate landing).
         if self.ensure_abs_pointer().await {
             let abs_pointer = Arc::clone(&self.abs_pointer);
@@ -1675,11 +1761,14 @@ impl ComputerUseLinux {
                     )));
                 }
                 Err(error) => {
-                    return Json(pointer_action_result(portal_action_error(
+                    return Json(pointer_action_result(portal_start_error(
                         "drag", error, received,
                     )));
                 }
             }
+        }
+        if self.is_wayland_session() {
+            return Json(unsafe_pointer_fallback("drag", received));
         }
         let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
             run_ydotool_drag(params.start_x, params.start_y, params.end_x, params.end_y).await
@@ -1730,6 +1819,8 @@ impl ComputerUseLinux {
                 received,
             });
         };
+        let secret = self.typing_into_secret(focus.as_ref()).await;
+        self.indicator.keys(&params.key, secret).await;
         if self.should_prefer_portal_keyboard_for_chords().await {
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
@@ -1888,6 +1979,8 @@ impl ComputerUseLinux {
                 });
             }
         };
+        let secret = self.typing_into_secret(focus.as_ref()).await;
+        self.indicator.text("type_text", &params.text, secret).await;
         if self.should_prefer_kde_clipboard_text_backend() {
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
@@ -1984,7 +2077,7 @@ impl ComputerUseLinux {
                 }
             }
         }
-        if self.should_prefer_portal_keyboard_backend().await {
+        if self.should_prefer_portal_text_backend() {
             let keysyms = match keysyms_for_text(&params.text) {
                 Ok(keysyms) => keysyms,
                 Err(error) => {
@@ -1998,6 +2091,18 @@ impl ComputerUseLinux {
                     ));
                 }
             };
+            if self.is_gnome_wayland_session() {
+                if let Err(error) =
+                    crate::keyboard_keymap::validate_gnome_text(&params.text, &keysyms).await
+                {
+                    return Json(action_result_with_focus(
+                        "type_text",
+                        Err(format!("Literal text was not sent: {error:#}")),
+                        received,
+                        focus,
+                    ));
+                }
+            }
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
                     match type_text_with_keysyms(&session, &keysyms, Some(input_guard)).await {
@@ -2137,6 +2242,7 @@ impl ComputerUseLinux {
     ) -> Json<WindowGeometryOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let target = params.target.clone().into_target();
+        self.indicator.action("move_window").await;
         self.window_geometry_op(received, &target, |window| async move {
             registry::move_window(&window, params.x, params.y).await
         })
@@ -2159,6 +2265,7 @@ impl ComputerUseLinux {
     ) -> Json<WindowGeometryOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let target = params.target.clone().into_target();
+        self.indicator.action("resize_window").await;
         self.window_geometry_op(received, &target, |window| async move {
             registry::resize_window(&window, params.width, params.height).await
         })
@@ -2173,8 +2280,8 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.7.10-linux-alpha1",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility. run_shell is absent unless CODEX_COMPUTER_USE_ENABLE_SHELL=1 or the standalone COMPUTER_USE_LINUX_ENABLE_SHELL=1 compatibility alias; when enabled it is same-user arbitrary host execution, not a sandbox, and hosts should require explicit approval."
+    version = "0.7.13-linux-alpha1",
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus. Treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -2467,11 +2574,12 @@ async fn execute_shell(params: RunShellParams) -> RunShellOutput {
 }
 
 pub async fn serve_mcp() -> Result<()> {
-    ComputerUseLinux::default()
-        .serve(rmcp::transport::stdio())
-        .await?
-        .waiting()
-        .await?;
+    let server = ComputerUseLinux::default();
+    let indicator = Arc::clone(&server.indicator);
+    let running = server.serve(rmcp::transport::stdio()).await?;
+    // The handshake is done, so the peer knows the client's name.
+    indicator.attach(running.peer().clone());
+    running.waiting().await?;
     Ok(())
 }
 
@@ -3235,30 +3343,21 @@ impl ComputerUseLinux {
         )
     }
 
-    async fn should_prefer_portal_keyboard_backend(&self) -> bool {
-        if env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
-            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
-        ]) {
-            return false;
-        }
-        if self.should_prefer_xdotool_keyboard() {
-            return false;
-        }
-        if env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
-            "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD",
-        ]) {
-            return self.is_wayland_session() && !self.is_kde_wayland_session();
-        }
-        if self.should_prefer_wtype_keyboard() {
-            return false;
-        }
-        !self.is_kde_wayland_session()
-            && should_prefer_portal_backend_by_default(
-                self.is_wayland_session(),
-                ydotool_backend_available().await,
-            )
+    fn should_prefer_portal_text_backend(&self) -> bool {
+        prefer_portal_text_backend(
+            env_flag_enabled_any(&[
+                "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+            ]),
+            self.should_prefer_xdotool_keyboard(),
+            self.is_wayland_session(),
+            self.is_kde_wayland_session(),
+            env_flag_enabled_any(&[
+                "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD",
+            ]),
+            self.should_prefer_wtype_keyboard(),
+        )
     }
 
     async fn should_prefer_portal_keyboard_for_chords(&self) -> bool {
@@ -3345,6 +3444,13 @@ impl ComputerUseLinux {
         )
     }
 
+    fn is_gnome_wayland_session(&self) -> bool {
+        self.is_wayland_session()
+            && (env_contains("XDG_CURRENT_DESKTOP", "gnome")
+                || env_contains("DESKTOP_SESSION", "gnome")
+                || env_contains("XDG_SESSION_DESKTOP", "gnome"))
+    }
+
     fn is_kde_wayland_session(&self) -> bool {
         self.is_wayland_session()
             && (env_contains("XDG_CURRENT_DESKTOP", "kde")
@@ -3352,6 +3458,12 @@ impl ComputerUseLinux {
     }
 
     fn cached_portal_pointer_session(&self) -> Option<PortalPointerSession> {
+        if env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
+            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER",
+        ]) {
+            return None;
+        }
         let mut cached = self.portal_pointer_session.lock().ok()?;
         if cached.as_ref().is_some_and(|session| !session.is_valid()) {
             *cached = None;
@@ -3699,6 +3811,42 @@ impl ComputerUseLinux {
         session.logical_point_from_capture(x, y, capture_size)
     }
 
+    /// Capture size for overlay points, which are in screenshot pixels like
+    /// the click tools. Only a cached size is used: capturing the screen just
+    /// for the overlay could prompt the user.
+    fn indicator_space(&self) -> Option<(u32, u32)> {
+        *self.desktop_size.lock().ok()?
+    }
+
+    /// Whether typed text would land in a password field. Unknown counts as
+    /// yes, so the overlay never shows a secret it could not rule out.
+    async fn typing_into_secret(&self, focus: Option<&WindowFocusResult>) -> bool {
+        if !self.indicator.enabled() {
+            return true;
+        }
+        let focused_role = async {
+            let pid = match focus {
+                Some(focus) => focus
+                    .focused_window
+                    .as_ref()
+                    .and_then(|window| window.pid)
+                    .or(focus.requested_window.pid),
+                None => focused_window().await.ok().flatten()?.pid,
+            };
+            // Only the app that receives the keystrokes can tell where they
+            // land; another app may keep a stale focused element.
+            match probe_focused_element(Some(pid?)).await.ok()? {
+                FocusProbe::Found(element) => Some(element.role),
+                _ => None,
+            }
+        };
+        timeout(Duration::from_millis(250), focused_role)
+            .await
+            .ok()
+            .flatten()
+            .is_none_or(|role| crate::indicator::is_secret_role(&role))
+    }
+
     /// COORDINATE SPACES: window bounds (list_windows / extension frame rects)
     /// and the extension monitor layout are in LOGICAL pixels, while click/
     /// scroll coordinates and screenshot captures are in PHYSICAL capture
@@ -3779,10 +3927,12 @@ impl ComputerUseLinux {
     /// Warn when a click/scroll coordinate is outside the captured desktop.
     /// Click coordinates are physical capture-space pixels, so compare ONLY
     /// against the capture rect — the extension's logical layout is a
-    /// different space on scaled displays and would false-positive.
+    /// different space on scaled displays and would false-positive. This is a
+    /// best-effort warning: never request a new capture (and possibly consent)
+    /// merely to decide whether to append a note to an input result.
     async fn off_screen_note_for_point(&self, x: i32, y: i32) -> Option<String> {
-        let (mx, my, mw, mh) = self.capture_space_rect().await?;
-        let visible = x >= mx && y >= my && x < mx.saturating_add(mw) && y < my.saturating_add(mh);
+        let (mw, mh) = self.desktop_size.lock().ok().and_then(|guard| *guard)?;
+        let visible = x >= 0 && y >= 0 && (x as u32) < mw && (y as u32) < mh;
         if visible {
             return None;
         }
@@ -4149,6 +4299,7 @@ impl ComputerUseLinux {
             }
         };
 
+        self.indicator.action("perform_action").await;
         match invoke_accessibility_action(&object_ref, requested_action).await {
             Ok(invocation) => Json(ActionOutput {
                 ok: invocation.ok,
@@ -4979,7 +5130,12 @@ fn action_result(
             ok: true,
             implemented: true,
             action: action.to_string(),
-            message: "Action sent through ydotool.".to_string(),
+            message: if action == "type_text" {
+                "Action sent through ydotool using US physical key positions. The active keyboard layout can change the resulting text; verify the field contents."
+            } else {
+                "Action sent through ydotool."
+            }
+            .to_string(),
             received,
         },
         Err(message) => ActionOutput {
@@ -4989,6 +5145,55 @@ fn action_result(
             message,
             received,
         },
+    }
+}
+
+fn unsafe_pointer_fallback(action: &str, received: Option<serde_json::Value>) -> ActionOutput {
+    ActionOutput {
+        ok: false,
+        implemented: true,
+        action: action.to_string(),
+        message: "Coordinate input was not sent: ydotool cannot position the pointer accurately on Wayland. Enable the uinput absolute pointer with working screenshot capture, or use COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER=1 with an approved desktop portal session. Remove COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER if set.".to_string(),
+        received,
+    }
+}
+
+fn abs_pointer_error(
+    action: &str,
+    error: String,
+    received: Option<serde_json::Value>,
+) -> ActionOutput {
+    ActionOutput {
+        ok: false,
+        implemented: true,
+        action: action.to_string(),
+        message: format!("Absolute pointer {action} may have started before it failed; input was not replayed through another backend: {error}"),
+        received,
+    }
+}
+
+fn abs_pointer_result(
+    action: &str,
+    result: std::result::Result<crate::abs_pointer::PointerLanding, String>,
+    received: Option<serde_json::Value>,
+) -> ActionOutput {
+    match result {
+        Ok(landing) => with_notes(
+            ActionOutput {
+                ok: true,
+                implemented: true,
+                action: action.to_string(),
+                message: if action == "scroll" {
+                    "Pointer positioned through uinput; wheel input sent through ydotool."
+                        .to_string()
+                } else {
+                    "Action sent through the uinput absolute pointer.".to_string()
+                },
+                received,
+            },
+            abs_pointer_clamp_note(landing),
+        ),
+        Err(error) => abs_pointer_error(action, error, received),
     }
 }
 
@@ -5004,6 +5209,20 @@ fn portal_action_error(
         message: format!(
             "Remote desktop portal {action} may have started before it failed; input was not replayed through another backend: {error:#}"
         ),
+        received,
+    }
+}
+
+fn portal_start_error(
+    action: &str,
+    error: anyhow::Error,
+    received: Option<serde_json::Value>,
+) -> ActionOutput {
+    ActionOutput {
+        ok: false,
+        implemented: true,
+        action: action.to_string(),
+        message: format!("Input was not sent because the remote desktop portal could not start; input was not replayed through ydotool: {error:#}"),
         received,
     }
 }
@@ -5562,6 +5781,27 @@ async fn run_ydotool_drag(
     }
 }
 
+async fn run_abs_pointer<T, F>(
+    pointer: Arc<Mutex<Option<crate::abs_pointer::AbsPointer>>>,
+    operation: F,
+) -> std::result::Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut crate::abs_pointer::AbsPointer) -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let mut guard = pointer
+            .lock()
+            .map_err(|_| "absolute pointer lock was poisoned".to_string())?;
+        let pointer = guard
+            .as_mut()
+            .ok_or_else(|| "absolute pointer is unavailable".to_string())?;
+        operation(pointer).map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| format!("absolute pointer task failed: {error}"))?
+}
+
 async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
     let support = ydotool::ensure_supported_async().await?;
     let socket = ydotool::socket_path_for_command()?;
@@ -5584,6 +5824,7 @@ async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
 }
 
 async fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String> {
+    validate_ydotool_text(text)?;
     let support = ydotool::ensure_supported_async().await?;
     let socket = ydotool::socket_path_for_command()?;
     let mut command = TokioCommand::new(&support.executable);
@@ -5606,6 +5847,19 @@ async fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String
     } else {
         Err(ydotool_output_error(output))
     }
+}
+
+fn validate_ydotool_text(text: &str) -> std::result::Result<(), String> {
+    if let Some(ch) = text
+        .chars()
+        .find(|ch| !matches!(ch, '\t' | '\n' | ' '..='~'))
+    {
+        return Err(format!(
+            "ydotool cannot type U+{:04X}; no text was sent. Use a layout-aware text backend or set_value on an editable field.",
+            ch as u32
+        ));
+    }
+    Ok(())
 }
 
 fn ydotool_type_timeout(text: &str) -> Duration {
@@ -6195,6 +6449,17 @@ fn should_prefer_portal_backend_by_default(is_wayland: bool, ydotool_available: 
     is_wayland && !ydotool_available
 }
 
+fn prefer_portal_text_backend(
+    force_ydotool: bool,
+    prefer_xdotool: bool,
+    is_wayland: bool,
+    is_kde: bool,
+    force_portal: bool,
+    prefer_wtype: bool,
+) -> bool {
+    !force_ydotool && !prefer_xdotool && is_wayland && !is_kde && (force_portal || !prefer_wtype)
+}
+
 fn mouse_button_code(button: Option<&str>) -> String {
     match button.unwrap_or("left").to_ascii_lowercase().as_str() {
         "right" => "0xC1",
@@ -6500,6 +6765,186 @@ mod tests {
     /// The run_shell tests change the same process-wide variable, so they
     /// take turns instead of racing each other under the parallel test runner.
     static SHELL_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Exercise the real handlers in a separate process so backend overrides
+    /// cannot race other tests. All command programs are harmless stubs; the
+    /// private datagram socket and invalid D-Bus address cannot reach a desktop.
+    #[test]
+    fn pointer_coordinate_backend_dispatch_is_safe() {
+        let dir = std::env::temp_dir().join(format!(
+            "cul-pointer-safety-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        let socket_path = dir.join("input.sock");
+        let _socket = std::os::unix::net::UnixDatagram::bind(&socket_path).unwrap();
+        for program in ["ydotool", "xdotool", "systemctl", "gnome-screenshot"] {
+            let path = dir.join(program);
+            std::fs::write(
+                &path,
+                r#"#!/bin/sh
+case "${0##*/}" in
+  systemctl) exit 0 ;;
+  gnome-screenshot) printf 'capture\n' >> "$CUL_POINTER_TEST_CAPTURE_LOG"; exit 1 ;;
+  ydotool)
+    case "$1" in help|--help) printf '%s\n' click mousemove type key debug; exit 0 ;; esac
+    # Capability probes use their own socket. Record only dispatched input.
+    [ "$YDOTOOL_SOCKET" = "$CUL_POINTER_TEST_SOCKET" ] || exit 0 ;;
+esac
+printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        for mode in [
+            "wayland-default",
+            "wayland-uncached",
+            "wayland-ydotool",
+            "wayland-portal",
+            "x11",
+        ] {
+            let log = dir.join(format!("{mode}.log"));
+            let capture_log = dir.join(format!("{mode}-capture.log"));
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "server::tests::pointer_coordinate_backend_child",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("PATH", &dir)
+                .env("HOME", &dir)
+                .env("CUL_POINTER_TEST_MODE", mode)
+                .env("CUL_POINTER_TEST_LOG", &log)
+                .env("CUL_POINTER_TEST_CAPTURE_LOG", &capture_log)
+                .env("COMPUTER_USE_LINUX_SCREENSHOT_BACKEND", "gnome-screenshot")
+                .env("CUL_POINTER_TEST_SOCKET", &socket_path)
+                .env("YDOTOOL_SOCKET", &socket_path)
+                .env("XDG_RUNTIME_DIR", &dir)
+                .env(
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    format!("unix:path={}/no-bus", dir.display()),
+                )
+                .env("DISPLAY", ":9876")
+                .env(
+                    "WAYLAND_DISPLAY",
+                    if mode == "x11" { "" } else { "no-wayland" },
+                )
+                .env(
+                    "XDG_SESSION_TYPE",
+                    if mode == "x11" { "x11" } else { "wayland" },
+                )
+                .env("CU_DISABLE_ABS_POINTER", "1")
+                .env(
+                    "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
+                    if mode == "wayland-ydotool" { "1" } else { "0" },
+                )
+                .env(
+                    "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
+                    if mode == "wayland-portal" { "1" } else { "0" },
+                );
+            for key in [
+                "DESKTOP_SESSION",
+                "HYPRLAND_INSTANCE_SIGNATURE",
+                "XAUTHORITY",
+                "XDG_SESSION_DESKTOP",
+                "XDG_CURRENT_DESKTOP",
+            ] {
+                command.env(key, "pointer-test");
+            }
+            let output = crate::command_runner::output_blocking_with_timeout(
+                &mut command,
+                "pointer backend regression",
+                Duration::from_secs(15),
+            )
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{mode}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                !capture_log.exists(),
+                "{mode}: a pointer warning triggered screenshot capture"
+            );
+            let commands = std::fs::read_to_string(&log).unwrap_or_default();
+            match mode {
+                "wayland-portal" => assert!(commands.is_empty(), "{commands}"),
+                "x11" => {
+                    assert!(
+                        commands.contains("xdotool mousemove -- 5536 700 click"),
+                        "{commands}"
+                    );
+                    assert!(
+                        commands.contains("ydotool mousemove --absolute -- 100 100"),
+                        "{commands}"
+                    );
+                }
+                _ => assert_eq!(commands, "ydotool mousemove --wheel -- 0 -5\n"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pointer_coordinate_backend_child() {
+        let Ok(mode) = std::env::var("CUL_POINTER_TEST_MODE") else {
+            return;
+        };
+        let backend = ComputerUseLinux::default();
+        if mode != "wayland-uncached" {
+            backend.cache_desktop_size(9376, 1600);
+            assert!(backend.off_screen_note_for_point(9376, 700).await.is_some());
+        }
+        assert!(backend.off_screen_note_for_point(5536, 700).await.is_none());
+        let click: ClickParams =
+            serde_json::from_value(serde_json::json!({"x":5536,"y":700})).unwrap();
+        let scroll: ScrollParams =
+            serde_json::from_value(serde_json::json!({"x":5536,"y":700,"direction":"down"}))
+                .unwrap();
+        let drag = DragParams {
+            start_x: 100,
+            start_y: 100,
+            end_x: 200,
+            end_y: 200,
+        };
+        let results = [
+            backend.click(Parameters(click)).await.0,
+            backend.scroll(Parameters(scroll)).await.0,
+            backend.drag(Parameters(drag)).await.0,
+        ];
+        for result in results {
+            if mode == "x11" {
+                assert!(result.ok, "{}", result.message);
+            } else {
+                assert!(!result.ok, "{}", result.message);
+                let expected = if mode == "wayland-portal" {
+                    "portal could not start"
+                } else {
+                    "cannot position the pointer accurately on Wayland"
+                };
+                assert!(result.message.contains(expected), "{}", result.message);
+            }
+        }
+        let scroll: ScrollParams =
+            serde_json::from_value(serde_json::json!({"direction":"down"})).unwrap();
+        let result = backend.scroll(Parameters(scroll)).await.0;
+        assert_eq!(result.ok, mode != "wayland-portal", "{}", result.message);
+    }
 
     #[test]
     fn completion_tool_is_explicitly_opt_in_and_has_side_effect_annotations() {
@@ -6834,8 +7279,10 @@ mod tests {
                 can_focus_windows: true,
                 can_send_development_input: true,
                 can_capture_screenshots: true,
+                screenshot_capture_status: crate::diagnostics::ScreenshotCaptureStatus::Verified,
                 recommended_next_step: String::new(),
                 blockers: Vec::new(),
+                warnings: Vec::new(),
             },
             diagnostics: None,
             message: "ok".to_string(),
@@ -7058,6 +7505,60 @@ mod tests {
             None,
             false
         ));
+    }
+
+    #[test]
+    fn literal_text_portal_policy_preserves_layout_aware_routes_and_overrides() {
+        // GNOME has no wtype route. ydotool availability must not suppress
+        // literal portal text, unlike pointer and physical chord policies.
+        assert!(prefer_portal_text_backend(
+            false, false, true, false, false, false
+        ));
+        // A compatible compositor with wtype needs no portal prompt.
+        assert!(!prefer_portal_text_backend(
+            false, false, true, false, false, true
+        ));
+        assert!(prefer_portal_text_backend(
+            false, false, true, false, true, true
+        ));
+        // Explicit raw/XTEST overrides, KDE clipboard, and X11 keep precedence.
+        assert!(!prefer_portal_text_backend(
+            true, false, true, false, true, false
+        ));
+        assert!(!prefer_portal_text_backend(
+            false, true, true, false, true, false
+        ));
+        assert!(!prefer_portal_text_backend(
+            false, false, true, true, true, false
+        ));
+        assert!(!prefer_portal_text_backend(
+            false, false, false, false, true, false
+        ));
+    }
+
+    #[tokio::test]
+    async fn raw_text_rejects_unsupported_characters_before_backend_access() {
+        assert!(validate_ydotool_text("probe-0710_a/b\t\nXYZ").is_ok());
+        for text in [
+            "prefixä",
+            "prefix中",
+            "prefix\r",
+            "prefix\0",
+            "prefix\u{7f}",
+        ] {
+            // This exits before CLI probing, socket discovery or input, even
+            // though a supported prefix appears before the invalid character.
+            let error = run_ydotool_type_text(text).await.unwrap_err();
+            assert!(error.contains("no text was sent"), "{error}");
+        }
+    }
+
+    #[test]
+    fn raw_text_success_explains_layout_dependence() {
+        let result = action_result("type_text", Ok(Vec::new()), None);
+        assert!(result.ok);
+        assert!(result.message.contains("US physical key positions"));
+        assert!(result.message.contains("verify the field contents"));
     }
 
     #[test]

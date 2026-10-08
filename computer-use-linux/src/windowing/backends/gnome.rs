@@ -133,9 +133,10 @@ async fn call_extension_json(method: &str) -> Result<String> {
         .await
         .context("failed to connect to session bus")?;
     let proxy = verified_extension_proxy(&connection).await?;
-    let json: String = proxy.call(method, &()).await.with_context(|| {
-        format!("Codex GNOME Shell extension {method} call failed")
-    })?;
+    let json: String = proxy
+        .call(method, &())
+        .await
+        .with_context(|| format!("Codex GNOME Shell extension {method} call failed"))?;
     Ok(json)
 }
 

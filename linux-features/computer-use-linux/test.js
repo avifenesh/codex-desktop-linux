@@ -72,7 +72,7 @@ test("staging extends the hidden unified plugin and invalidates the browser-only
   const backend = path.join(workspace, "backend");
   fs.writeFileSync(backend, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   const env = { ...process.env, SCRIPT_DIR: path.resolve(__dirname, "../.."), INSTALL_DIR: installDir,
-    CODEX_COMPUTER_USE_BINARY_SOURCE: backend, CODEX_COMPUTER_USE_COSMIC_BINARY_SOURCE: backend };
+    CODEX_COMPUTER_USE_BINARY_SOURCE: backend, CODEX_COMPUTER_USE_COSMIC_BINARY_SOURCE: backend, CODEX_COMPUTER_USE_INDICATOR_BINARY_SOURCE: backend };
   const stage = () => execFileSync("bash", [path.join(__dirname, "stage.sh")], { env, stdio: "pipe" });
   const mcpPath = path.join(target, ".mcp.json");
   const originalMcp = fs.readFileSync(mcpPath, "utf8");
@@ -92,6 +92,7 @@ test("staging extends the hidden unified plugin and invalidates the browser-only
   }
   fs.writeFileSync(mcpPath, originalMcp);
   stage();
+  assert.ok(fs.existsSync(path.join(target, "bin/codex-computer-use-indicator")));
   const version = JSON.parse(fs.readFileSync(path.join(target, ".codex-plugin/plugin.json"))).version;
   assert.equal(version, "26.908.31748-linux-native.6");
   assert.deepEqual(JSON.parse(fs.readFileSync(marketplacePath)).plugins.map(p => p.name), ["unified-computer-use", "browser", "computer-use"]);

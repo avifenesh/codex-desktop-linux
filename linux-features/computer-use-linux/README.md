@@ -59,9 +59,10 @@ MCP tools. Upstream owns browser control. Missing or ambiguous bundle contracts
 abort an enabled build.
 
 `make install-native` builds `codex-computer-use-linux` and
-`codex-computer-use-cosmic` once before staging the package. Direct
+`codex-computer-use-cosmic` and `codex-computer-use-indicator` once before staging the package. Direct
 `./install.sh` builds may provide binaries in `target/release/` or set
-`CODEX_COMPUTER_USE_BINARY_SOURCE` and `CODEX_COMPUTER_USE_COSMIC_BINARY_SOURCE`.
+`CODEX_COMPUTER_USE_BINARY_SOURCE`, `CODEX_COMPUTER_USE_COSMIC_BINARY_SOURCE` and
+`CODEX_COMPUTER_USE_INDICATOR_BINARY_SOURCE`.
 Updater rebuilds reuse the packaged artifacts and never invoke Cargo.
 
 Validate descriptor ownership and artifact-only staging with:
