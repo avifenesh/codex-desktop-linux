@@ -341,7 +341,7 @@
               ++ lib.optionals readAloudEnabled [ "codex-read-aloud-linux" ]
               ++ lib.optionals recordReplayBackendEnabled [ "codex-record-replay-linux" ];
             expectedBinaries =
-              lib.optionals computerUseEnabled [ "codex-computer-use-linux" "codex-computer-use-cosmic" ]
+              lib.optionals computerUseEnabled [ "codex-computer-use-linux" "codex-computer-use-cosmic" "codex-computer-use-indicator" ]
               ++ lib.optionals readAloudEnabled [ "codex-read-aloud-linux" ]
               ++ lib.optionals recordReplayBackendEnabled [ "codex-record-replay-linux" ];
           in
@@ -539,6 +539,7 @@
               ${lib.optionalString (lib.elem "computer-use-linux" effectiveFeatureIds) ''
               export CODEX_COMPUTER_USE_BINARY_SOURCE="${workspaceHelpers}/bin/codex-computer-use-linux"
               export CODEX_COMPUTER_USE_COSMIC_BINARY_SOURCE="${workspaceHelpers}/bin/codex-computer-use-cosmic"
+              export CODEX_COMPUTER_USE_INDICATOR_BINARY_SOURCE="${workspaceHelpers}/bin/codex-computer-use-indicator"
               ''}
               ${lib.optionalString (lib.elem "read-aloud-mcp" effectiveFeatureIds) ''
               export CODEX_LINUX_READ_ALOUD_MCP_SOURCE="${workspaceHelpers}/bin/codex-read-aloud-linux"
@@ -787,6 +788,7 @@
             all_helpers=${installerWorkspaceHelpers}
             export CODEX_COMPUTER_USE_BINARY_SOURCE="$all_helpers/bin/codex-computer-use-linux"
             export CODEX_COMPUTER_USE_COSMIC_BINARY_SOURCE="$all_helpers/bin/codex-computer-use-cosmic"
+            export CODEX_COMPUTER_USE_INDICATOR_BINARY_SOURCE="$all_helpers/bin/codex-computer-use-indicator"
             export CODEX_LINUX_READ_ALOUD_MCP_SOURCE="$all_helpers/bin/codex-read-aloud-linux"
             export CODEX_RECORD_REPLAY_LINUX_SOURCE="$all_helpers/bin/codex-record-replay-linux"
             export CODEX_GLOBAL_DICTATION_LINUX_SOURCE="${globalDictationHelper}/bin/codex-global-dictation-linux"

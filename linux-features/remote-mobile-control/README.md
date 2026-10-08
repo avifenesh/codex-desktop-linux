@@ -138,10 +138,9 @@ feature descriptor to appear exactly once in this table.
 | `linux-remote-mobile-active-status` | `mobile-host` | Derives mobile active state from the local thread runtime. |
 
 Remote SSH behavior is nested inside the shared settings descriptor rather than
-registered as a separate descriptor. `applyLinuxRemoteControlSshInstallActionPatch`
-keeps the install action visible, and
-`applyLinuxRemoteControlSshInstallReleasePatch` selects the requested Codex
-release for install or update. Both remain `remote-ssh` responsibilities;
+registered as a separate descriptor. The upstream installer supports Linux
+POSIX hosts. `applyLinuxRemoteControlSshInstallReleasePatch` selects the requested
+Codex release for install or update. This remains a `remote-ssh` responsibility;
 neither function enables remote-control on the SSH host.
 
 Feature-owned surfaces outside the descriptor array are also topology-scoped:
@@ -152,7 +151,6 @@ Feature-owned surfaces outside the descriptor array are also topology-scoped:
 | `cold-start-hook.sh` | `mobile-host` | Elects one local remote-control runtime owner and starts only the bundled official Codex fallback. |
 | `applyLinuxRemoteMobileChromeBridgePatch` | `mobile-host` | Keeps local Browser Use available to an authorized mobile-controlled session. |
 | Nix `codex-remote-control.service` | `mobile-host` | Replaces the bundled-process fallback with one declarative local app-server owner. |
-| `applyLinuxRemoteControlSshInstallActionPatch` | `remote-ssh` | Keeps the existing Remote SSH install action available. |
 | `applyLinuxRemoteControlSshInstallReleasePatch` | `remote-ssh` | Sends an explicit Codex release only to the Remote SSH install/update action. |
 
 The app-server has exactly one Remote Control owner in either supported

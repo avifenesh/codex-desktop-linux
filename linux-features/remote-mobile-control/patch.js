@@ -25,7 +25,6 @@ function deviceKeyProviderPattern(flags = "u") {
   );
 }
 const REMOTE_CONTROL_OUTBOUND_TAB_GATE_MARKER = "codexLinuxRemoteControlOutboundTabGate";
-const REMOTE_CONTROL_SSH_INSTALL_ACTION_MARKER = "codexLinuxRemoteControlSshInstallActions";
 const REMOTE_CONTROL_SSH_INSTALL_RELEASE_MARKER = "codexLinuxRemoteControlSshInstallRelease";
 const REMOTE_CONNECTIONS_REFRESH_MARKER = "codexLinuxRemoteConnectionsRefreshNow";
 const REMOTE_MOBILE_CHROME_BRIDGE_MARKER = "codexLinuxRemoteMobileBrowserBackends";
@@ -615,29 +614,6 @@ function applyLinuxRemoteControlCopyPatch(source) {
   return hasMarker ? patched : `/*${REMOTE_CONTROL_COPY_MARKER}*/${patched}`;
 }
 
-function applyLinuxRemoteControlSshInstallActionPatch(source) {
-  if (source.includes(REMOTE_CONTROL_SSH_INSTALL_ACTION_MARKER)) {
-    return source;
-  }
-  if (!source.includes("remote-codex-not-found") && !source.includes("update-required")) {
-    return source;
-  }
-
-  const actionGateRegex =
-    /let ([A-Za-z_$][\w$]*)=\([^;]{1,160}\)&&\(([A-Za-z_$][\w$]*)\?\.code===`remote-codex-not-found`\|\|\2\?\.code===`update-required`\)(?=,[A-Za-z_$][\w$]*;)/u;
-  const match = source.match(actionGateRegex);
-  if (match == null) {
-    console.warn("WARN: Could not find remote-control SSH install action gate - skipping Linux install action patch");
-    return source;
-  }
-
-  const [, gateVar] = match;
-  return source.replace(
-    actionGateRegex,
-    `let ${gateVar}=/*${REMOTE_CONTROL_SSH_INSTALL_ACTION_MARKER}*/!1`,
-  );
-}
-
 function applyLinuxRemoteControlSshInstallReleasePatch(source) {
   if (source.includes(REMOTE_CONTROL_SSH_INSTALL_RELEASE_MARKER)) {
     return source;
@@ -782,7 +758,6 @@ function applyLinuxRemoteControlSshInstallReleasePatch(source) {
 
 function applyLinuxRemoteControlSettingsUxPatch(source) {
   let patched = applyLinuxRemoteControlSshInstallReleasePatch(replaceLinuxRemoteControlCopy(source).patched);
-  patched = applyLinuxRemoteControlSshInstallActionPatch(patched);
 
   patched = applyLinuxRemoteControlOutboundTabGatePatch(patched);
 
@@ -1002,15 +977,14 @@ function applyLinuxRemoteMobileConversationHydrationPatch(source) {
     console.warn("WARN: Found an incomplete remote mobile hydration recovery patch - refusing to accept partial state");
   }
 
+  // Current upstream summaries already preserve runtime notification evidence.
   const runtimeFallbackPattern = new RegExp(
-    "threadRuntimeStatus:[A-Za-z_$][\\w$]*===`needs_resume`\\|\\|[A-Za-z_$][\\w$]*\\?\\.type===`notLoaded`\\?" +
-      "[A-Za-z_$][\\w$]*\\?\\.threadRuntimeStatus\\?\\?[A-Za-z_$][\\w$]*\\?\\?null:" +
-      "[A-Za-z_$][\\w$]*\\?\\?[A-Za-z_$][\\w$]*\\?\\.threadRuntimeStatus\\?\\?null",
+    "threadRuntimeStatus:[A-Za-z_$][\\w$]*\\(([A-Za-z_$][\\w$]*)\\)\\?this\\.runtimeThreadStatusEvidenceByThreadId\\.get\\(\\1\\.id\\)\\?\\?\\1\\.status:\\1\\.status",
     "gu",
   );
   const runtimeFallbackMatches = [...patched.matchAll(runtimeFallbackPattern)];
   if (runtimeFallbackMatches.length !== 1 &&
-      patched.includes("threadRuntimeStatus") && patched.includes("resumeState")) {
+      patched.includes("threadRuntimeStatus") && patched.includes("runtimeThreadStatusEvidenceByThreadId")) {
     console.warn("WARN: Could not find one current thread/list runtime-status fallback - skipping remote mobile runtime-status patch");
   }
 
@@ -1637,6 +1611,5 @@ module.exports.applyLinuxRemoteConnectionsRefreshPatch = applyLinuxRemoteConnect
 module.exports.applyLinuxRemoteControlFeatureSyncPatch = applyLinuxRemoteControlFeatureSyncPatch;
 module.exports.applyLinuxRemoteControlVisibilityPatch = applyLinuxRemoteControlVisibilityPatch;
 module.exports.applyLinuxRemoteControlCopyPatch = applyLinuxRemoteControlCopyPatch;
-module.exports.applyLinuxRemoteControlSshInstallActionPatch = applyLinuxRemoteControlSshInstallActionPatch;
 module.exports.applyLinuxRemoteControlSshInstallReleasePatch = applyLinuxRemoteControlSshInstallReleasePatch;
 module.exports.applyLinuxRemoteControlSettingsUxPatch = applyLinuxRemoteControlSettingsUxPatch;

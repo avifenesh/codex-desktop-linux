@@ -173,6 +173,10 @@ stage_update_builder_linux_features_tree() {
         [ -d "$source" ] || error "Missing enabled Linux feature: $feature_id ($source)"
         mkdir -p "$(dirname "$destination")"
         cp -a "$source" "$destination"
+        # Checkout umasks can make tracked executables group-writable. Keep
+        # private modes while preventing other users from changing build hooks.
+        find "$destination" -type d -exec chmod go-w {} +
+        find "$destination" -type f -perm /111 -exec chmod go-w {} +
         find "$destination" -type d -name target -prune -exec rm -rf {} +
         if [ "$feature_id" = "directory-only-working-tree-watch" ]; then
             rm -rf "$destination/acceptance"
@@ -1023,6 +1027,10 @@ stage_enabled_native_feature_artifacts() {
                     "$APP_DIR/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-cosmic" \
                     "$update_builder_root/target/release/codex-computer-use-cosmic" \
                     "$feature_id COSMIC helper"
+                stage_update_builder_native_artifact \
+                    "$APP_DIR/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-indicator" \
+                    "$update_builder_root/target/release/codex-computer-use-indicator" \
+                    "$feature_id activity indicator"
                 ;;
             global-dictation)
                 stage_update_builder_native_artifact \

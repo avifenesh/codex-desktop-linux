@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 backend="${CODEX_COMPUTER_USE_BINARY_SOURCE:-$SCRIPT_DIR/target/release/codex-computer-use-linux}"
 cosmic="${CODEX_COMPUTER_USE_COSMIC_BINARY_SOURCE:-$SCRIPT_DIR/target/release/codex-computer-use-cosmic}"
+indicator="${CODEX_COMPUTER_USE_INDICATOR_BINARY_SOURCE:-$SCRIPT_DIR/target/release/codex-computer-use-indicator}"
 target="$INSTALL_DIR/resources/plugins/openai-bundled/plugins/unified-computer-use"
 
 [ -x "$backend" ] || {
@@ -13,7 +14,12 @@ target="$INSTALL_DIR/resources/plugins/openai-bundled/plugins/unified-computer-u
     echo "Linux Computer Use is enabled but its COSMIC helper is missing: $cosmic" >&2
     exit 1
 }
+[ -x "$indicator" ] || {
+    echo "Linux Computer Use is enabled but its activity indicator is missing: $indicator" >&2
+    exit 1
+}
 node "$(dirname "${BASH_SOURCE[0]}")/stage.js"
 mkdir -p "$target/bin"
 install -m 0755 "$backend" "$target/bin/codex-computer-use-linux"
 install -m 0755 "$cosmic" "$target/bin/codex-computer-use-cosmic"
+install -m 0755 "$indicator" "$target/bin/codex-computer-use-indicator"

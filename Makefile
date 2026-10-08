@@ -73,7 +73,7 @@ build-native-feature-helpers:
 	[ -f "$$config" ] || config=linux-features/features.example.json; \
 	enabled="$$(CODEX_LINUX_FEATURES_CONFIG="$$config" node scripts/lib/linux-features.js --enabled)"; \
 	has() { printf '%s\n' "$$enabled" | grep -Fxq "$$1"; }; \
-	if has computer-use-linux; then cargo build $(CARGO_JOBS_ARG) --release -p codex-computer-use-linux --bin codex-computer-use-linux --bin codex-computer-use-cosmic; fi; \
+	if has computer-use-linux; then cargo build $(CARGO_JOBS_ARG) --release -p codex-computer-use-linux --bin codex-computer-use-linux --bin codex-computer-use-cosmic --bin codex-computer-use-indicator; fi; \
 	if has global-dictation; then cargo build $(CARGO_JOBS_ARG) --release --manifest-path global-dictation-linux/Cargo.toml --target-dir global-dictation-linux/target; fi; \
 	if has read-aloud-mcp; then cargo build $(CARGO_JOBS_ARG) --release -p codex-read-aloud-linux; fi; \
 	if has chronicle-skysight || has record-and-replay; then cargo build $(CARGO_JOBS_ARG) --release -p codex-record-replay-linux; fi; \
