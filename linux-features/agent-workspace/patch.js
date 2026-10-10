@@ -1897,13 +1897,17 @@ function isAgentWorkspaceSettingsSharedMetadataBundleSource(currentSource) {
 }
 
 const CURRENT_SETTINGS_ROUTE_PATTERN =
-  /"general-settings":(?=([A-Za-z_$][\w$]*)\(async\(\)=>\(await ([A-Za-z_$][\w$]*)\(async\(\)=>\{let\{GeneralSettings:[A-Za-z_$][\w$]*\}=await import\()/;
+  /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(async\(\)=>\(await ([A-Za-z_$][\w$]*)\(async\(\)=>\{let\{GeneralSettings:[A-Za-z_$][\w$]*\}=await import\(/g;
+
+function currentSettingsRouteBindings(source) {
+  const matches = [...source.matchAll(CURRENT_SETTINGS_ROUTE_PATTERN)].filter(
+    (match) => source.includes(`"general-settings":${match[1]},`),
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
 
 function isAgentWorkspaceSettingsRouteBundleSource(currentSource) {
-  return (
-    currentSource.includes(SETTINGS_ASSET) ||
-    CURRENT_SETTINGS_ROUTE_PATTERN.test(currentSource)
-  );
+  return currentSource.includes(SETTINGS_ASSET) || currentSettingsRouteBindings(currentSource) != null;
 }
 
 const CURRENT_SETTINGS_CATALOG_SLUGS = "local-environments.worktrees.environments";
@@ -2022,13 +2026,14 @@ function applyAgentWorkspaceSettingsIndexPatch(currentSource) {
   let patchedSource = currentSource;
 
   if (!patchedSource.includes(SETTINGS_ASSET)) {
-    if (!CURRENT_SETTINGS_ROUTE_PATTERN.test(patchedSource)) {
+    const bindings = currentSettingsRouteBindings(patchedSource);
+    if (bindings == null) {
       throw new Error("could not add agent workspace settings route");
     }
+    const [, componentAlias, lazyAlias, preloadAlias] = bindings;
     patchedSource = patchedSource.replace(
-      CURRENT_SETTINGS_ROUTE_PATTERN,
-      (_match, lazyAlias, preloadAlias) =>
-        `"${SETTINGS_SLUG}":${lazyAlias}(async()=>(await ${preloadAlias}(async()=>{let{default:e}=await import(\`./${SETTINGS_ASSET}\`);return{default:e}},[],import.meta.url)).default),"general-settings":`,
+      `"general-settings":${componentAlias},`,
+      `"${SETTINGS_SLUG}":${lazyAlias}(async()=>(await ${preloadAlias}(async()=>{let{default:e}=await import(\`./${SETTINGS_ASSET}\`);return{default:e}},[],import.meta.url)).default),"general-settings":${componentAlias},`,
     );
   }
 

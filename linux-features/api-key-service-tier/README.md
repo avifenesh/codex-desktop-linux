@@ -45,7 +45,7 @@ provider explicitly documents such a model alias.
 
 ## Behavior
 
-- API-key-authenticated hosts are allowed to show service-tier controls.
+- API-key-authenticated hosts are allowed to show Fast mode controls once authentication finishes. The current service-tier access cache tracks auth method changes; ChatGPT and personal-access-token hosts keep upstream account requirements.
 - If an API-key host's active model has no `serviceTiers` metadata, the UI
   synthesizes one `fast` option so the selector can send
   `serviceTier: "fast"`.

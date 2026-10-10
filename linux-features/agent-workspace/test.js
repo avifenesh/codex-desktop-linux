@@ -157,7 +157,7 @@ function syntheticCurrentSettingsMetadata() {
 function syntheticCurrentAppInitialBundle() {
   return [
     "function render(e){return currentRouteMap[e.slug]}",
-    'var currentRouteMap={"general-settings":BN(async()=>(await Y(async()=>{let{GeneralSettings:e}=await import(`./general-settings-TbWU8D8b.js`);return{GeneralSettings:e}},__vite__mapDeps([1,2]),import.meta.url)).GeneralSettings),',
+    'var GeneralPage=BN(async()=>(await Y(async()=>{let{GeneralSettings:e}=await import(`./general-settings-TbWU8D8b.js`);return{GeneralSettings:e}},__vite__mapDeps([1,2]),import.meta.url)).GeneralSettings);var currentRouteMap={"general-settings":GeneralPage,',
     'import:BN(async()=>(await Y(async()=>{let{ImportSettings:e}=await import(`./import-settings-DmsueF_s.js`);return{ImportSettings:e}},__vite__mapDeps([3]),import.meta.url)).ImportSettings)};',
     syntheticCurrentSettingsMetadata(),
     syntheticCurrentSettingsCatalog(),

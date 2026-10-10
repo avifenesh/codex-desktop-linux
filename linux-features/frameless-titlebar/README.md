@@ -1,7 +1,7 @@
 # Frameless Titlebar
 
 This optional feature hides Electron-drawn Linux window-control overlay buttons
-and the in-app application menu on the primary and Quick Chat Community windows.
+and the in-app application menu on the primary and detached Community windows.
 The official Linux package still creates those windows with
 `titleBarStyle: hidden` plus `titleBarOverlay`, then reapplies the overlay from
 `setWindowZoom` and `installApplicationMenuTitleBarOverlaySync`. Official Linux
@@ -63,7 +63,7 @@ node --test linux-features/frameless-titlebar/test.js
 For a manual check, enable the feature as above, rebuild, fully quit every
 ChatGPT Community and official ChatGPT process, then launch the app:
 
-- The primary and Quick Chat windows should show no Electron-drawn titlebar
+- The primary and detached windows should show no Electron-drawn titlebar
   overlay buttons (minimize/maximize/close in the top-right corner) and no menu
   bar.
 - The rightmost app-header control should retain the standard 8px end padding

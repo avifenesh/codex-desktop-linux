@@ -244,18 +244,19 @@ test("bare modifier monitor emits one transition from one XInput2 stream", () =>
     [
       "#!/bin/sh",
       "[ \"$1 $2\" = \"test-xi2 --root\" ] || exit 2",
+      'printf "%s\\n" "$$" > "$APPSHOT_TEST_XINPUT_PID_FILE"',
       "printf '%s\\n' \\",
       "  'EVENT type 13 (RawKeyPress)' '    detail: 50' \\",
       "  'EVENT type 14 (RawKeyRelease)' '    detail: 50' \\",
       "  'EVENT type 13 (RawKeyPress)' '    detail: 62' \\",
       "  'EVENT type 14 (RawKeyRelease)' '    detail: 62'",
-      "sleep 0.25",
+      "exec cat >/dev/null",
     ].join("\n"),
     { mode: 0o755 },
   );
   fs.writeFileSync(
     path.join(binDir, "date"),
-    "#!/bin/sh\n[ \"$1\" = \"+%s%N\" ] || exit 2\nprintf '%s\\n' 1787195182868568236\n",
+    "#!/bin/sh\n[ \"$1\" = \"+%s%N\" ] || exit 2\nif [ -f \"$APPSHOT_TEST_XINPUT_PID_FILE\" ]; then IFS= read -r fixture_pid < \"$APPSHOT_TEST_XINPUT_PID_FILE\"; rm \"$APPSHOT_TEST_XINPUT_PID_FILE\"; kill \"$fixture_pid\"; fi\nprintf '%s\\n' 1787195182868568236\n",
     { mode: 0o755 },
   );
 
@@ -265,6 +266,7 @@ test("bare modifier monitor emits one transition from one XInput2 stream", () =>
       env: {
         ...process.env,
         DISPLAY: ":99",
+        APPSHOT_TEST_XINPUT_PID_FILE: path.join(tempDir, "producer.pid"),
         PATH: `${binDir}:${process.env.PATH}`,
       },
       timeout: 2_000,

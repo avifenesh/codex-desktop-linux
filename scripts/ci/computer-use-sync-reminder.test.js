@@ -146,3 +146,12 @@ test("sync reminder workflow serializes runs and pins third-party actions", () =
   assert.match(workflow, /cancel-in-progress: false/);
   assert.doesNotMatch(workflow, /uses:\s+[^\s]+@v\d/);
 });
+
+test("sync reminder skips repositories with issues disabled without API mutations", async () => {
+  const value = harness({ legacyIssue: null });
+  value.context.payload.repository = { has_issues: false };
+
+  await runWorkflow(value);
+
+  assert.deepEqual(value.calls, [["notice", "Repository issues are disabled; no sync reminder was created."]]);
+});

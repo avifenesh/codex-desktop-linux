@@ -152,6 +152,10 @@ cleanup() {
     [ "$cleanup_started" -eq 0 ] || return
     cleanup_started=1
 
+    if [ -n "$event_fd" ]; then
+        exec {event_fd}<&- || true
+    fi
+
     [ -n "$monitor_pid" ] || return
     kill "$monitor_pid" >/dev/null 2>&1 || true
     sleep 0.05
@@ -167,7 +171,9 @@ else
     coproc APPSHOT_XINPUT { exec xinput test-xi2 --root 2>/dev/null; }
 fi
 monitor_pid="$APPSHOT_XINPUT_PID"
-event_fd="${APPSHOT_XINPUT[0]}"
+# Bash closes its coprocess descriptor when the producer exits. Own a duplicate
+# so events already buffered in the pipe can still be consumed.
+exec {event_fd}<&"${APPSHOT_XINPUT[0]}"
 
 sleep 0.1
 if ! kill -0 "$monitor_pid" >/dev/null 2>&1; then
@@ -182,9 +188,12 @@ fi
 echo "ready"
 
 pending=""
-while kill -0 "$parent_pid" >/dev/null 2>&1 && kill -0 "$monitor_pid" >/dev/null 2>&1; do
-    if ! IFS= read -r -t 1 -u "$event_fd" line; then
-        continue
+while kill -0 "$parent_pid" >/dev/null 2>&1; do
+    read_status=0
+    IFS= read -r -t 1 -u "$event_fd" line || read_status=$?
+    if [ "$read_status" -ne 0 ]; then
+        [ "$read_status" -gt 128 ] && continue
+        break
     fi
 
     case "$line" in

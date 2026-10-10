@@ -401,7 +401,7 @@ function syntheticAppServerManagerStatusBundle() {
     "function wO(e,t){return e.bump(t)}",
     "function TO(e,t,n){return e.current(t)===n}",
     "function PO(e,t,n){return e.set(bO,t,n)}",
-    "function SO(e,t){let n=t.getHostId();if(NO(n))return;let r=wO(e,n),i=e.get(bO,n);t.addNotificationCallback(`remoteControl/status/changed`,({params:t})=>{TO(e,n,r)&&PO(e,n,t)}),t.sendRequest(`remoteControl/status/read`,void 0).then(t=>{e.get(bO,n)===i&&TO(e,n,r)&&PO(e,n,t)}).catch(t=>{TO(e,n,r)&&z.error(`Failed to read remote-control status`,{safe:{},sensitive:{error:t}})})}",
+    "function am(request){return request}function SO(e,t,n,r){if(NO(t))return()=>{};let i=new AbortController,a=()=>!i.signal.aborted&&(r?.()??!0),o=e.get(bO,t),s=n.subscribe({type:`notification`,key:{hostId:t},methods:`remoteControl/status/changed`,listener:({params:n})=>{a()&&PO(e,t,n)}}),c,l=()=>{i.signal.aborted||(i.abort(),s[Symbol.dispose](),c?.[Symbol.dispose]())};return s.onRpcBroken(l),s.then(e=>{if(!a()){e[Symbol.dispose]();return}c=e,e.onRpcBroken(l)},l),am(n.sendRequest(`remoteControl/status/read`,void 0),i.signal).then(n=>{e.get(bO,t)===o&&a()&&PO(e,t,n)}).catch(e=>{a()&&z.error(`Failed to read remote-control status`,{safe:{},sensitive:{error:e}})}),l}",
   ].join("");
 }
 
@@ -2246,88 +2246,57 @@ test("Linux remote mobile hydration rejects a current dispatcher without its cal
   assert.ok(warnings.some((warning) => warning.includes("complete current remote notification recovery lifecycle")));
 });
 
-test("Linux remote-control status guard skips slow remote SSH status reads", async () => {
+test("current status guard skips unsupported Linux hosts and preserves disposal", async () => {
   const source = syntheticAppServerManagerStatusBundle();
   const patched = applyLinuxRemoteControlStatusReadGuardPatch(source);
-
   assert.notEqual(patched, source);
-  assert.match(patched, /codexLinuxRemoteControlShouldReadStatus/);
   assert.equal(applyLinuxRemoteControlStatusReadGuardPatch(patched), patched);
-
-  const context = {
-    module: { exports: {} },
-    navigator: { userAgent: "X11; Linux x86_64" },
-    NO: () => false,
-    Promise,
-    z: { error() {} },
-  };
-  vm.runInNewContext(`${patched};module.exports={SO,bO};`, context);
-  const { SO } = context.module.exports;
-  const generations = new Map();
+  const context = { navigator: { userAgent: "X11; Linux x86_64" }, NO: () => false, AbortController, Symbol };
+  const call = vm.runInNewContext(patched + ";SO", context);
   const values = new Map();
-  const store = {
-    bump(hostId) {
-      const next = (generations.get(hostId) ?? 0) + 1;
-      generations.set(hostId, next);
-      return next;
+  const store = { get: (_atom, host) => values.get(host) ?? null, set: (_atom, host, value) => values.set(host, value) };
+  let requests = 0, subscriptions = 0, disposed = 0;
+  const client = {
+    subscribe() {
+      subscriptions++;
+      const handle = { onRpcBroken() {}, [Symbol.dispose]() { disposed++; } };
+      const pending = Promise.resolve(handle);
+      pending.onRpcBroken = () => {};
+      pending[Symbol.dispose] = () => { disposed++; };
+      return pending;
     },
-    current(hostId) {
-      return generations.get(hostId);
-    },
-    get(_atom, hostId) {
-      return values.get(hostId) ?? null;
-    },
-    set(_atom, hostId, value) {
-      values.set(hostId, value);
-    },
-  };
-
-  let remoteRequests = 0;
-  SO(store, {
-    getHostId: () => "remote-ssh-discovered:dev",
-    addNotificationCallback() {},
-    sendRequest() {
-      remoteRequests += 1;
-      return Promise.resolve({ status: "enabled" });
-    },
-  });
-  assert.equal(remoteRequests, 0);
-  const disabledStatus = values.get("remote-ssh-discovered:dev");
-  assert.equal(disabledStatus.status, "disabled");
-  assert.equal(disabledStatus.available, false);
-  assert.equal(disabledStatus.accessRequired, false);
-
-  let localRequests = 0;
-  SO(store, {
-    getHostId: () => "local",
-    addNotificationCallback() {},
     sendRequest(method) {
-      localRequests += 1;
+      requests++;
       assert.equal(method, "remoteControl/status/read");
       return Promise.resolve({ status: "enabled" });
     },
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(localRequests, 1);
+  };
+  for (const host of ["remote-ssh-discovered:dev", "remote-control:env_test"]) {
+    const cleanup = call(store, host, client);
+    assert.equal(typeof cleanup, "function");
+    cleanup();
+    assert.equal(values.get(host).status, "disabled");
+    assert.equal(values.get(host).available, false);
+  }
+  assert.equal(requests, 0);
+  assert.equal(subscriptions, 0);
+  call(store, "remote-control:stale", client, () => false);
+  assert.equal(values.has("remote-control:stale"), false);
+  const cleanup = call(store, "local", client);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests, 1);
   assert.equal(values.get("local").status, "enabled");
+  cleanup();
+  assert.equal(disposed, 2);
 });
 
-test("Linux remote-control status guard skips remote-control environment status reads", () => {
-  const source = syntheticAppServerManagerStatusBundle();
-  const patched = applyLinuxRemoteControlStatusReadGuardPatch(source);
-
-  assert.match(patched, /startsWith\(`remote-control:`\)/);
-
-  const context = {
-    module: { exports: {} },
-    navigator: { userAgent: "X11; Linux x86_64" },
-  };
-  vm.runInNewContext(`${patched};module.exports={codexLinuxRemoteControlShouldReadStatus};`, context);
-  const { codexLinuxRemoteControlShouldReadStatus } = context.module.exports;
-
-  assert.equal(codexLinuxRemoteControlShouldReadStatus("remote-control:env_test"), false);
-  assert.equal(codexLinuxRemoteControlShouldReadStatus("remote-ssh-discovered:dev"), false);
-  assert.equal(codexLinuxRemoteControlShouldReadStatus("local"), true);
+test("current status guard does not change non-Linux host eligibility", () => {
+  const patched = applyLinuxRemoteControlStatusReadGuardPatch(syntheticAppServerManagerStatusBundle());
+  for (const userAgent of ["X11; Linux x86_64", "Macintosh", "Windows"]) {
+    const check = vm.runInNewContext(patched + ";codexLinuxRemoteControlShouldReadStatus", { navigator: { userAgent } });
+    assert.equal(check("remote-control:env_test"), !userAgent.includes("Linux"));
+    assert.equal(check("local"), true);
+  }
 });
 
 test("Linux remote terminal status recovery treats stale waiting input as idle", () => {
