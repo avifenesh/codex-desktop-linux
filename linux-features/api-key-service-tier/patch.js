@@ -3,15 +3,16 @@
 const JS_IDENT = "[A-Za-z_$][\\w$]*";
 const PATCH_MARKER = "codexLinuxApiKeyFastTier";
 const MODEL_MARKER = "codexLinuxApiKeyServiceTierModel";
-const SERVICE_TIER_GATE_SHAPE = new RegExp(
-  `authMethod===\`chatgpt\`(?:\\|\\|${JS_IDENT}\\?\\.authMethod===\`personalAccessToken\`)?[\\s\\S]{0,200}?authMethod\\?\\?null` +
-    `[\\s\\S]{0,1200}?featureRequirements\\?\\.fast_mode` +
-    `[\\s\\S]{0,500}?\\{isServiceTierAllowed:${JS_IDENT},isLoading:${JS_IDENT}\\}`,
+const ACCESS_PREFIX = String.raw`(?<isChat>${JS_IDENT})=(?<host>${JS_IDENT})\?\.authMethod===\x60chatgpt\x60\|\|\k<host>\?\.authMethod===\x60personalAccessToken\x60,(?<auth>${JS_IDENT})=\k<host>\?\.authMethod\?\?null(?<middle>[\s\S]{0,700}?)`;
+const ACCESS_MEMO = String.raw`(?<cache>${JS_IDENT})\[3\]!==(?<data>${JS_IDENT})\|\|\k<cache>\[4\]!==(?<loading>${JS_IDENT})\|\|\k<cache>\[5\]!==`;
+const ACCESS_SUFFIX = String.raw`,\k<cache>\[3\]=\k<data>,\k<cache>\[4\]=\k<loading>,\k<cache>\[5\]=`;
+const CURRENT_SERVICE_TIER_GATE = new RegExp(
+  ACCESS_PREFIX + ACCESS_MEMO + String.raw`\k<isChat>\?\((?<value>${JS_IDENT})=\k<isChat>&&!\k<loading>&&\k<data>!=null\?(?<policy>${JS_IDENT})\(\k<data>\):null` +
+    ACCESS_SUFFIX + String.raw`\k<isChat>,\k<cache>\[6\]=\k<value>\)(?=[\s\S]{0,250}serviceTierAccess:)`, "g",
 );
 const PATCHED_SERVICE_TIER_GATE = new RegExp(
-  `${JS_IDENT}=!${JS_IDENT}&&\\(${JS_IDENT}\\?${JS_IDENT}!=null&&` +
-    `${JS_IDENT}\\?\\.requirements\\?\\.featureRequirements\\?\\.fast_mode!==!1:` +
-    `${JS_IDENT}===\`apikey\`\\)`,
+  ACCESS_PREFIX + ACCESS_MEMO + String.raw`\k<auth>\?\((?<value>${JS_IDENT})=!\k<loading>\?\(\k<isChat>&&\k<data>!=null\?(?<policy>${JS_IDENT})\(\k<data>\):\k<auth>===\x60apikey\x60\?\{fast:!0,ultrafast:!1\}:null\):null` +
+    ACCESS_SUFFIX + String.raw`\k<auth>,\k<cache>\[6\]=\k<value>\)(?=[\s\S]{0,250}serviceTierAccess:)`, "g",
 );
 const PATCHED_MODEL_MARKER = new RegExp(`${MODEL_MARKER}:${JS_IDENT}===\\\`apikey\\\``);
 const PATCHED_SERVICE_TIER_RESOLVER = new RegExp(
@@ -33,33 +34,25 @@ function warn(message, patchName) {
 }
 
 function applyApiKeyServiceTierGatePatch(source) {
-  const gateNeedle = new RegExp(
-    `(${JS_IDENT})=(${JS_IDENT})\\?\\.authMethod===\\\`chatgpt\\\`(?:\\|\\|\\2\\?\\.authMethod===\\\`personalAccessToken\\\`)?[,]` +
-      `(${JS_IDENT})=\\2\\?\\.authMethod\\?\\?null([\\s\\S]{0,500}?),` +
-      `(${JS_IDENT})=\\1&&!(${JS_IDENT})&&(${JS_IDENT})!=null&&\\7\\?\\.requirements\\?\\.featureRequirements\\?\\.fast_mode!==!1`,
-    "g",
-  );
-
-  const patched = source.replace(
-    gateNeedle,
-    (_match, isChatGptVar, hostVar, authMethodVar, middle, allowedVar, loadingVar, requirementsVar) =>
-      `${isChatGptVar}=${hostVar}?.authMethod===\`chatgpt\`||${hostVar}?.authMethod===\`personalAccessToken\`,` +
-      `${authMethodVar}=${hostVar}?.authMethod??null${middle},` +
-      `${allowedVar}=!${loadingVar}&&(${isChatGptVar}?${requirementsVar}!=null&&${requirementsVar}?.requirements?.featureRequirements?.fast_mode!==!1:${authMethodVar}===\`apikey\`)`,
-  );
-
-  if (patched !== source || PATCHED_SERVICE_TIER_GATE.test(source)) {
-    return patched;
+  const current = [...source.matchAll(CURRENT_SERVICE_TIER_GATE)];
+  const patched = [...source.matchAll(PATCHED_SERVICE_TIER_GATE)];
+  if (current.length === 0 && patched.length === 1) return source;
+  if (current.length !== 1 || patched.length !== 0) {
+    if (source.includes("serviceTierAccess:")) warn("Could not find unique service tier access gate", "API key service tier gate patch");
+    return source;
   }
-
-  if (hasApiKeyServiceTierGateShape(source)) {
-    warn("Could not find service tier auth gate", "API key service tier gate patch");
-  }
-  return source;
+  const match = current[0];
+  const { isChat, host, auth, middle, cache, data, loading, value, policy } = match.groups;
+  // Auth method replaces the derived boolean as the memo key. API-key and
+  // other non-ChatGPT hosts otherwise share false and reuse stale access.
+  const replacement = `${isChat}=${host}?.authMethod===\`chatgpt\`||${host}?.authMethod===\`personalAccessToken\`,${auth}=${host}?.authMethod??null${middle}` +
+    `${cache}[3]!==${data}||${cache}[4]!==${loading}||${cache}[5]!==${auth}?(${value}=!${loading}?(${isChat}&&${data}!=null?${policy}(${data}):${auth}===\`apikey\`?{fast:!0,ultrafast:!1}:null):null,` +
+    `${cache}[3]=${data},${cache}[4]=${loading},${cache}[5]=${auth},${cache}[6]=${value})`;
+  return source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
 }
 
 function hasApiKeyServiceTierGateShape(source) {
-  return SERVICE_TIER_GATE_SHAPE.test(source);
+  return [...source.matchAll(CURRENT_SERVICE_TIER_GATE)].length > 0;
 }
 
 function applyApiKeyModelMarkerPatch(source) {
@@ -97,7 +90,7 @@ function hasApiKeyModelListMappingShape(source) {
 }
 
 function matchesApiKeyServiceTierGateContract(source) {
-  return PATCHED_SERVICE_TIER_GATE.test(source) || hasApiKeyServiceTierGateShape(source);
+  return [...source.matchAll(PATCHED_SERVICE_TIER_GATE)].length > 0 || hasApiKeyServiceTierGateShape(source);
 }
 
 function matchesApiKeyServiceTierModelContract(source) {
@@ -260,14 +253,12 @@ function applyApiKeyServiceTierPatch(source) {
 }
 
 function applyCurrentGatePatch(source) {
-  const gateAlreadyPatched = PATCHED_SERVICE_TIER_GATE.test(source);
-  const gateCandidate = gateAlreadyPatched ? source : applyApiKeyServiceTierGatePatch(source);
-  const gateReady = gateAlreadyPatched || gateCandidate !== source;
-
-  if (!gateReady && !hasApiKeyServiceTierGateShape(source)) {
-    warn("Could not identify current service tier auth gate", "API key service tier gate patch");
-  }
-  return gateCandidate;
+  const current = [...source.matchAll(CURRENT_SERVICE_TIER_GATE)];
+  const patched = [...source.matchAll(PATCHED_SERVICE_TIER_GATE)];
+  if (current.length === 1 && patched.length === 0) return applyApiKeyServiceTierGatePatch(source);
+  if (current.length === 0 && patched.length === 1) return source;
+  warn("Could not identify current service tier auth gate", "API key service tier gate patch");
+  return source;
 }
 
 function applyCurrentModelPatch(source) {

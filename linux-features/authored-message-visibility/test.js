@@ -10,10 +10,10 @@ const { loadLinuxFeaturePatchDescriptors } = require("../../scripts/lib/linux-fe
 const { applyWebviewAssetPatchDescriptors } = require("../../scripts/patches/engine.js");
 const { createPatchReport, captureWarnings, enabledFeatureFailuresFromReport } = require("../../scripts/lib/patch-report.js");
 
-// Partition and classifier shape from signed official Linux 26.928.20755; local aliases renamed.
-const fixture = "function kG(e,{keepMcpAppEntriesPersistent:t=!1,mcpServerStatuses:n,renderMcpApps:r=!1}={}){let i=[],a=[],o=[],s=[],c=null;for(let l of e){if(l.kind===`standalone`&&l.item.item.type===`worked-for`){c=l.item.item;continue}if(l.kind===`standalone`&&l.item.item.type===`realtime-transcript`){a.length===0?s.push(l):(a.push(l),o.push(l));continue}a.push(l),AG({unit:l,keepMcpAppEntriesPersistent:t,mcpServerStatuses:n,renderMcpApps:r})?o.push(l):i.push(l)}return{collapsibleUnits:i,expandedUnits:a,persistentUnits:o,preToggleUnits:s,workedForItem:c}}function AG({unit:e,keepMcpAppEntriesPersistent:t,mcpServerStatuses:n,renderMcpApps:r}){if(e.kind!==`standalone`)return!1;let i=e.item.item;return i.type===`assistant-message`&&Vi(i)||i.type===`dynamic-tool-call`&&Mh(i)||t&&r&&i.type===`mcp-tool-call`&&jG({item:i,mcpServerStatuses:n})?!0:i.type===`user-message`&&(i.steeringStatus!=null||i.hookFeedback===!0)}";
+// Partition and classifier shape from signed official Linux 26.1007.21434; local aliases renamed.
+const fixture = "function kG(e,{keepMcpAppEntriesPersistent:t=!1,mcpServerStatuses:n,renderMcpApps:r=!1}={}){let i=[],a=[],o=[],s=[],c=null;for(let l of e){if(l.kind===`standalone`&&l.item.item.type===`worked-for`){c=l.item.item;continue}if(l.kind===`standalone`&&l.item.item.type===`realtime-transcript`){a.length===0?s.push(l):(a.push(l),o.push(l));continue}a.push(l),AG({unit:l,keepMcpAppEntriesPersistent:t,mcpServerStatuses:n,renderMcpApps:r})?o.push(l):i.push(l)}return{collapsibleUnits:i,expandedUnits:a,persistentUnits:o,preToggleUnits:s,workedForItem:c}}function AG({unit:e,keepMcpAppEntriesPersistent:t,mcpServerStatuses:n,renderMcpApps:r}){if(e.kind!==`standalone`)return!1;let i=e.item.item;return i.type===`mcp-tool-call`&&specialMcp(i)||i.type===`assistant-message`&&Vi(i)||i.type===`dynamic-tool-call`&&Mh(i)||t&&r&&i.type===`mcp-tool-call`&&jG({item:i,mcpServerStatuses:n})?!0:i.type===`user-message`&&(i.steeringStatus!=null||i.hookFeedback===!0)}";
 function partition(source, units, options) {
-  return vm.runInNewContext(source + ";kG", { Vi: item => item.special, Mh: item => item.interactive, jG: ({item}) => item.interactive })(units, options);
+  return vm.runInNewContext(source + ";kG", { specialMcp: item => item.specialMcp, Vi: item => item.special, Mh: item => item.interactive, jG: ({item}) => item.interactive })(units, options);
 }
 const unit = (type, id, extra = {}) => ({kind:"standalone",item:{item:{type,id,...extra}}});
 const ids = units => Array.from(units, unit => unit.item.item.id);
@@ -38,6 +38,11 @@ test("tool exceptions, grouped activity and worked-for handling remain upstream-
   assert.equal(JSON.stringify(partition(apply(fixture),tools,options)),JSON.stringify(partition(fixture,tools,options)));
   const group = {kind:"group",items:[]};
   assert.equal(partition(apply(fixture),[group]).collapsibleUnits[0],group);
+});
+
+test("current special MCP entries remain persistent without general app rendering", () => {
+  const units = [unit("mcp-tool-call", "special", {specialMcp: true}), unit("mcp-tool-call", "ordinary")];
+  assert.deepEqual(ids(partition(apply(fixture), units).persistentUnits), ["special"]);
 });
 
 test("missing, duplicate, mixed and changed classifiers remain byte-identical with actionable warnings", () => {

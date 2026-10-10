@@ -1100,47 +1100,22 @@ function applyLinuxRemoteTerminalStatusRecoveryPatch(source) {
 }
 
 function applyLinuxRemoteControlStatusReadGuardPatch(source) {
-  if (source.includes(REMOTE_CONTROL_STATUS_READ_GUARD_MARKER)) {
+  if (source.includes(REMOTE_CONTROL_STATUS_READ_GUARD_MARKER)) return source;
+  if (!source.includes("remoteControl/status/read")) return source;
+  // Current RPC subscriptions return a disposer and use an explicit host ID.
+  // Preserve the upstream cancellation/subscription body for supported hosts.
+  const pattern = new RegExp(String.raw`function (?<fn>${DEVICE_KEY_IDENT})\((?<store>${DEVICE_KEY_IDENT}),(?<host>${DEVICE_KEY_IDENT}),(?<client>${DEVICE_KEY_IDENT}),(?<valid>${DEVICE_KEY_IDENT})\)\{if\((?<skip>${DEVICE_KEY_IDENT})\(\k<host>\)\)return\(\)=>\{\};(?<body>let ${DEVICE_KEY_IDENT}=new AbortController,[\s\S]{0,250}?${DEVICE_KEY_IDENT}=\k<store>\.get\((?<atom>${DEVICE_KEY_IDENT}),\k<host>\))(?=[\s\S]{0,1800}?\k<client>\.subscribe\([\s\S]{0,1800}?\k<client>\.sendRequest\(\x60remoteControl/status/read\x60)`, "g");
+  const matches = [...source.matchAll(pattern)];
+  if (matches.length !== 1) {
+    console.warn("WARN: Could not find unique current remote-control status reader - skipping Linux remote-control status guard patch");
     return source;
   }
-  if (!source.includes("remoteControl/status/read")) {
-    return source;
-  }
-
-  const statusReadPattern =
-    /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=\3\.getHostId\(\);if\(([A-Za-z_$][\w$]*)\(\4\)\)return;let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\2,\4\),([A-Za-z_$][\w$]*)=\2\.get\(([A-Za-z_$][\w$]*),\4\);\3\.addNotificationCallback\(`remoteControl\/status\/changed`,\(\{params:([A-Za-z_$][\w$]*)\}\)=>\{([A-Za-z_$][\w$]*)\(\2,\4,\6\)&&([A-Za-z_$][\w$]*)\(\2,\4,\10\)\}\),\3\.sendRequest\(`remoteControl\/status\/read`,void 0\)\.then\(([A-Za-z_$][\w$]*)=>\{\2\.get\(\9,\4\)===\8&&\11\(\2,\4,\6\)&&\12\(\2,\4,\13\)\}\)\.catch\(([A-Za-z_$][\w$]*)=>\{\11\(\2,\4,\6\)&&([A-Za-z_$][\w$]*)\.error\(`Failed to read remote-control status`,\{safe:\{\},sensitive:\{error:\14\}\}\)\}\)\}/u;
-  const match = source.match(statusReadPattern);
-  if (match == null) {
-    console.warn("WARN: Could not find remote-control status read needle - skipping Linux remote-control status guard patch");
-    return source;
-  }
-
-  const [
-    needle,
-    functionName,
-    storeVar,
-    clientVar,
-    hostVar,
-    upstreamSkipFn,
-    generationVar,
-    generationFn,
-    initialValueVar,
-    statusAtomVar,
-    notificationParamsVar,
-    isCurrentFn,
-    statusSetterFn,
-    readResultVar,
-    errorVar,
-    loggerVar,
-  ] = match;
-  const replacement =
-    `function ${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}(e){return !(typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)&&typeof e==\`string\`&&(e.startsWith(\`remote-ssh\`)||e.startsWith(\`remote-control:\`)))}` +
-    `function ${functionName}(${storeVar},${clientVar}){let ${hostVar}=${clientVar}.getHostId();if(${upstreamSkipFn}(${hostVar}))return;let ${generationVar}=${generationFn}(${storeVar},${hostVar}),${initialValueVar}=${storeVar}.get(${statusAtomVar},${hostVar});` +
-    `${clientVar}.addNotificationCallback(\`remoteControl/status/changed\`,({params:${notificationParamsVar}})=>{${isCurrentFn}(${storeVar},${hostVar},${generationVar})&&${statusSetterFn}(${storeVar},${hostVar},${notificationParamsVar})});` +
-    `if(!${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}(${hostVar})){${isCurrentFn}(${storeVar},${hostVar},${generationVar})&&${statusSetterFn}(${storeVar},${hostVar},{status:\`disabled\`,available:!1,accessRequired:!1});return}` +
-    `${clientVar}.sendRequest(\`remoteControl/status/read\`,void 0).then(${readResultVar}=>{${storeVar}.get(${statusAtomVar},${hostVar})===${initialValueVar}&&${isCurrentFn}(${storeVar},${hostVar},${generationVar})&&${statusSetterFn}(${storeVar},${hostVar},${readResultVar})}).catch(${errorVar}=>{${isCurrentFn}(${storeVar},${hostVar},${generationVar})&&${loggerVar}.error(\`Failed to read remote-control status\`,{safe:{},sensitive:{error:${errorVar}}})})}`;
-
-  return source.replace(needle, replacement);
+  const match = matches[0];
+  const { fn, store, host, client, valid, skip, body, atom } = match.groups;
+  const helper = `function ${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}(e){return !(typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)&&typeof e==\`string\`&&(e.startsWith(\`remote-ssh\`)||e.startsWith(\`remote-control:\`)))}`;
+  const replacement = helper + `function ${fn}(${store},${host},${client},${valid}){if(${skip}(${host}))return()=>{};` +
+    `if(!${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}(${host})){(${valid}?.()??!0)&&${store}.set(${atom},${host},{status:\`disabled\`,available:!1,accessRequired:!1});return()=>{}}${body}`;
+  return source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
 }
 
 function applyLinuxRemoteControlStatusWaitPatch(source) {
