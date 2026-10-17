@@ -87,6 +87,54 @@ test("an explicitly empty core registry leaves an extracted official-style app u
   for (const [filePath, bytes] of before) assert.deepEqual(fs.readFileSync(filePath), bytes);
 });
 
+test("final main-process syntax gate rejects duplicate parameters without executing the app", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-main-syntax-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const buildDir = path.join(root, ".vite", "build");
+  fs.mkdirSync(buildDir, { recursive: true });
+  // A valid entry does not hide an invalid imported chunk. This is the exact
+  // destructured/formal collision introduced by the 26.1013 CUA adaptation.
+  fs.writeFileSync(path.join(buildDir, "main.js"), 'throw Error("must never execute");');
+  const chunk = path.join(buildDir, "cua-config.js");
+  fs.writeFileSync(chunk, "function Aa({browserBackends:e,deferTools:t,surfaces:n,nodeRepl:r},r){}");
+  const options = {
+    corePatchRoot: path.join(root, "empty-core"),
+    featuresConfigPath: path.join(__dirname, "..", "linux-features", "features.example.json"),
+  };
+  assert.throws(() => patchExtractedApp(root, options), (error) =>
+    error.code === "PATCH_INTEGRITY_FAILURE" &&
+    /cua-config\.js: SyntaxError: Duplicate parameter name/.test(error.message));
+
+  fs.writeFileSync(chunk, "function Aa({browserBackends:e,deferTools:t,surfaces:n,nodeRepl:r},pluginRoot){}");
+  fs.writeFileSync(path.join(buildDir, "module.mjs"), 'export const value = await Promise.resolve(1); throw Error("must never execute");');
+  fs.writeFileSync(path.join(buildDir, "common.cjs"), 'return;');
+  assert.doesNotThrow(() => patchExtractedApp(root, options));
+});
+
+test("syntax validation runs after extracted-app post-webview transforms", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-final-syntax-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const buildDir = path.join(root, ".vite", "build");
+  const corePatchRoot = path.join(root, "core");
+  fs.mkdirSync(buildDir, { recursive: true });
+  fs.mkdirSync(corePatchRoot, { recursive: true });
+  fs.writeFileSync(path.join(buildDir, "main.js"), "const main=true;");
+  fs.writeFileSync(path.join(corePatchRoot, "patch.js"), `
+    module.exports.descriptors = [{
+      id: "late-syntax-regression", phase: "extracted-app:post-webview",
+      apply(root) {
+        require("node:fs").writeFileSync(require("node:path").join(root, ".vite/build/main.js"),
+          "function Aa({nodeRepl:r},r){}");
+        return { changed: true };
+      }
+    }];
+  `);
+  assert.throws(() => patchExtractedApp(root, {
+    corePatchRoot,
+    featuresConfigPath: path.join(__dirname, "..", "linux-features", "features.example.json"),
+  }), /JavaScript syntax validation failed.*main\.js: SyntaxError: Duplicate parameter name/);
+});
+
 test("CLI rejects drift in an explicitly enabled feature", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-enabled-feature-drift-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

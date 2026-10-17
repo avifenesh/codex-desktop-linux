@@ -18,23 +18,26 @@ function deviceKeyProviderPattern(flags = "u") {
   return new RegExp(
     `,(?<providerClass>${DEVICE_KEY_IDENT})=class\\{resourcesPath;addon=null;` +
       `constructor\\((?<constructorArg>${DEVICE_KEY_IDENT})\\)\\{this\\.resourcesPath=\\k<constructorArg>\\}` +
-      `[\\s\\S]{0,1200}?getAddon\\(\\)\\{if\\(this\\.resourcesPath==null\\)throw Error` +
+      `[\\s\\S]{0,900}?async signDeviceKey\\((?<keyArg>${DEVICE_KEY_IDENT}),(?<payloadArg>${DEVICE_KEY_IDENT})\\)` +
+      `\\{let (?<serializedPayloadVar>${DEVICE_KEY_IDENT})=(?<serializePayload>${DEVICE_KEY_IDENT})` +
+      `\\(\\k<payloadArg>\\);return\\{\\.\\.\\.await this\\.getAddon\\(\\)\\.signDeviceKey` +
+      `\\(\\k<keyArg>,\\k<serializedPayloadVar>\\),signedPayloadBase64:` +
+      `\\k<serializedPayloadVar>\\.toString\\(\`base64\`\\)\\}\\}` +
+      `getAddon\\(\\)\\{if\\(this\\.resourcesPath==null\\)throw Error` +
       `\\(\`Remote control device keys require resourcesPath\`\\);return this\\.addon\\?\\?=` +
       `(?<requireVar>${DEVICE_KEY_IDENT})\\([\\s\\S]{0,300}?(?<nativeVar>${DEVICE_KEY_IDENT})\\)\\),this\\.addon\\}\\}`,
     flags,
   );
 }
 const REMOTE_CONTROL_OUTBOUND_TAB_GATE_MARKER = "codexLinuxRemoteControlOutboundTabGate";
-const REMOTE_CONTROL_SSH_INSTALL_RELEASE_MARKER = "codexLinuxRemoteControlSshInstallRelease";
 const REMOTE_CONNECTIONS_REFRESH_MARKER = "codexLinuxRemoteConnectionsRefreshNow";
-const REMOTE_MOBILE_CHROME_BRIDGE_MARKER = "codexLinuxRemoteMobileBrowserBackends";
 const REMOTE_CONTROL_LOAD_GATE_MARKER = "codexLinuxRemoteControlLoadGateEnabled";
 const REMOTE_CONTROL_FEATURE_SYNC_MARKER = "codexLinuxRemoteControlFeatureSyncEnabled";
 const REMOTE_CONTROL_LOAD_GATE_NEEDLE =
   /function ([A-Za-z_$][\w$]*)\(\)\{return ([A-Za-z_$][\w$]*)\(`1042620455`\)\}/u;
-const REMOTE_MOBILE_PENDING_NOTIFICATIONS_MARKER = "codexLinuxRemoteMobilePendingNotifications";
-const REMOTE_MOBILE_HYDRATION_MARKER = "codexLinuxRemoteMobileHydrateUnknownConversation";
 const REMOTE_MOBILE_REASONING_SUMMARY_MARKER = "codexLinuxRemoteMobileReasoningSummaryNone";
+const REMOTE_MOBILE_CONVERSATION_HYDRATION_MARKER =
+  "codexLinuxRemoteMobileConversationHydration";
 const REMOTE_CONTROL_ENABLEMENT_BRIDGE_MARKER = "codexLinuxRemoteControlEnablementBridge";
 const REMOTE_CONTROL_ENABLE_FOR_HOST_PARAMS_MARKER = "codexLinuxRemoteControlEnableForHostParams";
 const REMOTE_CONTROL_AUTO_CONNECT_CLEANUP_MARKER = "codexLinuxRemoteControlAutoConnectCleanup";
@@ -51,9 +54,8 @@ const REMOTE_MOBILE_APP_SERVER_BASE_ARGS_NEEDLE = "[`-c`,`features.code_mode_hos
 const REMOTE_MOBILE_APP_SERVER_REMOTE_CONTROL_HELPER =
   "function codexLinuxRemoteMobileLocalAppServerArgs(e,t){if(process.env.CODEX_REMOTE_CONTROL_APP_SERVER_MODE===`proxy`){let n=process.env.CODEX_REMOTE_CONTROL_APP_SERVER_PROXY_SOCKET;if(n?.startsWith(`%h/`)&&process.env.HOME)n=`${process.env.HOME}${n.slice(2)}`;return[...e,...t,`app-server`,`proxy`,...(n?[`--sock`,n]:[])]}return t.length===0?[...e,`app-server`,`--remote-control`,`--analytics-default-enabled`]:[`app-server`,...e,...t,`--remote-control`,`--analytics-default-enabled`]}";
 const REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN = /^app-initial-[^.]+\.js$/u;
-const REMOTE_CONTROL_CONNECTIONS_VISIBILITY_ASSET_PATTERN =
-  /^(?:app-initial|remote-control-connections-visibility)-[^.]+\.js$/u;
 const REMOTE_CONTROL_APP_PRIMARY_ASSET_PATTERN = /^app-primary-[^.]+\.js$/u;
+const REMOTE_CONTROL_VISIBILITY_ASSET_PATTERN = /^[^.]+\.js$/u;
 const REMOTE_CONTROL_LINUX_COPY_REPLACEMENTS = [
   ["defaultMessage:`Mac`", "defaultMessage:`Linux`"],
   ["Keep this Mac awake", "Keep this Linux desktop awake"],
@@ -91,7 +93,7 @@ function replaceOnce(source, needle, replacement) {
   return source.replace(needle, replacement);
 }
 
-function linuxDeviceKeyProviderSource({ childProcessVar, cryptoVar, fsVar, pathVar }) {
+function linuxDeviceKeyProviderSource({ childProcessVar, cryptoVar, fsVar, pathVar, serializePayload }) {
   return [
     `const ${pathVar}=require(\`node:path\`),${fsVar}=require(\`node:fs\`),${cryptoVar}=require(\`node:crypto\`),${childProcessVar}=require(\`node:child_process\`);`,
     "const codexLinuxRemoteControlKeyStoreVersion=2,codexLinuxRemoteControlKeyStoreMaxBytes=1048576,codexLinuxRemoteControlKeyStoreMaxKeys=64;",
@@ -159,7 +161,7 @@ function linuxDeviceKeyProviderSource({ childProcessVar, cryptoVar, fsVar, pathV
     "},",
     "deleteDeviceKey:async codexLinuxRemoteControlKeyId=>codexLinuxWithRemoteControlKeyStoreLock(()=>{let e=codexLinuxReadRemoteControlDeviceKeyStore(),t=codexLinuxRemoteControlMigrateDeviceKeyStore(e)??e;delete t.keys[codexLinuxRemoteControlKeyId],codexLinuxWriteRemoteControlDeviceKeyStore(t)}),",
     "getDeviceKeyPublic:async codexLinuxRemoteControlKeyId=>codexLinuxWithRemoteControlKeyStoreLock(()=>{let e=codexLinuxReadRemoteControlDeviceKeyStore(),t=codexLinuxRemoteControlMigrateDeviceKeyStore(e)??e;t!==e&&codexLinuxWriteRemoteControlDeviceKeyStore(t);let n=t.keys?.[codexLinuxRemoteControlKeyId];if(n==null)throw Error(`Linux remote control device key not found`);return codexLinuxRemoteControlPublicDeviceKey(n)}),",
-    `signDeviceKey:async(codexLinuxRemoteControlKeyId,codexLinuxRemoteControlPayload)=>codexLinuxWithRemoteControlKeyStoreLock(()=>{let e=codexLinuxReadRemoteControlDeviceKeyStore(),t=codexLinuxRemoteControlMigrateDeviceKeyStore(e)??e;t!==e&&codexLinuxWriteRemoteControlDeviceKeyStore(t);let n=t.keys?.[codexLinuxRemoteControlKeyId];if(n==null)throw Error(\`Linux remote control device key not found\`);let r=Buffer.from(JSON.stringify({domain:\`codex-device-key-sign-payload/v1\`,payload:codexLinuxRemoteControlPayload}),\`utf8\`),i=(0,${cryptoVar}.createPrivateKey)(codexLinuxRemoteControlPrivateKeyPem(n)),a=(0,${cryptoVar}.sign)(\`sha256\`,r,i).toString(\`base64\`);return{algorithm:n.algorithm,signatureDerBase64:a,signedPayloadBase64:r.toString(\`base64\`)}})`,
+    `signDeviceKey:async(codexLinuxRemoteControlKeyId,codexLinuxRemoteControlPayload)=>codexLinuxWithRemoteControlKeyStoreLock(()=>{let e=codexLinuxReadRemoteControlDeviceKeyStore(),t=codexLinuxRemoteControlMigrateDeviceKeyStore(e)??e;t!==e&&codexLinuxWriteRemoteControlDeviceKeyStore(t);let n=t.keys?.[codexLinuxRemoteControlKeyId];if(n==null)throw Error(\`Linux remote control device key not found\`);let r=${serializePayload}(codexLinuxRemoteControlPayload),i=(0,${cryptoVar}.createPrivateKey)(codexLinuxRemoteControlPrivateKeyPem(n)),a=(0,${cryptoVar}.sign)(\`sha256\`,r,i).toString(\`base64\`);return{algorithm:n.algorithm,signatureDerBase64:a,signedPayloadBase64:r.toString(\`base64\`)}})`,
     "}}",
   ].join("");
 }
@@ -169,16 +171,22 @@ function deviceKeyPatchState(source) {
   const fsVar = "codexLinuxRemoteControlFs";
   const pathVar = "codexLinuxRemoteControlPath";
   const childProcessVar = "codexLinuxRemoteControlChildProcess";
-  const providerSource = linuxDeviceKeyProviderSource({ childProcessVar, cryptoVar, fsVar, pathVar });
   const requireMatches = [...source.matchAll(deviceKeyRequirePattern("gu"))];
   const providerMatches = [...source.matchAll(deviceKeyProviderPattern("gu"))];
-  const providerSourceCount = source.split(providerSource).length - 1;
 
   if (requireMatches.length !== 1 || providerMatches.length !== 1) {
     return { kind: requireMatches.length > 1 || providerMatches.length > 1 ? "ambiguous" : "partial" };
   }
   const requireMatch = requireMatches[0];
   const providerMatch = providerMatches[0];
+  const providerSource = linuxDeviceKeyProviderSource({
+    childProcessVar,
+    cryptoVar,
+    fsVar,
+    pathVar,
+    serializePayload: providerMatch.groups.serializePayload,
+  });
+  const providerSourceCount = source.split(providerSource).length - 1;
   if (
     requireMatch.groups.requireVar !== providerMatch.groups.requireVar ||
     requireMatch.groups.nativeVar !== providerMatch.groups.nativeVar
@@ -614,151 +622,8 @@ function applyLinuxRemoteControlCopyPatch(source) {
   return hasMarker ? patched : `/*${REMOTE_CONTROL_COPY_MARKER}*/${patched}`;
 }
 
-function applyLinuxRemoteControlSshInstallReleasePatch(source) {
-  if (source.includes(REMOTE_CONTROL_SSH_INSTALL_RELEASE_MARKER)) {
-    return source;
-  }
-  if (!source.includes("install-remote-codex") || !source.includes("install-codex")) {
-    return source;
-  }
-
-  const id = "[A-Za-z_$][\\w$]*";
-  const currentActionBuilderRegex = new RegExp(
-    `function (${id})\\(\\{action:(${id}),disabled:(${id}),hostId:(${id}),` +
-      `installCodexPending:(${id}),onAuthenticate:(${id}),onInstallCodex:(${id}),` +
-      `onReconnect:(${id}),onRestart:(${id})\\}\\)\\{if\\(\\2==null\\)return null;` +
-      `switch\\(\\2\\.kind\\)\\{case\\x60install-codex\\x60:return\\{disabled:\\3,label:\\2\\.label,` +
-      `loading:\\5,loadingLabel:\\2\\.loadingLabel,renderInElectronOnly:!0,` +
-      `tooltipText:\\2\\.tooltipText,onClick:\\(\\)=>\\7\\(\\4\\)\\}`,
-    "u",
-  );
-  const currentActionCallRegex = new RegExp(
-    `(${id})\\(\\{action:(${id})\\.action,disabled:(${id}),hostId:(${id})\\.hostId,` +
-      `installCodexPending:(${id}),onReconnect:(${id}),onRestart:(${id}),` +
-      `onAuthenticate:(${id}),onInstallCodex:(${id})\\}\\)`,
-    "u",
-  );
-  const currentLocalVersionRegex = new RegExp(
-    `\\{appServerVersion:(${id}),error:(${id}),installedCodexVersion:(${id}),state:(${id})\\}` +
-      `=(${id})\\((${id})\\.hostId\\),(${id})=\\6\\.displayName`,
-    "u",
-  );
-  const currentMutationRegex = new RegExp(
-    `(${id})=(${id})=>\\{(${id})\\.mutate\\(\\{hostId:\\2\\},` +
-      `\\{onSuccess:(${id})=>\\{let\\{state:(${id}),error:(${id})\\}=\\4;(${id})\\(\\2,\\5,\\6\\)\\}\\}\\)\\}`,
-    "u",
-  );
-  const currentActionBuilderMatch = source.match(currentActionBuilderRegex);
-  const currentActionCallMatch = source.match(currentActionCallRegex);
-  const currentLocalVersionMatch = source.match(currentLocalVersionRegex);
-  const currentMutationMatch = source.match(currentMutationRegex);
-  if (
-    currentActionBuilderMatch == null ||
-    currentActionCallMatch == null ||
-    currentLocalVersionMatch == null ||
-    currentMutationMatch == null
-  ) {
-    console.warn("WARN: Could not find remote-control SSH install release needles - skipping Linux install release patch");
-    return source;
-  }
-
-  const [
-    ,
-    builderFn,
-    actionVar,
-    disabledVar,
-    hostVar,
-    pendingVar,
-    authenticateVar,
-    installVar,
-    reconnectVar,
-    restartVar,
-  ] = currentActionBuilderMatch;
-  const actionBuilderReplacement =
-    `function ${builderFn}({action:${actionVar},disabled:${disabledVar},hostId:${hostVar},` +
-    `installCodexPending:${pendingVar},installCodexRelease:codexLinuxRemoteControlSshInstallReleaseTarget,` +
-    `onAuthenticate:${authenticateVar},onInstallCodex:${installVar},onReconnect:${reconnectVar},onRestart:${restartVar}}){` +
-    `if(${actionVar}==null)return null;switch(${actionVar}.kind){case\`install-codex\`:return{` +
-    `disabled:${disabledVar},label:${actionVar}.label,loading:${pendingVar},loadingLabel:${actionVar}.loadingLabel,` +
-    `renderInElectronOnly:!0,tooltipText:${actionVar}.tooltipText,` +
-    `onClick:()=>${installVar}(${hostVar},codexLinuxRemoteControlSshInstallReleaseTarget)}`;
-
-  const [
-    ,
-    actionFn,
-    connectionActionVar,
-    callDisabledVar,
-    connectionVar,
-    callPendingVar,
-    callReconnectVar,
-    callRestartVar,
-    callAuthenticateVar,
-    callInstallVar,
-  ] = currentActionCallMatch;
-  const actionCallReplacement =
-    `${actionFn}({action:${connectionActionVar}.action,disabled:${callDisabledVar},` +
-    `hostId:${connectionVar}.hostId,installCodexPending:${callPendingVar},` +
-    `installCodexRelease:${REMOTE_CONTROL_SSH_INSTALL_RELEASE_MARKER}(codexLinuxRemoteControlSshInstallError),` +
-    `onReconnect:${callReconnectVar},onRestart:${callRestartVar},` +
-    `onAuthenticate:${callAuthenticateVar},onInstallCodex:${callInstallVar}})`;
-
-  const [
-    ,
-    appServerVersionVar,
-    errorVar,
-    installedVersionVar,
-    stateVar,
-    connectionStateFn,
-    localConnectionVar,
-    displayNameVar,
-  ] = currentLocalVersionMatch;
-  const localVersionReplacement =
-    `{appServerVersion:${appServerVersionVar},error:${errorVar},` +
-    `installedCodexVersion:${installedVersionVar},state:${stateVar}}=` +
-    `${connectionStateFn}(${localConnectionVar}.hostId),` +
-    `{appServerVersion:codexLinuxRemoteControlSshInstallLocalVersion}=${connectionStateFn}(\`local\`),` +
-    `codexLinuxRemoteControlSshInstallError=${errorVar},` +
-    `${displayNameVar}=(codexLinuxRemoteControlSshInstallDefaultRelease=` +
-    `codexLinuxRemoteControlValidRelease(codexLinuxRemoteControlSshInstallLocalVersion)??` +
-    `codexLinuxRemoteControlSshInstallDefaultRelease,${localConnectionVar}.displayName)`;
-
-  const [
-    ,
-    mutationHandlerVar,
-    mutationHostVar,
-    mutationVar,
-    mutationResponseVar,
-    mutationStateVar,
-    mutationErrorVar,
-    syncStateFn,
-  ] = currentMutationMatch;
-  const mutationReplacement =
-    `${mutationHandlerVar}=(${mutationHostVar},codexLinuxRemoteControlSshInstallTargetRelease)=>{` +
-    `let codexLinuxRemoteControlSshInstallRequest={hostId:${mutationHostVar}},` +
-    `codexLinuxRemoteControlSshInstallResolvedRelease=` +
-    `codexLinuxRemoteControlSshInstallTargetRelease??codexLinuxRemoteControlSshInstallDefaultRelease;` +
-    `codexLinuxRemoteControlSshInstallResolvedRelease!=null&&` +
-    `(codexLinuxRemoteControlSshInstallRequest.release=codexLinuxRemoteControlSshInstallResolvedRelease),` +
-    `${mutationVar}.mutate(codexLinuxRemoteControlSshInstallRequest,{onSuccess:${mutationResponseVar}=>{` +
-    `let{state:${mutationStateVar},error:${mutationErrorVar}}=${mutationResponseVar};` +
-    `${syncStateFn}(${mutationHostVar},${mutationStateVar},${mutationErrorVar})}})}`;
-
-  const helper = [
-    "let codexLinuxRemoteControlSshInstallDefaultRelease=null,codexLinuxRemoteControlSshInstallError=null;",
-    "function codexLinuxRemoteControlValidRelease(e){return typeof e==`string`&&e.trim().length>0?e.trim():null}",
-    `function ${REMOTE_CONTROL_SSH_INSTALL_RELEASE_MARKER}(e){return e?.code===\`update-required\`?codexLinuxRemoteControlValidRelease(e.minRequiredVersion):null}`,
-  ].join("");
-
-  return helper + source
-    .replace(currentLocalVersionRegex, localVersionReplacement)
-    .replace(currentActionBuilderRegex, actionBuilderReplacement)
-    .replace(currentActionCallRegex, actionCallReplacement)
-    .replace(currentMutationRegex, mutationReplacement);
-}
-
 function applyLinuxRemoteControlSettingsUxPatch(source) {
-  let patched = applyLinuxRemoteControlSshInstallReleasePatch(replaceLinuxRemoteControlCopy(source).patched);
-
+  let patched = replaceLinuxRemoteControlCopy(source).patched;
   patched = applyLinuxRemoteControlOutboundTabGatePatch(patched);
 
   return patched;
@@ -838,157 +703,6 @@ function applyLinuxRemoteConnectionsRefreshPatch(source) {
     `window.removeEventListener(\`resume\`,${REMOTE_CONNECTIONS_REFRESH_MARKER})}}`;
 
   return patched.replace(needle, replacement);
-}
-
-function applyLinuxRemoteMobileChromeBridgePatch(source) {
-  if (source.includes(REMOTE_MOBILE_CHROME_BRIDGE_MARKER)) {
-    return source;
-  }
-
-  if (browserClientHasNativeChromeBackendPreferenceRouting(source)) {
-    return source;
-  }
-
-  // 26.527.x moved the browser-use backend allowlist from the
-  // x-codex-browser-use-available-backends request-meta header to the
-  // BROWSER_USE_AVAILABLE_BACKENDS config value (var dy), renamed the allowlist
-  // (X6->e2 / rE->ly) and reader (yC->_y), and dropped the native-pipe diagnostic.
-  const backendNeedle =
-    "var e2=[\"chrome\",\"iab\",\"cdp\"];function ly(e){return e2.some(t=>t===e)}";
-  const backendReplacement =
-    "var e2=[\"chrome\",\"iab\",\"cdp\"];function ly(e){return e2.some(t=>t===e)}function codexLinuxRemoteMobileBrowserBackends(e){if(e==null)return null;if(!Array.isArray(e))return[];let t=e.filter(ly);return typeof process!=`undefined`&&process.platform===`linux`&&!t.includes(`chrome`)?[`chrome`,...t]:t}";
-  const currentBackendNeedle =
-    "function _y(){let e=Su(dy);return e==null?null:vy(e).filter(ly)}";
-  const currentBackendReplacement =
-    "function _y(){let e=Su(dy);return codexLinuxRemoteMobileBrowserBackends(e==null?null:vy(e))}";
-
-  if (source.includes(backendNeedle) && source.includes(currentBackendNeedle)) {
-    return source
-      .replace(backendNeedle, backendReplacement)
-      .replace(currentBackendNeedle, currentBackendReplacement);
-  }
-
-  const backendAllowlistPattern =
-    /var ([A-Za-z_$][\w$]*)=\["chrome","iab","cdp"\];function ([A-Za-z_$][\w$]*)\(e\)\{return \1\.some\(t=>t===e\)\}/u;
-  const readerPattern =
-    /function ([A-Za-z_$][\w$]*)\(\)\{let e=([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\);return e==null\?null:([A-Za-z_$][\w$]*)\(e\)\.filter\(([A-Za-z_$][\w$]*)\)\}/u;
-  const allowlistMatch = source.match(backendAllowlistPattern);
-  const readerMatch = source.match(readerPattern);
-  if (allowlistMatch != null && readerMatch != null && readerMatch[5] === allowlistMatch[2]) {
-    const [, allowlistVar, allowlistFn] = allowlistMatch;
-    const [, readerFn, envReaderFn, backendsEnvVar, parseBackendsFn] = readerMatch;
-    return source
-      .replace(
-        backendAllowlistPattern,
-        `var ${allowlistVar}=["chrome","iab","cdp"];function ${allowlistFn}(e){return ${allowlistVar}.some(t=>t===e)}function codexLinuxRemoteMobileBrowserBackends(e){if(e==null)return null;if(!Array.isArray(e))return[];let t=e.filter(${allowlistFn});return typeof process!=\`undefined\`&&process.platform===\`linux\`&&!t.includes(\`chrome\`)?[\`chrome\`,...t]:t}`,
-      )
-      .replace(
-        readerPattern,
-        `function ${readerFn}(){let e=${envReaderFn}(${backendsEnvVar});return codexLinuxRemoteMobileBrowserBackends(e==null?null:${parseBackendsFn}(e))}`,
-      );
-  }
-
-  console.warn("WARN: Could not find Chrome browser-client backend allowlist needles - skipping remote-mobile Chrome bridge patch");
-  return source;
-}
-
-function browserClientHasNativeChromeBackendPreferenceRouting(source) {
-  return (
-    source.includes("BROWSER_USE_AVAILABLE_BACKENDS") &&
-    source.includes("browserPreference") &&
-    source.includes("preferredWindowIdFor") &&
-    /var [A-Za-z_$][\w$]*=\["chrome","iab","cdp"\];function [A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\)\{return [A-Za-z_$][\w$]*\.some\([A-Za-z_$][\w$]*=>[A-Za-z_$][\w$]*===[A-Za-z_$][\w$]*\)\}/u.test(source)
-  );
-}
-
-function applyLinuxRemoteMobileConversationHydrationPatch(source) {
-  let patched = source;
-
-  if (!patched.includes(REMOTE_MOBILE_HYDRATION_MARKER)) {
-    const singleMatch = (value, pattern) => {
-      const matches = [...value.matchAll(new RegExp(pattern.source, `${pattern.flags}g`))];
-      return matches.length === 1 ? matches[0] : null;
-    };
-    const handlerNeedle =
-      /function (?<handler>[A-Za-z_$][\w$]*)\((?<owner>[A-Za-z_$][\w$]*),(?<method>[A-Za-z_$][\w$]*),(?<params>[A-Za-z_$][\w$]*),[A-Za-z_$][\w$]*,(?<callback>[A-Za-z_$][\w$]*)\)\{let (?<notification>[A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\(\k<method>,\k<params>\),[\s\S]{0,300}?[A-Za-z_$][\w$]*=\{notification:\k<notification>,automationCapability:(?<capability>[A-Za-z_$][\w$]*)\},\{manager:(?<manager>[A-Za-z_$][\w$]*),notificationContext:(?<context>[A-Za-z_$][\w$]*)\}=\k<owner>;(?=[\s\S]{0,300}?\k<context>\.streamState\.shouldIgnoreThreadMutationAsFollower\(\k<notification>\.method,\k<notification>\.params,`notification`\))/u;
-    const handlerMatch = singleMatch(patched, handlerNeedle);
-    const normalizerNeedle =
-      /case`turn\/started`:\{let\{threadId:([A-Za-z_$][\w$]*),turn:[A-Za-z_$][\w$]*\}=([A-Za-z_$][\w$]*)\.params,[A-Za-z_$][\w$]*=([A-Za-z_$][\w$]*)\(\1\),[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\.threadStore\.conversations\.get\([A-Za-z_$][\w$]*\);/u;
-    const normalizerMatch = singleMatch(patched, normalizerNeedle);
-    const unknownNeedles = [
-      /(?<condition>if\((?<checked>[A-Za-z_$][\w$]*)==null\))\{(?<manager>[A-Za-z_$][\w$]*)\.logger\.error\(`Received turn\/started for unknown conversation`,\{safe:\{conversationId:(?<conversation>[A-Za-z_$][\w$]*)\},sensitive:\{\}\}\);break\}/u,
-      /(?<condition>if\(!(?<context>[A-Za-z_$][\w$]*)\.threadStore\.conversations\.has\((?<conversation>[A-Za-z_$][\w$]*)\)\))\{[^{}]*?(?<manager>[A-Za-z_$][\w$]*)\.logger\.error\(`Received turn\/completed for unknown conversation`,\{safe:\{conversationId:\k<conversation>\},sensitive:\{\}\}\);break\}/u,
-      /(?<condition>if\(!(?<context>[A-Za-z_$][\w$]*)\.threadStore\.conversations\.has\((?<conversation>[A-Za-z_$][\w$]*)\)\))\{(?<manager>[A-Za-z_$][\w$]*)\.logger\.error\(`Received item\/started for unknown conversation`,\{safe:\{conversationId:\k<conversation>\},sensitive:\{\}\}\);break\}/u,
-      /(?<condition>if\((?<item>[A-Za-z_$][\w$]*)\.type===`commandExecution`&&(?<context>[A-Za-z_$][\w$]*)\.itemStreamState\.clearItemTerminalInputBuffer\((?<conversation>[A-Za-z_$][\w$]*),\k<item>\.id\),\k<context>\.threadStore\.conversations\.get\(\k<conversation>\)==null\))\{(?<manager>[A-Za-z_$][\w$]*)\.logger\.error\(`Received item\/completed for unknown conversation`,\{safe:\{conversationId:\k<conversation>\},sensitive:\{\}\}\);break\}/u,
-    ];
-    const ownerPattern =
-      /function [A-Za-z_$][\w$]*\([^,]+,([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)(?:,[A-Za-z_$][\w$]*)?\)\{let\{manager:([A-Za-z_$][\w$]*),notificationContext:([A-Za-z_$][\w$]*),createId:[A-Za-z_$][\w$]*\}=[A-Za-z_$][\w$]*;/u;
-    const unknownContracts = unknownNeedles.map((needle, index) => {
-      const match = singleMatch(patched, needle);
-      if (match == null) return null;
-      const functionStart = patched.lastIndexOf("function ", match.index);
-      const prefix = functionStart === -1 ? "" : patched.slice(functionStart, match.index);
-      const owner = prefix.match(ownerPattern);
-      if (
-        owner == null ||
-        (match.groups.manager != null && match.groups.manager !== owner[3]) ||
-        (match.groups.context != null && match.groups.context !== owner[4])
-      ) return null;
-      return { match, notification: owner[1], capability: owner[2], manager: owner[3], context: owner[4] };
-    });
-
-    if (
-      handlerMatch != null &&
-      normalizerMatch != null &&
-      unknownContracts.every((contract) => contract != null)
-    ) {
-      const {
-        context: notificationContextVar,
-        manager: managerVar,
-        notification: notificationVar,
-      } = handlerMatch.groups;
-      const normalizerFn = normalizerMatch[3];
-      const helpers =
-        `function codexLinuxRemoteMobileBufferPendingNotification(e,t,n,r){let i=t.params.threadId??t.params.thread?.id;if(typeof i!==\`string\`)return!1;let a=e.${REMOTE_MOBILE_PENDING_NOTIFICATIONS_MARKER}?.get(${normalizerFn}(i));return a==null?!1:(a.push([t,n,r]),!0)}` +
-        `function ${REMOTE_MOBILE_HYDRATION_MARKER}(e,t,n,r,i){let a=t.${REMOTE_MOBILE_PENDING_NOTIFICATIONS_MARKER};if(a==null)a=t.${REMOTE_MOBILE_PENDING_NOTIFICATIONS_MARKER}=new Map;let o=a.get(n);if(o!=null){o.push([r,i]);return}a.set(n,[[r,i]]);let s=r.params.threadId??r.params.thread?.id;Promise.resolve(t.threadStore.hydrateActiveThread(s)).then(()=>{let r=a.get(n)??[];a.delete(n);if(!t.threadStore.conversations.get(n)){e.logger.error(\`Failed to hydrate conversation for deferred remote notification\`,{safe:{conversationId:n},sensitive:{}});return}for(let[t,n,i]of r)e.onNotification(t.method,t.params,n,i)},r=>{a.delete(n),e.logger.error(\`Failed to hydrate conversation for deferred remote notification\`,{safe:{conversationId:n},sensitive:{error:r}})})}`;
-
-      patched = `${helpers}${patched}`.replace(
-        handlerNeedle,
-        (needle) => `${needle}if(codexLinuxRemoteMobileBufferPendingNotification(${notificationContextVar},${notificationVar},${handlerMatch.groups.capability},${handlerMatch.groups.callback}))return;`,
-      );
-      for (const contract of unknownContracts) {
-        patched = patched.replace(
-          contract.match[0],
-          `${contract.match.groups.condition}{${REMOTE_MOBILE_HYDRATION_MARKER}(${contract.manager},${contract.context},${contract.match.groups.conversation},${contract.notification},${contract.capability});return\`deferred\`}`,
-        );
-      }
-    } else if (
-      patched.includes("Received turn/started for unknown conversation") ||
-      patched.includes("Received item/completed for unknown conversation") ||
-      patched.includes("Item not found in turn state")
-    ) {
-      console.warn(
-        "WARN: Could not find the complete current remote notification recovery lifecycle - skipping remote mobile hydration recovery patch",
-      );
-    }
-  } else if (
-    !patched.includes(REMOTE_MOBILE_PENDING_NOTIFICATIONS_MARKER)
-  ) {
-    console.warn("WARN: Found an incomplete remote mobile hydration recovery patch - refusing to accept partial state");
-  }
-
-  // Current upstream summaries already preserve runtime notification evidence.
-  const runtimeFallbackPattern = new RegExp(
-    "threadRuntimeStatus:[A-Za-z_$][\\w$]*\\(([A-Za-z_$][\\w$]*)\\)\\?this\\.runtimeThreadStatusEvidenceByThreadId\\.get\\(\\1\\.id\\)\\?\\?\\1\\.status:\\1\\.status",
-    "gu",
-  );
-  const runtimeFallbackMatches = [...patched.matchAll(runtimeFallbackPattern)];
-  if (runtimeFallbackMatches.length !== 1 &&
-      patched.includes("threadRuntimeStatus") && patched.includes("runtimeThreadStatusEvidenceByThreadId")) {
-    console.warn("WARN: Could not find one current thread/list runtime-status fallback - skipping remote mobile runtime-status patch");
-  }
-
-  return patched;
 }
 
 function applyLinuxRemoteTerminalStatusRecoveryPatch(source) {
@@ -1099,23 +813,48 @@ function applyLinuxRemoteTerminalStatusRecoveryPatch(source) {
   return patched;
 }
 
+const REMOTE_CONTROL_STATUS_READ_HELPER =
+  `function ${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}(e){return !(typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)&&typeof e==\`string\`&&(e.startsWith(\`remote-ssh\`)||e.startsWith(\`remote-control:\`)))}`;
+
+function remoteControlStatusReadPattern(patched = false) {
+  const guard = patched ? `${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}\\(\\k<host>\\)\\?` : "";
+  const blocked = patched
+    ? `:\\(\\k<active>\\(\\)&&\\k<setter>\\(\\k<store>,\\k<host>,\\{status:\\x60disabled\\x60,available:!1,accessRequired:!1\\}\\),void 0\\)`
+    : "";
+  return new RegExp(
+    String.raw`function (?<fn>${DEVICE_KEY_IDENT})\((?<store>${DEVICE_KEY_IDENT}),(?<host>${DEVICE_KEY_IDENT}),(?<client>${DEVICE_KEY_IDENT}),(?<current>${DEVICE_KEY_IDENT})\)\{if\((?<skip>${DEVICE_KEY_IDENT})\(\k<host>\)\)return\(\)=>\{\}` +
+      String.raw`;let (?<abort>${DEVICE_KEY_IDENT})=new AbortController,(?<active>${DEVICE_KEY_IDENT})=\(\)=>!\k<abort>\.signal\.aborted&&\(\k<current>\?\.\(\)\?\?!0\),(?<initial>${DEVICE_KEY_IDENT})=\k<store>\.get\((?<atom>${DEVICE_KEY_IDENT}),\k<host>\)` +
+      String.raw`,(?<subscription>${DEVICE_KEY_IDENT})=\k<client>\.subscribe\(\{type:\x60notification\x60,key:\{hostId:\k<host>\},methods:\x60remoteControl/status/changed\x60,listener:\(\{params:(?<params>${DEVICE_KEY_IDENT})\}\)=>\{\k<active>\(\)&&(?<setter>${DEVICE_KEY_IDENT})\(\k<store>,\k<host>,\k<params>\)\}\}\)` +
+      String.raw`,(?<resolved>${DEVICE_KEY_IDENT}),(?<cleanup>${DEVICE_KEY_IDENT})=\(\)=>\{\k<abort>\.signal\.aborted\|\|\(\k<abort>\.abort\(\),\k<subscription>\[Symbol\.dispose\]\(\),\k<resolved>\?\.\[Symbol\.dispose\]\(\)\)\}` +
+      String.raw`;return \k<subscription>\.onRpcBroken\(\k<cleanup>` +
+      String.raw`\),\k<subscription>\.then\((?<ready>${DEVICE_KEY_IDENT})=>\{if\(!\k<active>\(\)\)\{\k<ready>\[Symbol\.dispose\]\(\);return\}\k<resolved>=\k<ready>,\k<ready>\.onRpcBroken\(\k<cleanup>\)\},\k<cleanup>\),` +
+      guard +
+      String.raw`(?<read>(?<cancel>${DEVICE_KEY_IDENT})\(\k<client>\.sendRequest\(\x60remoteControl/status/read\x60,void 0\),\k<abort>\.signal\)\.then\((?<result>${DEVICE_KEY_IDENT})=>\{\k<store>\.get\(\k<atom>,\k<host>\)===\k<initial>&&\k<active>\(\)&&\k<setter>\(\k<store>,\k<host>,\k<result>\)\}\)\.catch\((?<error>${DEVICE_KEY_IDENT})=>\{\k<active>\(\)&&(?<logger>${DEVICE_KEY_IDENT})\.error\(\x60Failed to read remote-control status\x60,\{safe:\{\},sensitive:\{error:\k<error>\}\}\)\}\))` +
+      blocked + String.raw`,\k<cleanup>\}`,
+    "gu",
+  );
+}
+
 function applyLinuxRemoteControlStatusReadGuardPatch(source) {
-  if (source.includes(REMOTE_CONTROL_STATUS_READ_GUARD_MARKER)) return source;
-  if (!source.includes("remoteControl/status/read")) return source;
-  // Current RPC subscriptions return a disposer and use an explicit host ID.
-  // Preserve the upstream cancellation/subscription body for supported hosts.
-  const pattern = new RegExp(String.raw`function (?<fn>${DEVICE_KEY_IDENT})\((?<store>${DEVICE_KEY_IDENT}),(?<host>${DEVICE_KEY_IDENT}),(?<client>${DEVICE_KEY_IDENT}),(?<valid>${DEVICE_KEY_IDENT})\)\{if\((?<skip>${DEVICE_KEY_IDENT})\(\k<host>\)\)return\(\)=>\{\};(?<body>let ${DEVICE_KEY_IDENT}=new AbortController,[\s\S]{0,250}?${DEVICE_KEY_IDENT}=\k<store>\.get\((?<atom>${DEVICE_KEY_IDENT}),\k<host>\))(?=[\s\S]{0,1800}?\k<client>\.subscribe\([\s\S]{0,1800}?\k<client>\.sendRequest\(\x60remoteControl/status/read\x60)`, "g");
-  const matches = [...source.matchAll(pattern)];
-  if (matches.length !== 1) {
-    console.warn("WARN: Could not find unique current remote-control status reader - skipping Linux remote-control status guard patch");
+  if (!source.includes("remoteControl/status/read") &&
+      !source.includes(REMOTE_CONTROL_STATUS_READ_GUARD_MARKER)) return source;
+  const pristine = [...source.matchAll(remoteControlStatusReadPattern())];
+  const patched = [...source.matchAll(remoteControlStatusReadPattern(true))];
+  const helperCount = source.split(REMOTE_CONTROL_STATUS_READ_HELPER).length - 1;
+  const markerCount = source.split(REMOTE_CONTROL_STATUS_READ_GUARD_MARKER).length - 1;
+  if (pristine.length === 0 && patched.length === 1 && helperCount === 1 && markerCount === 2) {
     return source;
   }
-  const match = matches[0];
-  const { fn, store, host, client, valid, skip, body, atom } = match.groups;
-  const helper = `function ${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}(e){return !(typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)&&typeof e==\`string\`&&(e.startsWith(\`remote-ssh\`)||e.startsWith(\`remote-control:\`)))}`;
-  const replacement = helper + `function ${fn}(${store},${host},${client},${valid}){if(${skip}(${host}))return()=>{};` +
-    `if(!${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}(${host})){(${valid}?.()??!0)&&${store}.set(${atom},${host},{status:\`disabled\`,available:!1,accessRequired:!1});return()=>{}}${body}`;
-  return source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
+  if (pristine.length !== 1 || patched.length !== 0 || markerCount !== 0) {
+    console.warn("WARN: Could not find unique complete remote-control status subscription - skipping Linux remote-control status guard patch");
+    return source;
+  }
+  const [match] = pristine;
+  const { host, active, setter, store, read } = match.groups;
+  const guardedRead = `${REMOTE_CONTROL_STATUS_READ_GUARD_MARKER}(${host})?${read}:` +
+    `(${active}()&&${setter}(${store},${host},{status:\`disabled\`,available:!1,accessRequired:!1}),void 0)`;
+  return source.slice(0, match.index) + REMOTE_CONTROL_STATUS_READ_HELPER +
+    match[0].replace(read, guardedRead) + source.slice(match.index + match[0].length);
 }
 
 function applyLinuxRemoteControlStatusWaitPatch(source) {
@@ -1271,6 +1010,94 @@ function applyLinuxRemoteMobileActiveStatusPatch(source) {
     statusPattern,
     `function $1({latestTurnStatus:$2,resumeState:$3,streamRole:$4,threadRuntimeStatus:$5}){/*${REMOTE_MOBILE_ACTIVE_STATUS_MARKER}*/return $4?.role===\`follower\`?\`follower\`:$5?.type===\`active\`||$2===\`inProgress\`?\`active\`:$4==null?$3===\`needs_resume\`?\`needs-resume\`:\`read-only\`:\`inactive\`}`,
   );
+}
+
+function remoteMobileConversationHydrationGuardPattern({ patched = false, flags = "u" } = {}) {
+  const marker = patched
+    ? `/\\*${REMOTE_MOBILE_CONVERSATION_HYDRATION_MARKER}\\*/`
+    : "";
+  const hostGuard = patched
+    ? "this\\.manager\\.getHostId\\(\\)!==`durable`&&this\\.manager\\.getHostId\\(\\)!==`local`\\|\\|"
+    : "this\\.manager\\.getHostId\\(\\)!==`durable`\\|\\|";
+  const methodGuard = patched
+    ? `(?<notification>${DEVICE_KEY_IDENT})\\.method!==\`turn/started\`&&` +
+      `\\k<notification>\\.method!==\`turn/completed\`&&` +
+      `\\(this\\.manager\\.getHostId\\(\\)!==\`local\`\\|\\|` +
+      `\\k<notification>\\.method!==\`item/started\`&&` +
+      `\\k<notification>\\.method!==\`item/completed\`\\)`
+    : `(?<notification>${DEVICE_KEY_IDENT})\\.method!==\`turn/started\`&&` +
+      `\\k<notification>\\.method!==\`turn/completed\``;
+  return new RegExp(
+    `return (?<pending>${DEVICE_KEY_IDENT})==null\\?${marker}${hostGuard}${methodGuard}\\|\\|` +
+      `this\\.context\\.threadStore\\.conversations\\.has\\((?<conversation>${DEVICE_KEY_IDENT})\\)\\|\\|` +
+      `this\\.context\\.threadStore\\.isConversationSuppressed\\(\\k<conversation>\\)\\?!1:` +
+      `\\(this\\.beginDiscovery\\(\\k<conversation>,(?<ignore>${DEVICE_KEY_IDENT})\\),` +
+      `this\\.buffer\\.buffer\\((?<delivery>${DEVICE_KEY_IDENT}),\\k<ignore>\\)\\):` +
+      `\\(\\k<pending>\\.ignored\\.add\\(\\k<ignore>\\),this\\.buffer\\.buffer\\(\\k<delivery>,\\k<ignore>\\)\\)\\}`,
+    flags,
+  );
+}
+
+function remoteMobileConversationHydrationContract(source) {
+  const pristineMatches = [
+    ...source.matchAll(remoteMobileConversationHydrationGuardPattern({ flags: "gu" })),
+  ];
+  const patchedMatches = [
+    ...source.matchAll(remoteMobileConversationHydrationGuardPattern({ patched: true, flags: "gu" })),
+  ];
+  const markerCount = source.split(REMOTE_MOBILE_CONVERSATION_HYDRATION_MARKER).length - 1;
+  const state = markerCount === 0 && pristineMatches.length === 1 && patchedMatches.length === 0
+    ? "pristine"
+    : markerCount === 1 && pristineMatches.length === 0 && patchedMatches.length === 1
+      ? "patched"
+      : null;
+  if (state == null) return null;
+
+  const match = state === "pristine" ? pristineMatches[0] : patchedMatches[0];
+  const lifecycle = source.slice(match.index, match.index + 4_096);
+  if (
+    lifecycle.split("this.context.threadStore.hydrateActiveThread(").length - 1 !== 1 ||
+    lifecycle.split("this.buffer.release(").length - 1 !== 1 ||
+    lifecycle.split("Failed to discover thread from event").length - 1 !== 1
+  ) {
+    return null;
+  }
+  return { match, state };
+}
+
+function matchesRemoteMobileConversationHydrationContract(source) {
+  return remoteMobileConversationHydrationContract(source) != null;
+}
+
+function applyLinuxRemoteMobileConversationHydrationPatch(source) {
+  const contract = remoteMobileConversationHydrationContract(source);
+  if (contract == null) {
+    if (
+      source.includes(REMOTE_MOBILE_CONVERSATION_HYDRATION_MARKER) ||
+      source.includes("Failed to discover thread from event") ||
+      source.includes("Received item/completed for unknown conversation")
+    ) {
+      console.warn(
+        "WARN: Could not find unique complete conversation-hydration lifecycle - skipping Linux remote mobile hydration patch",
+      );
+    }
+    return source;
+  }
+  if (contract.state === "patched") return source;
+
+  const { conversation, notification, pending, ignore, delivery } = contract.match.groups;
+  const replacement =
+    `return ${pending}==null?/*${REMOTE_MOBILE_CONVERSATION_HYDRATION_MARKER}*/` +
+    "this.manager.getHostId()!==`durable`&&this.manager.getHostId()!==`local`||" +
+    `${notification}.method!==\`turn/started\`&&${notification}.method!==\`turn/completed\`&&` +
+    `(this.manager.getHostId()!==\`local\`||${notification}.method!==\`item/started\`&&` +
+    `${notification}.method!==\`item/completed\`)||` +
+    `this.context.threadStore.conversations.has(${conversation})||` +
+    `this.context.threadStore.isConversationSuppressed(${conversation})?!1:` +
+    `(this.beginDiscovery(${conversation},${ignore}),this.buffer.buffer(${delivery},${ignore})):` +
+    `(${pending}.ignored.add(${ignore}),this.buffer.buffer(${delivery},${ignore}))}`;
+  return source.slice(0, contract.match.index) + replacement +
+    source.slice(contract.match.index + contract.match[0].length);
 }
 
 function applyLinuxRemoteMobileReasoningSummaryPatch(source) {
@@ -1432,7 +1259,7 @@ module.exports = [
   {
     id: "linux-remote-control-visibility",
     phase: "webview-asset",
-    pattern: REMOTE_CONTROL_CONNECTIONS_VISIBILITY_ASSET_PATTERN,
+    pattern: REMOTE_CONTROL_VISIBILITY_ASSET_PATTERN,
     assetMatch: matchesRemoteControlVisibilityContract,
     order: 20_120,
     ciPolicy: "optional",
@@ -1483,7 +1310,11 @@ module.exports = [
   {
     id: "linux-remote-mobile-reasoning-summary-none",
     phase: "webview-asset",
-    pattern: /^app-shared-[^.]+\.js$/,
+    pattern: /^[^.]+\.js$/,
+    assetMatch: (source) =>
+      source.includes("Reasoning summary turn-start config resolved") &&
+      source.includes("reasoningSummaryOverride") &&
+      source.includes("canUseProjectlessWorkspace:"),
     order: 20_149,
     ciPolicy: "optional",
     missingDescription: "turn-start reasoning summary resolver",
@@ -1493,11 +1324,12 @@ module.exports = [
   {
     id: "linux-remote-mobile-conversation-hydration",
     phase: "webview-asset",
-    pattern: REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN,
-    order: 20_150,
+    pattern: /^[A-Za-z0-9_-]+\.js$/,
+    assetMatch: matchesRemoteMobileConversationHydrationContract,
+    order: 20_151,
     ciPolicy: "optional",
-    missingDescription: "app-server conversation manager bundle",
-    skipDescription: "Linux remote mobile conversation hydration patch",
+    missingDescription: "app-server conversation hydration lifecycle",
+    skipDescription: "Linux remote-mobile conversation hydration patch",
     apply: applyLinuxRemoteMobileConversationHydrationPatch,
   },
   {
@@ -1567,9 +1399,9 @@ module.exports.applyLinuxRemoteMobileAppServerRemoteControlPatch =
   applyLinuxRemoteMobileAppServerRemoteControlPatch;
 module.exports.hasLinuxRemoteMobileLocalAppServerRemoteControlPatch =
   hasLinuxRemoteMobileLocalAppServerRemoteControlPatch;
-module.exports.applyLinuxRemoteMobileChromeBridgePatch = applyLinuxRemoteMobileChromeBridgePatch;
-module.exports.applyLinuxRemoteMobileConversationHydrationPatch = applyLinuxRemoteMobileConversationHydrationPatch;
 module.exports.applyLinuxRemoteMobileReasoningSummaryPatch = applyLinuxRemoteMobileReasoningSummaryPatch;
+module.exports.applyLinuxRemoteMobileConversationHydrationPatch =
+  applyLinuxRemoteMobileConversationHydrationPatch;
 module.exports.applyLinuxRemoteTerminalStatusRecoveryPatch = applyLinuxRemoteTerminalStatusRecoveryPatch;
 module.exports.applyLinuxRemoteControlStatusReadGuardPatch = applyLinuxRemoteControlStatusReadGuardPatch;
 module.exports.applyLinuxRemoteControlStatusWaitPatch = applyLinuxRemoteControlStatusWaitPatch;
@@ -1586,5 +1418,4 @@ module.exports.applyLinuxRemoteConnectionsRefreshPatch = applyLinuxRemoteConnect
 module.exports.applyLinuxRemoteControlFeatureSyncPatch = applyLinuxRemoteControlFeatureSyncPatch;
 module.exports.applyLinuxRemoteControlVisibilityPatch = applyLinuxRemoteControlVisibilityPatch;
 module.exports.applyLinuxRemoteControlCopyPatch = applyLinuxRemoteControlCopyPatch;
-module.exports.applyLinuxRemoteControlSshInstallReleasePatch = applyLinuxRemoteControlSshInstallReleasePatch;
 module.exports.applyLinuxRemoteControlSettingsUxPatch = applyLinuxRemoteControlSettingsUxPatch;

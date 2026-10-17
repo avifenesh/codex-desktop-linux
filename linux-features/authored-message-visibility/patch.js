@@ -1,9 +1,33 @@
 "use strict";
 
-// Complete classifier template from official Linux 26.1007.21434. Bind local
-// aliases; only the final message branch changes. Tool exceptions stay intact.
-const currentPattern = new RegExp("function\\ ([A-Za-z_$][\\w$]*)\\(\\{unit:([A-Za-z_$][\\w$]*),keepMcpAppEntriesPersistent:([A-Za-z_$][\\w$]*),mcpServerStatuses:([A-Za-z_$][\\w$]*),renderMcpApps:([A-Za-z_$][\\w$]*)\\}\\)\\{if\\(\\2\\.kind!==`standalone`\\)return!1;let\\ ([A-Za-z_$][\\w$]*)=\\2\\.item\\.item;return\\ \\6\\.type===`mcp\\-tool\\-call`\\&\\&[A-Za-z_$][\\w$]*\\(\\6\\)\\|\\|\\6\\.type===`assistant\\-message`\\&\\&[A-Za-z_$][\\w$]*\\(\\6\\)\\|\\|\\6\\.type===`dynamic\\-tool\\-call`\\&\\&([A-Za-z_$][\\w$]*)\\(\\6\\)\\|\\|\\3\\&\\&\\5\\&\\&\\6\\.type===`mcp\\-tool\\-call`\\&\\&([A-Za-z_$][\\w$]*)\\(\\{item:\\6,mcpServerStatuses:\\4\\}\\)\\?!0:\\6\\.type===`user\\-message`\\&\\&\\(\\6\\.steeringStatus!=null\\|\\|\\6\\.hookFeedback===!0\\)\\}", "g");
-const patchedPattern = new RegExp("function\\ ([A-Za-z_$][\\w$]*)\\(\\{unit:([A-Za-z_$][\\w$]*),keepMcpAppEntriesPersistent:([A-Za-z_$][\\w$]*),mcpServerStatuses:([A-Za-z_$][\\w$]*),renderMcpApps:([A-Za-z_$][\\w$]*)\\}\\)\\{if\\(\\2\\.kind!==`standalone`\\)return!1;let\\ ([A-Za-z_$][\\w$]*)=\\2\\.item\\.item;return\\ \\6\\.type===`mcp\\-tool\\-call`\\&\\&[A-Za-z_$][\\w$]*\\(\\6\\)\\|\\|\\6\\.type===`assistant\\-message`\\&\\&[A-Za-z_$][\\w$]*\\(\\6\\)\\|\\|\\6\\.type===`dynamic\\-tool\\-call`\\&\\&([A-Za-z_$][\\w$]*)\\(\\6\\)\\|\\|\\3\\&\\&\\5\\&\\&\\6\\.type===`mcp\\-tool\\-call`\\&\\&([A-Za-z_$][\\w$]*)\\(\\{item:\\6,mcpServerStatuses:\\4\\}\\)\\?!0:\\6\\.type===`assistant\\-message`\\|\\|\\6\\.type===`user\\-message`\\}", "g");
+// Complete classifier template from the current signed package. Bind every
+// local alias and keep the upstream assistant/tool exceptions intact unless
+// both authored-message branches match as one unique contract.
+const identifier = String.raw`[A-Za-z_$][\w$]*`;
+const classifierPrefix =
+  String.raw`function (?<classifier>${identifier})\(\{unit:(?<unit>${identifier}),hasFollowingFinalAnswer:(?<following>${identifier}),keepMcpAppEntriesPersistent:(?<keep>${identifier}),mcpServerStatuses:(?<statuses>${identifier}),renderMcpApps:(?<render>${identifier})\}\)\{if\(\k<unit>\.kind!==\`standalone\`\)return!1;let (?<item>${identifier})=\k<unit>\.item\.item;return `;
+const classifierTools =
+  String.raw`\|\|\k<item>\.type===\`dynamic-tool-call\`&&${identifier}\(\k<item>\)\|\|\k<keep>&&\k<render>&&\k<item>\.type===\`mcp-tool-call\`&&${identifier}\(\{item:\k<item>,mcpServerStatuses:\k<statuses>\}\)\?!0:`;
+const classifierLeadingTool =
+  String.raw`\k<item>\.type===\`user-input-response\`\?!\k<item>\.completed:` +
+  String.raw`\k<item>\.type===\`mcp-tool-call\`&&${identifier}\(\k<item>\)\|\|`;
+const currentPattern = new RegExp(
+  classifierPrefix +
+    classifierLeadingTool +
+    String.raw`\k<item>\.type===\`assistant-message\`&&(?<assistantFilter>${identifier})\(\k<item>\)` +
+    classifierTools +
+    String.raw`\k<item>\.type===\`user-message\`&&\(\k<item>\.steeringStatus===\`pending\`\|\|` +
+    String.raw`\k<item>\.deliveryStatus===\`not-sent\`\|\|\k<item>\.hookFeedback===!0\|\|!\k<following>\)\}`,
+  "g",
+);
+const patchedPattern = new RegExp(
+  classifierPrefix +
+    classifierLeadingTool +
+    String.raw`\k<item>\.type===\`assistant-message\`` +
+    classifierTools +
+    String.raw`\k<item>\.type===\`user-message\`\}`,
+  "g",
+);
 const recovery = "Disable authored-message-visibility and rebuild, or update its patch for the current official package.";
 
 function applyAuthoredMessageVisibilityPatch(source) {
@@ -15,10 +39,16 @@ function applyAuthoredMessageVisibilityPatch(source) {
     return source;
   }
   const match = current[0];
-  const item = match[6];
-  const before = `${item}.type===\`user-message\`&&(${item}.steeringStatus!=null||${item}.hookFeedback===!0)`;
+  const item = match.groups.item;
+  const assistantFilter = match.groups.assistantFilter;
+  const assistantBefore = `${item}.type===\`assistant-message\`&&${assistantFilter}(${item})`;
+  const assistantAfter = `${item}.type===\`assistant-message\``;
+  const before = `${item}.type===\`user-message\`&&(${item}.steeringStatus===\`pending\`||${item}.deliveryStatus===\`not-sent\`||${item}.hookFeedback===!0||!${match.groups.following})`;
   const after = `${item}.type===\`assistant-message\`||${item}.type===\`user-message\``;
-  return source.slice(0, match.index) + match[0].replace(before, after) + source.slice(match.index + match[0].length);
+  const replacement = match[0]
+    .replace(assistantBefore, assistantAfter)
+    .replace(before, `${item}.type===\`user-message\``);
+  return source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
 }
 
 module.exports = {

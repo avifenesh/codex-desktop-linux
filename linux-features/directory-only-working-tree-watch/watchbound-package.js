@@ -483,12 +483,26 @@ async function defaultMaterializePackage(request) {
       );
       let packResult;
       try {
-        const packed = JSON.parse(packOutput);
-        const packResults = Array.isArray(packed) ? packed : Object.values(packed);
-        if (packResults.length !== 1) {
+        const packResults = JSON.parse(packOutput);
+        if (Array.isArray(packResults) && packResults.length === 1) {
+          [packResult] = packResults;
+        } else if (
+          packResults != null &&
+          typeof packResults === "object" &&
+          Object.keys(packResults).length === 1
+        ) {
+          [packResult] = Object.values(packResults);
+        } else {
           throw new Error("npm pack did not return exactly one archive");
         }
-        [packResult] = packResults;
+        if (
+          packResult == null ||
+          typeof packResult !== "object" ||
+          packResult.name !== request.name ||
+          packResult.version !== request.version
+        ) {
+          throw new Error("npm pack returned unexpected package metadata");
+        }
       } catch (error) {
         throw new Error(`Could not parse npm pack output: ${error.message}`);
       }
@@ -967,10 +981,19 @@ function copyPackageIntoReservation(sourceDir, targetDir, identity) {
   // Linux procfs resolves this path through the already-open directory
   // descriptor. A concurrent rename of the public target pathname therefore
   // cannot redirect package bytes into a replacement directory.
-  // The reservation already exists. Copy its children through the held
-  // descriptor, retaining no-replace checks for every target entry.
-  for (const name of fs.readdirSync(sourceDir)) {
-    fs.cpSync(path.join(sourceDir, name), `/proc/self/fd/${identity.descriptor}/${name}`, {
+  const reservationRoot = `/proc/self/fd/${identity.descriptor}`;
+  // The root already exists because mkdir reserved it. Node 26.10+ correctly
+  // rejects that root with errorOnExist, so copy its missing children instead.
+  for (const entry of fs.readdirSync(sourceDir)) {
+    const destination = path.join(reservationRoot, entry);
+    // Older Node versions may merge an existing directory even with
+    // errorOnExist. Refuse existing entries before invoking the copy API.
+    if (fs.lstatSync(destination, { throwIfNoEntry: false }) != null) {
+      throw Object.assign(new Error(
+        `Watchbound package reservation entry already exists: ${destination}`,
+      ), { code: "EEXIST" });
+    }
+    fs.cpSync(path.join(sourceDir, entry), destination, {
       recursive: true,
       dereference: false,
       errorOnExist: true,

@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { validateMainProcessSyntax } = require("./lib/javascript-syntax.js");
 
 const {
 } = require("../lib/patch-report.js");
@@ -182,6 +183,10 @@ function patchExtractedApp(extractedDir, options = {}) {
     report,
     PHASE_EXTRACTED_APP_POST_WEBVIEW,
   );
+
+  // Extracted-app descriptors can edit main-process chunks too. Gate the final
+  // bytes after every phase, before the caller can repack/promote the ASAR.
+  validateMainProcessSyntax(extractedDir);
 
   console.log("Applied Linux patch descriptors:", {
     target: main == null ? null : path.join(main.buildDir, main.mainBundle),
