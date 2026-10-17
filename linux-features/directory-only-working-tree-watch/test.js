@@ -102,7 +102,7 @@ const CURRENT_WORKER_LOCAL_FILE_WATCH = [
   "a({reason:`disposed`})}}}",
 ].join("");
 
-const CURRENT_SRC_LOCAL_FILE_WATCH = [
+const CURRENT_BOOTSTRAP_LOCAL_FILE_WATCH = [
   "async startFileWatch(e){let t=gb(),n=!1,r=await this.platformPath(),",
   "a=(0,c.watch)(this.getFileSystemPath(e.path),{recursive:e.recursive},(t,n)=>{",
   "let a=n==null?null:r.join(e.path,...n.split(this.runsInsideWsl?",
@@ -122,7 +122,7 @@ const CURRENT_WORKER_REMOTE_FILE_WATCH = [
   "finally{a()}}}}",
 ].join("");
 
-const CURRENT_SRC_REMOTE_FILE_WATCH = [
+const CURRENT_BOOTSTRAP_REMOTE_FILE_WATCH = [
   "async startFileWatch(e){let t=await this.startFileWatchSession({onChange:e.onChange,",
   "path:e.path,watchId:e.watchId});return{coverage:t.coverage,path:t.path,closed:t.closed,",
   "dispose:async()=>{await t.dispose()}}}",
@@ -167,13 +167,13 @@ function currentWorkerSource(route = CURRENT_PARCEL_ROUTE) {
   ].join("");
 }
 
-function currentSrcSource() {
+function currentBootstrapSource() {
   return [
     "var CurrentSrcRemote=class{",
-    CURRENT_SRC_REMOTE_FILE_WATCH,
+    CURRENT_BOOTSTRAP_REMOTE_FILE_WATCH,
     "};var are=class{runsInsideWsl;workspaceRoot=new SrcRoot(this);hostConfig={id:`local`,display_name:`Local`," +
       "kind:`local`};id=`local`;isLocal=!0;",
-    CURRENT_SRC_LOCAL_FILE_WATCH,
+    CURRENT_BOOTSTRAP_LOCAL_FILE_WATCH,
     "};",
   ].join("");
 }
@@ -182,7 +182,7 @@ function currentBundlePair(t, overrides = {}) {
   const extractedDir = tempDirectory(t, "directory-watch-current-contract-");
   const buildDir = path.join(extractedDir, ".vite", "build");
   const sources = new Map([
-    [overrides.localName ?? "src-Cz_uUmVl.js", overrides.src ?? currentSrcSource()],
+    ["bootstrap-current.js", overrides.bootstrap ?? currentBootstrapSource()],
     ["worker.js", overrides.worker ?? currentWorkerSource()],
     ...Object.entries(overrides.extra ?? {}),
   ]);
@@ -376,15 +376,16 @@ test("feature patch reports drift instead of patching an ambiguous bundle", () =
   assert.equal(descriptor.status(result, []).status, "skipped-optional");
 });
 
-test("bundle discovery patches the current src and worker copies", (t) => {
+test("bundle discovery patches the current bootstrap companion and worker copies", (t) => {
   const extractedDir = tempDirectory(t, "directory-watch-bundle-");
   const buildDir = path.join(extractedDir, ".vite", "build");
   writeFile(path.join(buildDir, "unrelated.js"), "const unrelated=true;");
+  writeFile(path.join(buildDir, "watcher.js"), CURRENT_PARCEL_HELPER);
   const targets = [
-    path.join(buildDir, "src-Cz_uUmVl.js"),
+    path.join(buildDir, "bootstrap-current.js"),
     path.join(buildDir, "worker.js"),
   ];
-  writeFile(targets[0], currentSrcSource());
+  writeFile(targets[0], currentBootstrapSource());
   writeFile(targets[1], currentWorkerSource());
 
   const discovery = findLocalFileWatchBundles(
@@ -404,7 +405,7 @@ test("bundle discovery patches the current src and worker copies", (t) => {
   assert.equal(first.matched, 2);
   assert.equal(first.changed, 2);
   assert.deepEqual(first.targets, [
-    path.join(".vite", "build", "src-Cz_uUmVl.js"),
+    path.join(".vite", "build", "bootstrap-current.js"),
     path.join(".vite", "build", "worker.js"),
   ]);
   for (const target of targets) {
@@ -421,50 +422,6 @@ test("bundle discovery patches the current src and worker copies", (t) => {
   assert.equal(second.matched, 2);
   assert.equal(second.changed, 0);
   assert.deepEqual(second.targets, first.targets);
-});
-
-test("bundle discovery patches the bootstrap and worker copies in the signed Linux layout", (t) => {
-  const candidate = currentBundlePair(t, {
-    localName: "bootstrap-C-A2NQZn.js",
-    extra: { "src-unrelated.js": "const unrelated=true;" },
-  });
-  const targets = [
-    path.join(".vite", "build", "bootstrap-C-A2NQZn.js"),
-    path.join(".vite", "build", "worker.js"),
-  ];
-
-  const discovery = findLocalFileWatchBundles(candidate.extractedDir, normalizedSettings());
-  assert.deepEqual(discovery.targets.map(({ bundlePath }) => bundlePath),
-    targets.map((target) => path.join(candidate.extractedDir, target)));
-
-  const first = patchWorker(candidate.extractedDir);
-  assert.equal(first.matched, 2);
-  assert.equal(first.changed, 2);
-  assert.deepEqual(first.targets, targets);
-  assert.equal(fs.readFileSync(path.join(candidate.buildDir, "src-unrelated.js"), "utf8"),
-    "const unrelated=true;");
-  for (const target of targets) {
-    assert.match(fs.readFileSync(path.join(candidate.extractedDir, target), "utf8"), /watchbound/u);
-  }
-
-  const second = patchWorker(candidate.extractedDir);
-  assert.equal(second.matched, 2);
-  assert.equal(second.changed, 0);
-  assert.deepEqual(second.targets, targets);
-});
-
-test("bundle discovery rejects ambiguous bootstrap and src local copies", (t) => {
-  const candidate = currentBundlePair(t, {
-    localName: "bootstrap-C-A2NQZn.js",
-    extra: { "src-other.js": currentSrcSource() },
-  });
-  const original = readBundlePair(candidate);
-  const result = captureWarns(() => patchWorker(candidate.extractedDir)).value;
-
-  assert.equal(result.matched, 0);
-  assert.equal(result.changed, 0);
-  assert.match(result.reason, /Found 3 current local startFileWatch bundles/u);
-  assert.deepEqual(readBundlePair(candidate), original);
 });
 
 test("bundle discovery rejects a missing Parcel route without changing either bundle", (t) => {
@@ -550,7 +507,7 @@ test("bundle discovery rejects a Parcel route outside worker.js without changing
   }
 });
 
-test("bundle discovery rejects copies outside the current src and worker pair", (t) => {
+test("bundle discovery rejects copies outside the current companion and worker pair", (t) => {
   const extractedDir = tempDirectory(t, "directory-watch-ambiguous-");
   const buildDir = path.join(extractedDir, ".vite", "build");
   for (const name of ["src-first.js", "src-second.js", "worker.js"]) {
@@ -580,21 +537,21 @@ test("patches the pristine current bundle contract and accepts only its exact co
   assert.equal(first.matched, 2);
   assert.equal(first.changed, 2);
   assert.deepEqual(first.targets, [
-    path.join(".vite", "build", "src-Cz_uUmVl.js"),
+    path.join(".vite", "build", "bootstrap-current.js"),
     path.join(".vite", "build", "worker.js"),
   ]);
 
   const completed = readBundlePair(candidate);
   assert.notDeepEqual(completed, pristine);
   const worker = completed.get("worker.js");
-  const src = completed.get("src-Cz_uUmVl.js");
+  const bootstrap = completed.get("bootstrap-current.js");
   assert.equal(worker.split(PARCEL_WATCH_MARKER).length - 1, 1);
   assert.match(worker, new RegExp(`function ${HELPER_NAME}\\(`, "u"));
-  assert.match(src, new RegExp(`function ${HELPER_NAME}\\(`, "u"));
+  assert.match(bootstrap, new RegExp(`function ${HELPER_NAME}\\(`, "u"));
   assert.ok(worker.includes(CURRENT_WATCHBOUND_ROUTE));
   assert.ok(worker.includes(CURRENT_PARCEL_HELPER));
   assert.ok(worker.includes(CURRENT_WORKER_REMOTE_FILE_WATCH));
-  assert.ok(src.includes(CURRENT_SRC_REMOTE_FILE_WATCH));
+  assert.ok(bootstrap.includes(CURRENT_BOOTSTRAP_REMOTE_FILE_WATCH));
   assert.ok(worker.includes(":t.startFileWatch(n)"));
   assert.equal(completed.get("unrelated.js"), pristine.get("unrelated.js"));
 
@@ -621,10 +578,10 @@ test("rejects markers outside the exact current Watchbound handoff", (t) => {
       },
     },
     {
-      name: "marker in the src bundle",
+      name: "marker in the bootstrap companion bundle",
       overrides: {
         worker: currentWorkerSource(unmarkedHandoff),
-        src: `/*${PARCEL_WATCH_MARKER}*/${currentSrcSource()}`,
+        bootstrap: `/*${PARCEL_WATCH_MARKER}*/${currentBootstrapSource()}`,
       },
     },
     {
@@ -711,13 +668,13 @@ test("rejects missing, duplicate, and partial current contracts", (t) => {
     currentWorkerSource(),
     normalizedSettings(),
   ).source;
-  const completedSrc = patchWorkerSource(
-    currentSrcSource(),
+  const completedBootstrap = patchWorkerSource(
+    currentBootstrapSource(),
     normalizedSettings(),
   ).source;
   const staleSettings = { ...normalizedSettings(), maxWatches: 4096 };
   const staleWorker = patchWorkerSource(currentWorkerSource(), staleSettings).source;
-  const staleSrc = patchWorkerSource(currentSrcSource(), staleSettings).source;
+  const staleBootstrap = patchWorkerSource(currentBootstrapSource(), staleSettings).source;
   const workerOriginalIndex = completedWorker.indexOf("var Que=class{");
   const workerHelper = completedWorker.slice(0, workerOriginalIndex);
   const workerWithoutHelper = completedWorker.slice(workerOriginalIndex);
@@ -750,42 +707,42 @@ test("rejects missing, duplicate, and partial current contracts", (t) => {
           "const GIT_QUERY_TIMEOUT_MS = 5000;",
           "const GIT_QUERY_TIMEOUT_MS = 5001;",
         ),
-        src: completedSrc,
+        bootstrap: completedBootstrap,
       },
     },
     {
       name: "missing completed helper",
       overrides: {
         worker: workerWithoutHelper,
-        src: completedSrc,
+        bootstrap: completedBootstrap,
       },
     },
     {
       name: "duplicate completed helper",
       overrides: {
         worker: `${workerHelper}${completedWorker}`,
-        src: completedSrc,
+        bootstrap: completedBootstrap,
       },
     },
     {
       name: "one completed bundle plus one pristine bundle",
       overrides: {
         worker: completedWorker,
-        src: currentSrcSource(),
+        bootstrap: currentBootstrapSource(),
       },
     },
     {
       name: "duplicate completed marker",
       overrides: {
         worker: `/*${PARCEL_WATCH_MARKER}*/${completedWorker}`,
-        src: completedSrc,
+        bootstrap: completedBootstrap,
       },
     },
     {
       name: "missing completed marker",
       overrides: {
         worker: completedWorker.replace(`/*${PARCEL_WATCH_MARKER}*/`, ""),
-        src: completedSrc,
+        bootstrap: completedBootstrap,
       },
     },
     {
@@ -795,28 +752,28 @@ test("rejects missing, duplicate, and partial current contracts", (t) => {
           `${HELPER_NAME}(this,e,`,
           `missing${HELPER_NAME}(this,e,`,
         ),
-        src: completedSrc,
+        bootstrap: completedBootstrap,
       },
     },
     {
       name: "duplicate completed branch",
       overrides: {
         worker: completedWorker.replace(workerBranch, `${workerBranch}${workerBranch}`),
-        src: completedSrc,
+        bootstrap: completedBootstrap,
       },
     },
     {
       name: "completed route retargeted to a different local class",
       overrides: {
         worker: completedWorker.replace("let e=new Que", "let e=new OtherHost"),
-        src: completedSrc,
+        bootstrap: completedBootstrap,
       },
     },
     {
       name: "stale completed settings",
       overrides: {
         worker: staleWorker,
-        src: staleSrc,
+        bootstrap: staleBootstrap,
       },
     },
   ];
@@ -901,10 +858,10 @@ test("restores both current bundles after injected writes and permits retry", (t
 
 test("rejects non-lossless UTF-8 bundles without changing their bytes", (t) => {
   const candidate = currentBundlePair(t);
-  const srcPath = path.join(candidate.buildDir, "src-Cz_uUmVl.js");
-  fs.appendFileSync(srcPath, Buffer.from([0xff]));
+  const bootstrapPath = path.join(candidate.buildDir, "bootstrap-current.js");
+  fs.appendFileSync(bootstrapPath, Buffer.from([0xff]));
   const before = new Map(
-    ["src-Cz_uUmVl.js", "worker.js"].map((name) => [
+    ["bootstrap-current.js", "worker.js"].map((name) => [
       name,
       fs.readFileSync(path.join(candidate.buildDir, name)),
     ]),
@@ -934,7 +891,7 @@ test("rejects non-lossless UTF-8 bundles without changing their bytes", (t) => {
 test("keeps transaction byte oracles private from injected writers", (t) => {
   const candidate = currentBundlePair(t);
   const before = new Map(
-    ["src-Cz_uUmVl.js", "worker.js"].map((name) => [
+    ["bootstrap-current.js", "worker.js"].map((name) => [
       name,
       fs.readFileSync(path.join(candidate.buildDir, name)),
     ]),
@@ -965,7 +922,7 @@ test("keeps transaction byte oracles private from injected writers", (t) => {
 test("keeps transaction byte oracles private from injected readers", (t) => {
   const candidate = currentBundlePair(t);
   const before = new Map(
-    ["src-Cz_uUmVl.js", "worker.js"].map((name) => [
+    ["bootstrap-current.js", "worker.js"].map((name) => [
       name,
       fs.readFileSync(path.join(candidate.buildDir, name)),
     ]),
@@ -1085,8 +1042,8 @@ test("reports failed-integrity when rollback cannot prove original current bundl
     /rollback byte verification failed.*rollback write also failed: simulated rollback failure/u,
   );
   assert.equal(
-    fs.readFileSync(path.join(candidate.buildDir, "src-Cz_uUmVl.js"), "utf8"),
-    before.get("src-Cz_uUmVl.js"),
+    fs.readFileSync(path.join(candidate.buildDir, "bootstrap-current.js"), "utf8"),
+    before.get("bootstrap-current.js"),
   );
   assert.equal(
     fs.readFileSync(path.join(candidate.buildDir, "worker.js"), "utf8"),
@@ -1995,6 +1952,61 @@ test("Watchbound package-set commit rolls back an injected partial failure", asy
   );
 });
 
+test("the default package commit copies nested and hidden entries into its reservation", (t) => {
+  const workspace = tempDirectory(t, "watchbound-package-reserved-entries-");
+  const sourceDir = path.join(workspace, "source");
+  const targetDir = path.join(workspace, "target");
+  const nativeBytes = Buffer.from([0, 255, 127, 10]);
+  writeFile(path.join(sourceDir, ".metadata"), "metadata\n");
+  writeFile(path.join(sourceDir, "lib", "nested", "owned"), "owned\n", 0o755);
+  writeFile(path.join(sourceDir, "native.node"), nativeBytes);
+  fs.mkdirSync(path.join(sourceDir, "empty"));
+  let reservation;
+
+  commitPackageDirectoryNoReplace(sourceDir, targetDir, (identity) => {
+    reservation = identity;
+    assert.deepEqual(fs.readdirSync(targetDir), []);
+  });
+
+  const after = fs.lstatSync(targetDir, { bigint: true });
+  assert.equal(after.dev, reservation.dev);
+  assert.equal(after.ino, reservation.ino);
+  assert.deepEqual(fs.readdirSync(targetDir).sort(), [
+    ".metadata", "empty", "lib", "native.node",
+  ]);
+  assert.equal(fs.readFileSync(path.join(targetDir, ".metadata"), "utf8"), "metadata\n");
+  assert.equal(
+    fs.readFileSync(path.join(targetDir, "lib", "nested", "owned"), "utf8"),
+    "owned\n",
+  );
+  assert.equal(fs.statSync(path.join(targetDir, "lib", "nested", "owned")).mode & 0o777, 0o755);
+  assert.deepEqual(fs.readFileSync(path.join(targetDir, "native.node")), nativeBytes);
+  assert.deepEqual(fs.readdirSync(path.join(targetDir, "empty")), []);
+});
+
+test("the default package commit atomically refuses an empty destination", (t) => {
+  const workspace = tempDirectory(t, "watchbound-package-empty-no-replace-");
+  const sourceDir = path.join(workspace, "source");
+  const targetDir = path.join(workspace, "target");
+  writeFile(path.join(sourceDir, "owned"), "owned\n");
+  fs.mkdirSync(targetDir);
+  const targetIdentity = fs.lstatSync(targetDir, { bigint: true });
+  let reserved = false;
+
+  assert.throws(
+    () => commitPackageDirectoryNoReplace(sourceDir, targetDir, () => {
+      reserved = true;
+    }),
+    (error) => error?.code === "EEXIST",
+  );
+
+  const after = fs.lstatSync(targetDir, { bigint: true });
+  assert.equal(reserved, false);
+  assert.equal(after.dev, targetIdentity.dev);
+  assert.equal(after.ino, targetIdentity.ino);
+  assert.deepEqual(fs.readdirSync(targetDir), []);
+});
+
 test("the default package commit atomically refuses an existing destination", (t) => {
   const workspace = tempDirectory(t, "watchbound-package-no-replace-");
   const sourceDir = path.join(workspace, "source");
@@ -2019,6 +2031,48 @@ test("the default package commit atomically refuses an existing destination", (t
   assert.equal(after.ino, targetIdentity.ino);
   assert.equal(fs.readFileSync(path.join(targetDir, "foreign"), "utf8"), "preserve\n");
   assert.equal(fs.existsSync(path.join(targetDir, "owned")), false);
+});
+
+test("the default package copy refuses existing reservation entries", async (t) => {
+  for (const kind of ["file", "directory", "symlink"]) {
+    await t.test(kind, (t) => {
+      const workspace = tempDirectory(t, "watchbound-package-entry-no-replace-");
+      const sourceDir = path.join(workspace, "source");
+      const targetDir = path.join(workspace, "target");
+      const conflictPath = path.join(targetDir, "lib");
+      const foreignDir = path.join(workspace, "foreign");
+      writeFile(path.join(sourceDir, "lib", "owned"), "owned\n");
+      writeFile(path.join(foreignDir, "foreign-owner"), "preserve\n");
+      let conflictIdentity;
+      let markerPath;
+
+      assert.throws(
+        () => commitPackageDirectoryNoReplace(sourceDir, targetDir, () => {
+          if (kind === "file") {
+            markerPath = conflictPath;
+            writeFile(markerPath, "preserve\n");
+          } else if (kind === "directory") {
+            markerPath = path.join(conflictPath, "foreign-owner");
+            writeFile(markerPath, "preserve\n");
+          } else {
+            markerPath = path.join(foreignDir, "foreign-owner");
+            fs.symlinkSync(foreignDir, conflictPath, "dir");
+          }
+          conflictIdentity = fs.lstatSync(conflictPath, { bigint: true });
+        }),
+        (error) => error?.code === "EEXIST",
+      );
+
+      const after = fs.lstatSync(conflictPath, { bigint: true });
+      assert.equal(after.dev, conflictIdentity.dev);
+      assert.equal(after.ino, conflictIdentity.ino);
+      assert.equal(fs.readFileSync(markerPath, "utf8"), "preserve\n");
+      if (kind !== "file") {
+        assert.equal(fs.existsSync(path.join(conflictPath, "owned")), false);
+      }
+      assert.deepEqual(fs.readdirSync(foreignDir), ["foreign-owner"]);
+    });
+  }
 });
 
 test("the default package commit rejects a swapped reservation before copying", (t) => {
@@ -2057,11 +2111,16 @@ test("the default package commit verifies reservation identity after copying", (
   const movedTarget = path.join(workspace, "moved-target");
   const markerPath = path.join(targetDir, "foreign-owner");
   writeFile(path.join(sourceDir, "owned"), "owned\n");
+  writeFile(path.join(sourceDir, "nested", "owned"), "nested\n");
   const originalCpSync = fs.cpSync;
+  let swapped = false;
   fs.cpSync = (...args) => {
     originalCpSync(...args);
-    fs.renameSync(targetDir, movedTarget);
-    writeFile(markerPath, "preserve\n");
+    if (!swapped) {
+      swapped = true;
+      fs.renameSync(targetDir, movedTarget);
+      writeFile(markerPath, "preserve\n");
+    }
   };
 
   try {
@@ -2080,6 +2139,8 @@ test("the default package commit verifies reservation identity after copying", (
   assert.equal(fs.readFileSync(markerPath, "utf8"), "preserve\n");
   assert.equal(fs.existsSync(path.join(targetDir, "owned")), false);
   assert.equal(fs.readFileSync(path.join(movedTarget, "owned"), "utf8"), "owned\n");
+  assert.equal(fs.existsSync(path.join(targetDir, "nested")), false);
+  assert.equal(fs.readFileSync(path.join(movedTarget, "nested", "owned"), "utf8"), "nested\n");
 });
 
 test("the default package copy remains bound to a moved reservation", (t) => {
@@ -2089,10 +2150,15 @@ test("the default package copy remains bound to a moved reservation", (t) => {
   const movedTarget = path.join(workspace, "moved-target");
   const markerPath = path.join(targetDir, "foreign-owner");
   writeFile(path.join(sourceDir, "owned"), "owned\n");
+  writeFile(path.join(sourceDir, "nested", "owned"), "nested\n");
   const originalCpSync = fs.cpSync;
+  let swapped = false;
   fs.cpSync = (...args) => {
-    fs.renameSync(targetDir, movedTarget);
-    writeFile(markerPath, "preserve\n");
+    if (!swapped) {
+      swapped = true;
+      fs.renameSync(targetDir, movedTarget);
+      writeFile(markerPath, "preserve\n");
+    }
     originalCpSync(...args);
   };
 
@@ -2112,6 +2178,46 @@ test("the default package copy remains bound to a moved reservation", (t) => {
   assert.equal(fs.readFileSync(markerPath, "utf8"), "preserve\n");
   assert.equal(fs.existsSync(path.join(targetDir, "owned")), false);
   assert.equal(fs.readFileSync(path.join(movedTarget, "owned"), "utf8"), "owned\n");
+  assert.equal(fs.existsSync(path.join(targetDir, "nested")), false);
+  assert.equal(fs.readFileSync(path.join(movedTarget, "nested", "owned"), "utf8"), "nested\n");
+});
+
+test("the default package-set commit rolls back a partially copied reservation", async (t) => {
+  const fixture = packageFixtureManifest(t);
+  const extractedDir = tempDirectory(t, "watchbound-package-copy-rollback-");
+  writeExtractedAppRuntime(extractedDir);
+  const firstTarget = packageTarget(extractedDir, fixture.manifest.packages.targets.x64.name);
+  const originalCpSync = fs.cpSync;
+  let injected = false;
+  fs.cpSync = (source, target, options) => {
+    originalCpSync(source, target, options);
+    if (
+      target.startsWith("/proc/self/fd/") &&
+      path.basename(path.dirname(source)) === "watchbound-node"
+    ) {
+      injected = true;
+      assert.equal(fs.existsSync(firstTarget), true);
+      assert.equal(fs.lstatSync(target).isFile(), true);
+      throw Object.assign(new Error("injected reserved-entry copy failure"), {
+        code: "EIO",
+      });
+    }
+  };
+
+  try {
+    await assert.rejects(
+      stageWatchboundPackages(packageStageOptions(extractedDir, fixture, {
+        arch: "x64",
+        materializePackage: fixtureMaterializer(fixture),
+      })),
+      /injected reserved-entry copy failure/u,
+    );
+  } finally {
+    fs.cpSync = originalCpSync;
+  }
+
+  assert.equal(injected, true);
+  assert.deepEqual(fs.readdirSync(extractedDir), ["package.json"]);
 });
 
 test("package reservation identity ambiguity is failed-integrity", async (t) => {

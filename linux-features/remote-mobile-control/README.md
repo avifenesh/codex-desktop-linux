@@ -34,6 +34,27 @@ Computer Use UI opt-in:
 nix run .#codex-desktop-computer-use-ui-remote-mobile-control
 ```
 
+## Gentoo local ebuild
+
+Gentoo accepts this feature in the generated local ebuild after it is explicitly
+listed in `linux-features/features.json`. Use the existing `make bootstrap-native`
+or `make install-native` workflow; `make gentoo` generates the package without
+installing it after the app has been built. The feature remains disabled by
+default.
+
+The device-key store needs `flock`, supplied by the feature's
+`sys-apps/util-linux` runtime dependency. The cold-start hook is a declarative
+resource, so Gentoo validates its presence and executable mode and preserves
+that mode in the packaged payload. The feature adds no bootstrap or Portage
+build/merge dependency. Portage continues to own native updates with
+`PACKAGE_WITH_UPDATER=0`.
+
+This ebuild uses the existing Desktop-owned app-server path and does not install
+or enable an OpenRC or systemd remote-control service. Package builds have been
+audited on amd64 OpenRC; phone pairing and account-side enrollment still require
+separate runtime validation. Gentoo ARM64 and systemd runtime environments have
+not been tested.
+
 What it changes:
 
 - Replaces the upstream native `remote-control-device-key.node` path with a
@@ -44,20 +65,24 @@ What it changes:
   desktop can authorize outbound control of another enrolled device.
 - Refreshes the remote Connections settings state every 5 seconds and
   immediately after focus, visibility, online, or resume signals.
-- Buffers late `turn/started`, `item/started`, `item/completed`, and
-  `turn/completed` notifications for an unknown conversation, hydrates that
+- Extends the current upstream event-discovery queue to buffer late
+  `turn/started`, `item/started`, `item/completed`, and `turn/completed` notifications for an unknown conversation, hydrates that
   conversation once, and replays the queue in order after hydration. A
   completed item is also restored when its local started state was absent.
+  The upstream request queue, notification timestamps, automation capability,
+  turn merge policy, retry, and discard lifecycle remain intact.
+- Keeps the current abortable Remote status subscriptions and their disposable
+  cleanup; skips the initial status RPC for Linux Remote SSH and outbound-control
+  hosts while preserving local-host reads and notification delivery.
 - Recovers stale remote terminal status when `waitingOnUserInput` remains active
   after the matching input request has already cleared.
 - Keeps local Linux Remote turns on `summary = "none"` unless a turn explicitly
   requests a reasoning summary, preventing Desktop's rollout gate from adding
-  repeated English reasoning titles to the mobile transcript.
-  The current caller's Aeon summary override is preserved for other hosts,
-  platforms, and non-durable turns.
-- Keeps Chrome Browser Use available to remote/mobile controlled sessions when
-  the local Chrome plugin and native host are healthy, and adds a diagnostic
-  when the native browser bridge is not exposed to the session.
+  repeated English reasoning titles to the mobile transcript. Outside local
+  Linux durable turns, it preserves upstream Aeon and rollout summary overrides.
+- Preserves the official Chrome Browser Use client. Upstream now routes browser
+  RPCs through its browser service and owns backend eligibility and preferences;
+  the retired client allowlist workaround is no longer staged.
 - Persists the private key material at
   `~/.config/codex-desktop/remote-control-device-keys/remote-control-device-keys-v1.json`
   with `0600` file permissions inside a dedicated `0700` directory. Updates are
@@ -93,11 +118,11 @@ What it changes:
   enablement, pairing, status, and conversation RPCs between two processes.
 - Updates Remote settings and mobile setup copy so the experimental Linux flow
   is not described as Mac-only.
-- Stages `.codex-linux/cold-start.d/remote-mobile-control`, a feature-owned
-  cold-start hook that starts the app-server daemon with `remote-control start`
+- Declaratively stages `.codex-linux/cold-start.d/remote-mobile-control`, a
+  feature-owned cold-start hook that starts the app-server daemon with `remote-control start`
   through the official Codex executable bundled in the Linux package. It does
-  not download or install another CLI. It also stages a single-instance
-  requirement marker.
+  not download or install another CLI. Upstream retains its single-instance
+  lifecycle.
 
 ## Control topology boundaries
 
@@ -125,11 +150,11 @@ feature descriptor to appear exactly once in this table.
 | `linux-remote-control-feature-sync` | `shared-boundary` | Enables `remote_control` only for the local host and excludes Remote SSH hosts. |
 | `linux-remote-control-visibility` | `outbound-control` | Exposes remote-control Connections UI when the server permits it. |
 | `linux-remote-control-copy` | `shared-boundary` | Rewrites Linux copy shared by host setup and outbound Connections. |
-| `linux-remote-control-settings-ux` | `shared-boundary` | Composes outbound remote-control and Remote SSH actions in the shared settings bundle. |
+| `linux-remote-control-settings-ux` | `shared-boundary` | Adapts the shared Connections copy and outbound-control visibility without reviving the retired upstream SSH installer. |
 | `linux-remote-control-client-revoke-setup-reset` | `mobile-host` | Resets this host's mobile setup state only after the last external controller is removed. |
 | `linux-remote-connections-refresh` | `shared-boundary` | Refreshes the shared Connections list without starting or enabling any host runtime. |
 | `linux-remote-mobile-reasoning-summary-none` | `mobile-host` | Prevents inherited or rollout-forced reasoning summaries from polluting this host's mobile transcript. |
-| `linux-remote-mobile-conversation-hydration` | `mobile-host` | Normalizes active thread runtime state, hydrates and replays late unknown-conversation notifications in order, and restores completed items missing local started state. |
+| `linux-remote-mobile-conversation-hydration` | `mobile-host` | Extends upstream's hydration queue to recover unknown local conversations from ordered turn and item notifications. |
 | `linux-remote-terminal-status-recovery` | `mobile-host` | Reconciles stale mobile terminal state with actual pending requests. |
 | `linux-remote-control-status-read-guard` | `shared-boundary` | Sends `remoteControl/status/read` only to the local host, never Remote SSH or remote-control environment hosts. |
 | `linux-remote-control-status-wait` | `shared-boundary` | Gives the selected host a Linux-specific connection convergence window without changing host ownership. |
@@ -137,21 +162,19 @@ feature descriptor to appear exactly once in this table.
 | `linux-remote-control-enablement-bridge` | `shared-boundary` | Loads outbound clients and auto-connects the remote-control environment owned by this Desktop without overwriting saved choices for other hosts. |
 | `linux-remote-mobile-active-status` | `mobile-host` | Derives mobile active state from the local thread runtime. |
 
-Remote SSH behavior is nested inside the shared settings descriptor rather than
-registered as a separate descriptor. The upstream installer supports Linux
-POSIX hosts. `applyLinuxRemoteControlSshInstallReleasePatch` selects the requested
-Codex release for install or update. This remains a `remote-ssh` responsibility;
-neither function enables remote-control on the SSH host.
+The current upstream Connections bundle explicitly returns no action for
+`install-codex`. The settings descriptor preserves that contract; it does not
+reintroduce the retired Remote SSH installer or enable remote-control on an SSH
+host.
 
 Feature-owned surfaces outside the descriptor array are also topology-scoped:
 
 | Surface | Primary responsibility | Contract |
 | --- | --- | --- |
-| `stage.sh` | `mobile-host` | Stages the host marker, single-instance requirement, cold-start hook, and optional Chrome bridge patch. |
+| `feature.json` resources | `mobile-host` | Declaratively stages and tracks the cold-start hook with its executable mode. |
+| `stage.sh` | `mobile-host` | Stages host ownership markers while preserving official single-instance and browser routing. |
 | `cold-start-hook.sh` | `mobile-host` | Elects one local remote-control runtime owner and starts only the bundled official Codex fallback. |
-| `applyLinuxRemoteMobileChromeBridgePatch` | `mobile-host` | Keeps local Browser Use available to an authorized mobile-controlled session. |
 | Nix `codex-remote-control.service` | `mobile-host` | Replaces the bundled-process fallback with one declarative local app-server owner. |
-| `applyLinuxRemoteControlSshInstallReleasePatch` | `remote-ssh` | Sends an explicit Codex release only to the Remote SSH install/update action. |
 
 The app-server has exactly one Remote Control owner in either supported
 topology:
@@ -162,11 +185,11 @@ Nix:    Desktop -> codex app-server proxy --sock <owner socket>
                -> Unix control socket -> systemd app-server --remote-control
 ```
 
-The packaged single-instance marker is enforced only in the native topology,
-where a second Desktop would create a second Remote Control owner. In the Nix
-topology, multiple Desktop instances may proxy to the same declarative owner.
-The selected CLI must provide `codex app-server proxy`; this path is validated
-with Codex CLI 0.147.0 and follows the repository's current-CLI policy.
+Upstream owns Desktop's single-instance lifecycle. In the Nix topology, Desktop
+proxies to the same declarative owner. The selected CLI must provide
+`codex app-server proxy` and use a control-socket transport compatible with
+Desktop's stdio protocol. Validate an explicit CLI override against that
+contract.
 
 The main RPC boundaries are:
 
@@ -232,6 +255,14 @@ explicit autostart disablement, then to a valid Desktop app-server marker, and
 uses the bundled official Codex runtime only as the final fallback. The selected
 owner is written to the launcher log.
 
+When Desktop owns remote-control, the hook cleans stale PID records from both
+upstream daemon namespaces under `$CODEX_HOME/app-server-daemon`.
+[Codex 0.162.1 selects the names by managed installation path](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/app-server-daemon/src/lib.rs#L334):
+`packages/standalone` uses `app-server.pid` and `app-server-updater.pid`; other
+locations, including `packages/app-server-daemon`, use `daemon.pid` and
+`daemon-updater.pid`. Both namespaces remain valid. Records whose PID is still
+alive are preserved.
+
 To test a specific daemon binary without changing the interactive CLI, set:
 
 ```bash
@@ -240,9 +271,10 @@ CODEX_REMOTE_CONTROL_CODEX_PATH=/path/to/codex
 
 KDE Plasma smoke check:
 
-Mobile control depends on the Linux Computer Use backend once the host is
-enrolled. On Plasma/Wayland, verify that the KWin backend is ready after
-building or installing the package:
+Linux Computer Use is optional for remote chats, prompts, approvals, and result
+review. Enable `computer-use-linux` separately only when remote tasks need to
+operate desktop applications. For that additional capability on Plasma/Wayland,
+verify that the KWin backend is ready after building or installing the package:
 
 ```bash
 ./codex-app/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-linux doctor

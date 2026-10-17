@@ -33,7 +33,7 @@ fresh compact tree, or `compact: false` for complete backend metadata.
 `maxWidth`, `maxHeight`, `maxBytes`, `scale`, `format`, and `quality`. Screenshot
 methods already emit the image and should not be emitted a second time.
 
-The embedded backend tracks Computer Use v0.7.15. Agent activity appears through the native GNOME indicator or the Wayland overlay helper. Captures hide the indicator before reading the screen. Portal captures clean new Pictures files and preserve existing images. Set `CODEX_COMPUTER_USE_INDICATOR=0` to disable action indicators; capture exclusion remains active. GNOME extension version 3 supports Shell 45 through 51. Existing Shell sessions need a logout and login to load refreshed extension files.
+The embedded backend tracks Computer Use v0.7.18. Agent activity appears through the native GNOME indicator or the Wayland overlay helper. Captures hide the indicator before reading the screen. Portal captures clean new Pictures files and preserve existing images. Set `CODEX_COMPUTER_USE_INDICATOR=0` to disable action indicators; capture exclusion remains active. GNOME extension version 3 supports Shell 45 through 51. Existing Shell sessions need a logout and login to load refreshed extension files.
 
 ## Runtime Dependencies
 
@@ -47,7 +47,11 @@ Other accessibility tools can change the key later; setup does not hold it on.
 `get_app_state` returns screenshots as a structured image content block followed
 by the JSON report. The JSON `screenshot` value contains dimensions, scale,
 format, and byte counts without an inline base64 `data_url`; callers should read
-the image block for pixels.
+the image block for pixels. Mutating tools (`click`, `type_text`, `press_key`,
+`scroll`, `drag`, `perform_action`, `set_value`, `activate_window`,
+`move_window`, and `resize_window`) also accept optional `screenshot_after`
+(`true`, `"screen"`, or `"window"`) and `include_tree=true` to return
+post-action observation in the same result.
 
 `doctor` reports an XDG portal interface only when the portal exports its
 methods: Screenshot needs `Screenshot`, ScreenCast needs `CreateSession`,

@@ -1611,9 +1611,7 @@ function classifyCurrentBundle(bundlePath, source, settings = normalizedSettings
     markerCount > 0 ||
     rawRouteLookalikeCount > 0 ||
     pristineRouteMatches.length > 0 ||
-    completedRouteMatches.length > 0 ||
-    parcelHelperMatches.length > 0 ||
-    parcelImportCount > 0;
+    completedRouteMatches.length > 0;
   return {
     branchCallCount,
     bundlePath,
@@ -1817,33 +1815,33 @@ function findLocalFileWatchBundles(extractedDir, settings) {
   const workerRecords = relevant.filter(
     ({ bundlePath }) => path.basename(bundlePath) === "worker.js",
   );
-  const localRecords = relevant.filter(({ bundlePath }) =>
-    /^(?:src|bootstrap)-[A-Za-z0-9_-]+\.js$/u.test(path.basename(bundlePath)),
+  const companionRecords = relevant.filter(
+    ({ bundlePath }) => path.basename(bundlePath) !== "worker.js",
   );
   const exactPair = relevant.length === 2 &&
     workerRecords.length === 1 &&
-    localRecords.length === 1;
+    companionRecords.length === 1;
   if (!exactPair) {
     return { targets: [], reason: currentContractReason(records, bundlePaths.length) };
   }
 
   const worker = workerRecords[0];
-  const local = localRecords[0];
+  const companion = companionRecords[0];
   const pristine =
     hasPristineLocalContract(worker) &&
     hasPristineWorkerRouteContract(worker) &&
-    hasPristineLocalContract(local) &&
-    hasNoParcelRouteContract(local);
+    hasPristineLocalContract(companion) &&
+    hasNoParcelRouteContract(companion);
   const completed =
     hasCompletedLocalContract(worker) &&
     hasCompletedWorkerRouteContract(worker) &&
-    hasCompletedLocalContract(local) &&
-    hasNoParcelRouteContract(local);
+    hasCompletedLocalContract(companion) &&
+    hasNoParcelRouteContract(companion);
   if (!pristine && !completed) {
     return { targets: [], reason: currentContractReason(records, bundlePaths.length) };
   }
 
-  const targets = [local, worker].map((record) => ({
+  const targets = [companion, worker].map((record) => ({
     bundlePath: record.bundlePath,
     source: record.source,
     result: completed

@@ -95,6 +95,15 @@ rebuild. Each upstream update is patched against semantic catalog and picker
 contracts; drift or ambiguous matches fail closed and are reported instead of
 partially changing the app.
 
+The local resolver contract follows the current signed stable package's
+`removeXHigh` filter and preset loop. An enabled feature's descriptor mismatch
+rejects the build/update candidate and preserves the working installation.
+The composer context requires the current separate host-ID binding; the retired
+host-object context shape is rejected.
+The official-bundle CI audit includes populated presets so all six
+descriptors are checked, including the new upstream Default-selection
+compatibility audit and the local composer resolver.
+
 ## Test
 
 ```bash

@@ -10,17 +10,18 @@ const { loadLinuxFeaturePatchDescriptors } = require("../../scripts/lib/linux-fe
 const { applyWebviewAssetPatchDescriptors } = require("../../scripts/patches/engine.js");
 const { createPatchReport, captureWarnings, enabledFeatureFailuresFromReport } = require("../../scripts/lib/patch-report.js");
 
-// Partition and classifier shape from signed official Linux 26.1007.21434; local aliases renamed.
-const fixture = "function kG(e,{keepMcpAppEntriesPersistent:t=!1,mcpServerStatuses:n,renderMcpApps:r=!1}={}){let i=[],a=[],o=[],s=[],c=null;for(let l of e){if(l.kind===`standalone`&&l.item.item.type===`worked-for`){c=l.item.item;continue}if(l.kind===`standalone`&&l.item.item.type===`realtime-transcript`){a.length===0?s.push(l):(a.push(l),o.push(l));continue}a.push(l),AG({unit:l,keepMcpAppEntriesPersistent:t,mcpServerStatuses:n,renderMcpApps:r})?o.push(l):i.push(l)}return{collapsibleUnits:i,expandedUnits:a,persistentUnits:o,preToggleUnits:s,workedForItem:c}}function AG({unit:e,keepMcpAppEntriesPersistent:t,mcpServerStatuses:n,renderMcpApps:r}){if(e.kind!==`standalone`)return!1;let i=e.item.item;return i.type===`mcp-tool-call`&&specialMcp(i)||i.type===`assistant-message`&&Vi(i)||i.type===`dynamic-tool-call`&&Mh(i)||t&&r&&i.type===`mcp-tool-call`&&jG({item:i,mcpServerStatuses:n})?!0:i.type===`user-message`&&(i.steeringStatus!=null||i.hookFeedback===!0)}";
+// Current signed-package partition and classifier, anchored by semantics rather
+// than the bundle filename or minified aliases.
+const fixture = "function xO(e,{hasFollowingFinalAnswer:t=!1,keepMcpAppEntriesPersistent:n=!1,mcpServerStatuses:r,renderMcpApps:a=!1}={}){let i=[],o=[],s=[],c=[],l=null;for(let u of e){o.push(u),SO({unit:u,hasFollowingFinalAnswer:t,keepMcpAppEntriesPersistent:n,mcpServerStatuses:r,renderMcpApps:a})?s.push(u):i.push(u)}return{collapsibleUnits:i,expandedUnits:o,persistentUnits:s,preToggleUnits:c,workedForItem:l}}function SO({unit:e,hasFollowingFinalAnswer:t,keepMcpAppEntriesPersistent:n,mcpServerStatuses:r,renderMcpApps:a}){if(e.kind!==`standalone`)return!1;let i=e.item.item;return i.type===`user-input-response`?!i.completed:i.type===`mcp-tool-call`&&MH(i)||i.type===`assistant-message`&&Vi(i)||i.type===`dynamic-tool-call`&&qh(i)||n&&a&&i.type===`mcp-tool-call`&&CO({item:i,mcpServerStatuses:r})?!0:i.type===`user-message`&&(i.steeringStatus===`pending`||i.deliveryStatus===`not-sent`||i.hookFeedback===!0||!t)}";
 function partition(source, units, options) {
-  return vm.runInNewContext(source + ";kG", { specialMcp: item => item.specialMcp, Vi: item => item.special, Mh: item => item.interactive, jG: ({item}) => item.interactive })(units, options);
+  return vm.runInNewContext(source + ";xO", { MH: item => item.persist, Vi: item => item.final, qh: item => item.interactive, CO: ({item}) => item.interactive })(units, options);
 }
 const unit = (type, id, extra = {}) => ({kind:"standalone",item:{item:{type,id,...extra}}});
 const ids = units => Array.from(units, unit => unit.item.item.id);
 
 test("commentary stays visible in order while tools collapse; expansion contains each item once", () => {
   const units = [unit("assistant-message","c1"),unit("exec","tool"),unit("user-message","steering",{steeringStatus:"accepted"}),unit("assistant-message","c2"),unit("user-message","ordinary"),unit("user-message","hook",{hookFeedback:true})];
-  assert.deepEqual(ids(partition(fixture,units).persistentUnits), ["steering","hook"]);
+  assert.deepEqual(ids(partition(fixture,units,{hasFollowingFinalAnswer:true}).persistentUnits), ["hook"]);
   const patched = apply(fixture);
   assert.notEqual(patched, fixture);
   for (let toggle = 0; toggle < 3; toggle++) {
@@ -33,21 +34,16 @@ test("commentary stays visible in order while tools collapse; expansion contains
 });
 
 test("tool exceptions, grouped activity and worked-for handling remain upstream-owned", () => {
-  const tools = [unit("exec","exec"),unit("dynamic-tool-call","dynamic",{interactive:true}),unit("mcp-tool-call","mcp",{interactive:true}),unit("worked-for","duration"),unit("assistant-message","upstream-persistent",{special:true})];
-  const options = {keepMcpAppEntriesPersistent:true,renderMcpApps:true};
+  const tools = [unit("exec","exec"),unit("dynamic-tool-call","dynamic",{interactive:true}),unit("mcp-tool-call","mcp",{interactive:true}),unit("worked-for","duration")];
+  const options = {hasFollowingFinalAnswer:true,keepMcpAppEntriesPersistent:true,renderMcpApps:true};
   assert.equal(JSON.stringify(partition(apply(fixture),tools,options)),JSON.stringify(partition(fixture,tools,options)));
   const group = {kind:"group",items:[]};
   assert.equal(partition(apply(fixture),[group]).collapsibleUnits[0],group);
 });
 
-test("current special MCP entries remain persistent without general app rendering", () => {
-  const units = [unit("mcp-tool-call", "special", {specialMcp: true}), unit("mcp-tool-call", "ordinary")];
-  assert.deepEqual(ids(partition(apply(fixture), units).persistentUnits), ["special"]);
-});
-
 test("missing, duplicate, mixed and changed classifiers remain byte-identical with actionable warnings", () => {
   const patched = apply(fixture);
-  for (const source of ["",fixture+fixture,patched+patched,fixture+patched,fixture.replace("hookFeedback===!0","hookFeedback===!1"),fixture.replace("i=e.item.item","i=e.item.other")]) {
+  for (const source of ["",fixture+fixture,patched+patched,fixture+patched,fixture.replace("deliveryStatus===`not-sent`","deliveryStatus===`queued`"),fixture.replace("i=e.item.item","i=e.item.other")]) {
     const result = captureWarnings(() => apply(source));
     assert.equal(result.value,source);
     assert.equal(result.warnings.length,1);
@@ -75,9 +71,9 @@ test("feature registration, unique asset selection and enabled drift enforcement
     const file = path.join(assets,"sites-end-resource-newHash.js");
     for (const scenario of ["valid","already","missing","drift","ambiguous"]) {
       for (const name of fs.readdirSync(assets)) fs.unlinkSync(path.join(assets,name));
-      const source = scenario === "already" ? apply(fixture) : scenario === "drift" ? fixture.replace("hookFeedback===!0","hookFeedback===!1") : fixture;
+      const source = scenario === "already" ? apply(fixture) : scenario === "drift" ? fixture.replace("deliveryStatus===`not-sent`","deliveryStatus===`queued`") : fixture;
       if (scenario !== "missing") fs.writeFileSync(file,source);
-      if (scenario === "ambiguous") fs.writeFileSync(path.join(assets,"conversation-blocks-other.js"),source);
+      if (scenario === "ambiguous") fs.writeFileSync(path.join(assets,"sites-end-resource-other.js"),source);
       const report = createPatchReport(); report.enabledFeatures=["authored-message-visibility"];
       captureWarnings(() => applyWebviewAssetPatchDescriptors(temp,loaded,{},report));
       if (["valid","already"].includes(scenario)) {
