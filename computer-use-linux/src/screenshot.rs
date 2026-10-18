@@ -1,5 +1,5 @@
 use crate::x11_display::{is_native_x11_session, with_x11_display, X11_CAPTURE_TIMEOUT};
-use crate::{diagnostics::hydrate_session_bus_env, identity};
+use crate::{diagnostics::hydrate_session_bus_env, windowing::backends::gnome};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::StreamExt;
@@ -8,9 +8,10 @@ use image::imageops::FilterType;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
-    fs,
-    io::Cursor,
+    collections::{HashMap, HashSet},
+    fs::{self, File, OpenOptions},
+    io::{Cursor, Read},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -18,12 +19,18 @@ use std::{
 use tokio::process::Command;
 use zbus::{
     message::{Message, Type as MessageType},
+    names::{BusName, OwnedUniqueName, WellKnownName},
     zvariant::{OwnedObjectPath, OwnedValue, Value},
     MatchRule, MessageStream, Proxy,
 };
 
+const PORTAL_DESKTOP_SERVICE: &str = "org.freedesktop.portal.Desktop";
+const PORTAL_DESKTOP_PATH: &str = "/org/freedesktop/portal/desktop";
+const PORTAL_SCREENSHOT_INTERFACE: &str = "org.freedesktop.portal.Screenshot";
 const PORTAL_REQUEST_INTERFACE: &str = "org.freedesktop.portal.Request";
 const PORTAL_REQUEST_PATH_NAMESPACE: &str = "/org/freedesktop/portal/desktop/request";
+const MAX_SCREENSHOT_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SCREENSHOT_SOURCE_PIXELS: u64 = 128 * 1024 * 1024;
 
 pub const DEFAULT_SCREENSHOT_MAX_DIMENSION: u32 = 1920;
 pub const DEFAULT_SCREENSHOT_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -102,10 +109,151 @@ struct ResolvedScreenshotPayloadOptions {
     quality: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
+struct PortalScreenshotRequest {
+    requested_at: SystemTime,
+    pictures: Option<PortalPicturesSnapshot>,
+}
+
+#[derive(Debug)]
+struct PortalPicturesSnapshot {
+    path: PathBuf,
+    directory: File,
+    names: HashSet<std::ffi::OsString>,
+}
+
+impl PortalPicturesSnapshot {
+    fn new(path: PathBuf) -> std::io::Result<Self> {
+        let path = fs::canonicalize(path)?;
+        let directory = File::open(&path)?;
+        let names = fs::read_dir(&path)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<HashSet<_>>>()?;
+        Ok(Self {
+            path,
+            directory,
+            names,
+        })
+    }
+
+    fn contains_new_path(&self, path: &Path) -> bool {
+        if path.parent() != Some(self.path.as_path()) {
+            return false;
+        }
+        let same_directory = self
+            .directory
+            .metadata()
+            .ok()
+            .zip(fs::metadata(&self.path).ok())
+            .is_some_and(|(before, current)| {
+                (before.dev(), before.ino()) == (current.dev(), current.ino())
+            });
+        same_directory
+            && path
+                .file_name()
+                .is_some_and(|name| !self.names.contains(name))
+    }
+}
+
+#[derive(Debug)]
 enum ScreenshotCleanup {
     DeletePath(PathBuf),
+    #[cfg(test)]
     Preserve,
+    PortalPath {
+        path: PathBuf,
+        request: PortalScreenshotRequest,
+    },
+}
+
+struct OwnedScreenshotCleanup {
+    strategy: Option<ScreenshotCleanup>,
+    portal_file: Option<File>,
+}
+
+impl OwnedScreenshotCleanup {
+    fn new(strategy: ScreenshotCleanup) -> Self {
+        let portal_file = match &strategy {
+            ScreenshotCleanup::PortalPath { path, request } => OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(path)
+                .ok()
+                .filter(|file| {
+                    file.metadata().is_ok_and(|metadata| {
+                        if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } {
+                            return false;
+                        }
+                        if let Some(pictures) = &request.pictures {
+                            if path.parent() == Some(pictures.path.as_path()) {
+                                return pictures.contains_new_path(path);
+                            }
+                        }
+                        // Unknown locations need proof of creation after the request.
+                        // Missing birth times preserve the file.
+                        metadata
+                            .created()
+                            .is_ok_and(|created| created >= request.requested_at)
+                    })
+                }),
+            _ => None,
+        };
+        Self {
+            strategy: Some(strategy),
+            portal_file,
+        }
+    }
+}
+
+impl OwnedScreenshotCleanup {
+    fn cleanup_now(&mut self) {
+        if let Some(strategy) = self.strategy.take() {
+            cleanup_screenshot_path(strategy, self.portal_file.take());
+        }
+    }
+}
+
+impl Drop for OwnedScreenshotCleanup {
+    fn drop(&mut self) {
+        let Some(strategy) = self.strategy.take() else {
+            return;
+        };
+        let portal_file = self.portal_file.take();
+        if matches!(strategy, ScreenshotCleanup::PortalPath { .. }) {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                // A queued read can be cancelled on the single-thread runtime.
+                // Keep the pinned file alive and unlink on a blocking worker.
+                runtime.spawn_blocking(move || cleanup_screenshot_path(strategy, portal_file));
+                return;
+            }
+        }
+        cleanup_screenshot_path(strategy, portal_file);
+    }
+}
+
+fn cleanup_screenshot_path(strategy: ScreenshotCleanup, portal_file: Option<File>) {
+    let path = match &strategy {
+        ScreenshotCleanup::DeletePath(path) => Some(path),
+        ScreenshotCleanup::PortalPath { path, .. } => portal_file.as_ref().and_then(|file| {
+            file.metadata()
+                .ok()
+                .zip(fs::symlink_metadata(path).ok())
+                .filter(|(original, current)| {
+                    current.file_type().is_file()
+                        && (original.dev(), original.ino()) == (current.dev(), current.ino())
+                })
+                .map(|_| path)
+        }),
+        #[cfg(test)]
+        ScreenshotCleanup::Preserve => None,
+    };
+    if let Some(path) = path {
+        if let Err(error) = fs::remove_file(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("Failed to remove screenshot capture file: {error}");
+            }
+        }
+    }
 }
 
 impl ScreenshotPayloadOptions {
@@ -191,12 +339,12 @@ pub async fn capture_screenshot_raw() -> Result<RawScreenshotCapture> {
         return forced.capture().await;
     }
 
-    // The Shell and portal DBus paths fail for background processes (systemd
+    // The Shell and portal DBus paths can fail for background processes (systemd
     // user services, non-interactive parent shells): GNOME Shell's
-    // DBusSenderChecker rejects unknown bus names, and the portal cancels with
-    // response code 2 when there is no foreground window. `gnome-screenshot`
-    // claims an allowlisted bus name and works regardless, so it is the final
-    // fallback. See issue #20.
+    // DBusSenderChecker rejects unknown bus names, and a portal consent dialog
+    // may be denied when the caller is not the focused app. Response code 2
+    // can also indicate other portal failures. `gnome-screenshot` claims an
+    // allowlisted bus name, so try it as the final fallback. See issue #20.
     let gnome_error = match capture_with_gnome_shell().await {
         Ok(capture) => return Ok(capture),
         Err(error) => error,
@@ -222,11 +370,11 @@ pub async fn capture_screenshot_raw() -> Result<RawScreenshotCapture> {
     };
 
     Err(anyhow!(
-        "GNOME Shell screenshot failed: {gnome_error}; \
-         GNOME Shell extension screenshot failed: {extension_error}; \
-         XDG portal screenshot failed: {portal_error}; \
-         native X11 screenshot failed: {x11_error}; \
-         gnome-screenshot fallback failed: {cli_error}"
+        "GNOME Shell screenshot failed: {gnome_error:#}; \
+         GNOME Shell extension screenshot failed: {extension_error:#}; \
+         XDG portal screenshot failed: {portal_error:#}; \
+         native X11 screenshot failed: {x11_error:#}; \
+         gnome-screenshot fallback failed: {cli_error:#}"
     ))
 }
 
@@ -276,8 +424,28 @@ fn forced_backend() -> Result<Option<ScreenshotBackend>> {
 }
 
 pub async fn capture_screenshot() -> Result<ScreenshotCapture> {
+    let _pipeline = screenshot_pipeline_permit().await?;
     let raw = capture_screenshot_raw().await?;
-    prepare_screenshot_payload(raw, ScreenshotPayloadOptions::default())
+    run_image_task(move || prepare_screenshot_payload(raw, ScreenshotPayloadOptions::default()))
+        .await
+}
+
+pub(crate) async fn screenshot_pipeline_permit() -> Result<tokio::sync::SemaphorePermit<'static>> {
+    static CAPTURE_PIPELINE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    Ok(CAPTURE_PIPELINE.acquire().await?)
+}
+
+pub(crate) async fn run_image_task<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    static IMAGE_WORKER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let permit = IMAGE_WORKER.acquire().await?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .context("screenshot processing task failed")?
 }
 
 pub fn prepare_screenshot_payload(
@@ -381,14 +549,7 @@ async fn capture_with_gnome_extension() -> Result<RawScreenshotCapture> {
     let connection = zbus::Connection::session()
         .await
         .context("failed to connect to session bus")?;
-    let proxy = Proxy::new(
-        &connection,
-        identity::DBUS_SERVICE,
-        identity::DBUS_OBJECT_PATH,
-        identity::DBUS_SERVICE,
-    )
-    .await
-    .context("failed to create Codex GNOME Shell extension proxy")?;
+    let proxy = gnome::verified_extension_proxy(&connection).await?;
     let (ok, message): (bool, String) = match proxy.call("CaptureScreenshot", &(filename)).await {
         Ok(result) => result,
         Err(error) => {
@@ -413,22 +574,50 @@ async fn capture_with_portal() -> Result<RawScreenshotCapture> {
     let connection = zbus::Connection::session()
         .await
         .context("failed to connect to session bus")?;
+    let portal_owner = portal_desktop_owner(&connection).await?;
     let token = request_token();
     // Some portals rewrite the request handle, so subscribe before calling Screenshot
     // and filter by the returned handle instead of subscribing after the call.
-    let mut response_stream = portal_response_stream(&connection).await?;
+    let mut response_stream = portal_response_stream(&connection, &portal_owner).await?;
 
     let portal_proxy = Proxy::new(
         &connection,
-        "org.freedesktop.portal.Desktop",
-        "/org/freedesktop/portal/desktop",
-        "org.freedesktop.portal.Screenshot",
+        portal_owner.clone(),
+        PORTAL_DESKTOP_PATH,
+        PORTAL_SCREENSHOT_INTERFACE,
     )
     .await
     .context("failed to create XDG portal screenshot proxy")?;
     let mut options: HashMap<&str, Value<'_>> = HashMap::new();
     options.insert("handle_token", Value::from(token.as_str()));
     options.insert("interactive", Value::from(false));
+    let mut pictures_command = Command::new("xdg-user-dir");
+    pictures_command.arg("PICTURES");
+    let pictures = crate::command_runner::output(pictures_command, "locate Pictures directory")
+        .await
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|path| PathBuf::from(path.trim_end_matches('\n')))
+        .filter(|path| path.is_absolute());
+    let pictures = match pictures {
+        // Match the command helper's one-second metadata budget. A stalled
+        // Pictures mount must not prevent the portal request from starting.
+        Some(path) => match tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || PortalPicturesSnapshot::new(path)),
+        )
+        .await
+        {
+            Ok(Ok(Ok(snapshot))) => Some(snapshot),
+            _ => None,
+        },
+        None => None,
+    };
+    let request = PortalScreenshotRequest {
+        requested_at: SystemTime::now(),
+        pictures,
+    };
     let handle: OwnedObjectPath = portal_proxy
         .call("Screenshot", &("", options))
         .await
@@ -436,13 +625,19 @@ async fn capture_with_portal() -> Result<RawScreenshotCapture> {
 
     let (response_code, results) = tokio::time::timeout(
         Duration::from_secs(20),
-        wait_for_portal_response(&mut response_stream, handle.as_str()),
+        wait_for_portal_response(&mut response_stream, handle.as_str(), portal_owner.as_str()),
     )
     .await
     .context("timed out waiting for XDG portal screenshot response")??;
 
-    if response_code != 0 {
-        bail!("XDG portal screenshot was denied or cancelled with response code {response_code}");
+    match response_code {
+        0 => {}
+        1 => bail!("XDG portal screenshot was cancelled by the user (response code 1)"),
+        2 => bail!(
+            "XDG portal screenshot ended without success (response code 2); \
+             check the desktop portal logs for permission or backend errors"
+        ),
+        _ => bail!("XDG portal screenshot returned unknown response code {response_code}"),
     }
 
     let uri_value = results
@@ -455,7 +650,20 @@ async fn capture_with_portal() -> Result<RawScreenshotCapture> {
         .context("XDG portal screenshot uri was not a string")?;
     let path = file_uri_to_path(&uri)?;
 
-    read_png_as_capture(path, "xdg-desktop-portal", ScreenshotCleanup::Preserve).await
+    read_portal_png_as_capture(path, request).await
+}
+
+async fn read_portal_png_as_capture(
+    path: PathBuf,
+    request: PortalScreenshotRequest,
+) -> Result<RawScreenshotCapture> {
+    // Portal URIs can reference user files. Snapshot names before requesting
+    // capture, and pin the returned file until cleanup to prevent inode reuse.
+    let cleanup = ScreenshotCleanup::PortalPath {
+        path: path.clone(),
+        request,
+    };
+    read_png_as_capture(path, "xdg-desktop-portal", cleanup).await
 }
 
 /// Upper bound on how long we wait for `gnome-screenshot` before killing it.
@@ -513,9 +721,26 @@ async fn capture_with_gnome_screenshot() -> Result<RawScreenshotCapture> {
     .await
 }
 
-async fn portal_response_stream(connection: &zbus::Connection) -> Result<MessageStream> {
+async fn portal_desktop_owner(connection: &zbus::Connection) -> Result<OwnedUniqueName> {
+    let dbus = zbus::fdo::DBusProxy::new(connection)
+        .await
+        .context("failed to create session-bus identity proxy")?;
+    let _: u32 = dbus
+        .start_service_by_name(WellKnownName::try_from(PORTAL_DESKTOP_SERVICE)?, 0)
+        .await
+        .context("failed to activate the XDG desktop portal")?;
+    dbus.get_name_owner(BusName::try_from(PORTAL_DESKTOP_SERVICE)?)
+        .await
+        .context("failed to resolve the XDG desktop portal owner")
+}
+
+async fn portal_response_stream(
+    connection: &zbus::Connection,
+    portal_owner: &OwnedUniqueName,
+) -> Result<MessageStream> {
     let response_rule = MatchRule::builder()
         .msg_type(MessageType::Signal)
+        .sender(portal_owner.clone())?
         .interface(PORTAL_REQUEST_INTERFACE)?
         .member("Response")?
         .path_namespace(PORTAL_REQUEST_PATH_NAMESPACE)?
@@ -529,6 +754,7 @@ async fn portal_response_stream(connection: &zbus::Connection) -> Result<Message
 async fn wait_for_portal_response(
     response_stream: &mut MessageStream,
     request_path: &str,
+    portal_owner: &str,
 ) -> Result<(u32, HashMap<String, OwnedValue>)> {
     loop {
         let response = response_stream
@@ -537,7 +763,7 @@ async fn wait_for_portal_response(
             .context("XDG portal screenshot response stream ended")?
             .context("XDG portal screenshot response stream failed")?;
 
-        if !portal_response_matches_path(&response, request_path) {
+        if !portal_response_matches(&response, request_path, portal_owner) {
             continue;
         }
 
@@ -548,11 +774,14 @@ async fn wait_for_portal_response(
     }
 }
 
-fn portal_response_matches_path(response: &Message, request_path: &str) -> bool {
-    response
-        .header()
-        .path()
-        .is_some_and(|path| path.as_str() == request_path)
+fn portal_response_matches(response: &Message, request_path: &str, portal_owner: &str) -> bool {
+    let header = response.header();
+    header
+        .sender()
+        .is_some_and(|sender| sender.as_str() == portal_owner)
+        && header
+            .path()
+            .is_some_and(|path| path.as_str() == request_path)
 }
 
 async fn read_png_as_capture(
@@ -560,16 +789,73 @@ async fn read_png_as_capture(
     source: &str,
     cleanup: ScreenshotCleanup,
 ) -> Result<RawScreenshotCapture> {
-    let result = read_png_as_capture_inner(&path, source);
-    if let ScreenshotCleanup::DeletePath(path) = cleanup {
-        let _ = fs::remove_file(path);
-    }
-    result
+    let source = source.to_string();
+    let (path, mut cleanup) = if matches!(cleanup, ScreenshotCleanup::PortalPath { .. }) {
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || {
+                // Resolve parent aliases without following the final symlink.
+                let path = path
+                    .parent()
+                    .and_then(|parent| fs::canonicalize(parent).ok())
+                    .zip(path.file_name())
+                    .map(|(parent, name)| parent.join(name))
+                    .unwrap_or(path);
+                let cleanup = match cleanup {
+                    ScreenshotCleanup::PortalPath { request, .. } => {
+                        ScreenshotCleanup::PortalPath {
+                            path: path.clone(),
+                            request,
+                        }
+                    }
+                    other => other,
+                };
+                (path, OwnedScreenshotCleanup::new(cleanup))
+            }),
+        )
+        .await
+        .context("timed out preparing portal screenshot file")?
+        .context("portal screenshot preparation task failed")?
+    } else {
+        (path, OwnedScreenshotCleanup::new(cleanup))
+    };
+    run_image_task(move || {
+        let result = read_png_as_capture_inner(&path, &source);
+        cleanup.cleanup_now();
+        result
+    })
+    .await
 }
 
 fn read_png_as_capture_inner(path: &Path, source: &str) -> Result<RawScreenshotCapture> {
-    let bytes = fs::read(path)
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("failed to open screenshot file {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect screenshot file {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!("screenshot path is not a regular file: {}", path.display());
+    }
+    if metadata.len() > MAX_SCREENSHOT_SOURCE_BYTES {
+        bail!(
+            "screenshot file is {} bytes, over the {}-byte source limit",
+            metadata.len(),
+            MAX_SCREENSHOT_SOURCE_BYTES
+        );
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_SCREENSHOT_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)
         .with_context(|| format!("failed to read screenshot file {}", path.display()))?;
+    if bytes.len() as u64 > MAX_SCREENSHOT_SOURCE_BYTES {
+        bail!(
+            "screenshot file grew beyond the {}-byte source limit",
+            MAX_SCREENSHOT_SOURCE_BYTES
+        );
+    }
     if bytes.is_empty() {
         bail!("screenshot file was empty: {}", path.display());
     }
@@ -701,6 +987,12 @@ fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32)> {
     if width == 0 || height == 0 {
         bail!("screenshot PNG had invalid dimensions {width}x{height}");
     }
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > MAX_SCREENSHOT_SOURCE_PIXELS {
+        bail!(
+            "screenshot PNG has {pixels} pixels, over the {MAX_SCREENSHOT_SOURCE_PIXELS}-pixel source limit"
+        );
+    }
     Ok((width, height))
 }
 
@@ -708,7 +1000,11 @@ fn file_uri_to_path(uri: &str) -> Result<PathBuf> {
     let Some(rest) = uri.strip_prefix("file://") else {
         bail!("unsupported screenshot uri: {uri}");
     };
-    Ok(PathBuf::from(percent_decode(rest)))
+    let path = PathBuf::from(percent_decode(rest));
+    if !path.is_absolute() {
+        bail!("screenshot uri did not contain an absolute file path: {uri}");
+    }
+    Ok(path)
 }
 
 fn percent_decode(value: &str) -> String {
@@ -816,6 +1112,30 @@ mod tests {
             file_uri_to_path("file:///tmp/Codex%20Screenshot.png").unwrap(),
             PathBuf::from("/tmp/Codex Screenshot.png")
         );
+    }
+
+    #[test]
+    fn file_uri_requires_an_absolute_path() {
+        assert!(file_uri_to_path("file://relative/path.png").is_err());
+    }
+
+    #[test]
+    fn portal_response_requires_the_pinned_sender_and_exact_path() {
+        let request_path = "/org/freedesktop/portal/desktop/request/1_7/token";
+        let response = Message::signal(request_path, PORTAL_REQUEST_INTERFACE, "Response")
+            .unwrap()
+            .sender(":1.42")
+            .unwrap()
+            .build(&())
+            .unwrap();
+
+        assert!(portal_response_matches(&response, request_path, ":1.42"));
+        assert!(!portal_response_matches(&response, request_path, ":1.99"));
+        assert!(!portal_response_matches(
+            &response,
+            "/org/freedesktop/portal/desktop/request/1_7/other",
+            ":1.42"
+        ));
     }
 
     #[test]
@@ -968,39 +1288,196 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn portal_capture_preserves_valid_returned_path() {
-        let path = test_path("portal-valid");
+    async fn cancelled_queued_capture_removes_its_owned_file() {
+        let cache = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache"));
+        let path = cache.join(format!(
+            "cul-cancelled-capture-{}.png",
+            getrandom::u64().unwrap()
+        ));
+        fs::create_dir_all(&cache).unwrap();
         fs::write(&path, valid_png(1, 1)).unwrap();
-
-        let capture = read_png_as_capture(
+        let (release, wait) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let busy = tokio::spawn(run_image_task(move || {
+            started.send(()).unwrap();
+            wait.recv().unwrap();
+            Ok(())
+        }));
+        ready.await.unwrap();
+        let mut queued = tokio::spawn(read_png_as_capture(
             path.clone(),
-            "xdg-desktop-portal",
-            ScreenshotCleanup::Preserve,
+            "owned-test-capture",
+            ScreenshotCleanup::DeletePath(path.clone()),
+        ));
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut queued)
+            .await
+            .is_err());
+        queued.abort();
+        assert!(queued.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        busy.await.unwrap().unwrap();
+        let removed = !path.exists();
+        let _ = fs::remove_file(path);
+        assert!(removed, "cancelled screenshot left its owned file behind");
+    }
+
+    #[tokio::test]
+    async fn portal_capture_removes_new_returned_path() {
+        let path = test_path("portal-valid");
+        let requested_at = SystemTime::now();
+        // Linux filesystem timestamps can lag the wall clock by one tick.
+        // A real portal round trip also separates request and file creation.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        fs::write(&path, valid_png(1, 1)).unwrap();
+        let capture = read_portal_png_as_capture(
+            path.clone(),
+            PortalScreenshotRequest {
+                requested_at,
+                pictures: None,
+            },
         )
         .await
         .unwrap();
-
         assert_eq!(capture.source, "xdg-desktop-portal");
-        assert!(path.exists());
+        let retained = path.exists();
+        let _ = fs::remove_file(&path);
+        assert!(!retained, "portal screenshot was left behind");
+    }
+
+    #[tokio::test]
+    async fn portal_capture_removes_new_invalid_returned_path() {
+        let path = test_path("portal-invalid");
+        let requested_at = SystemTime::now();
+        // Linux filesystem timestamps can lag the wall clock by one tick.
+        // A real portal round trip also separates request and file creation.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        fs::write(&path, b"").unwrap();
+        let error = read_portal_png_as_capture(
+            path.clone(),
+            PortalScreenshotRequest {
+                requested_at,
+                pictures: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("screenshot file was empty"));
+        let retained = path.exists();
+        let _ = fs::remove_file(&path);
+        assert!(!retained, "failed portal screenshot was left behind");
+    }
+
+    #[tokio::test]
+    async fn portal_capture_preserves_preexisting_returned_path() {
+        let path = test_path("portal-existing");
+        fs::write(&path, valid_png(1, 1)).unwrap();
+        let requested_at = SystemTime::now();
+        let capture = read_portal_png_as_capture(
+            path.clone(),
+            PortalScreenshotRequest {
+                requested_at,
+                pictures: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(capture.source, "xdg-desktop-portal");
+        assert!(path.exists(), "preexisting user image was removed");
         let _ = fs::remove_file(path);
     }
 
     #[tokio::test]
-    async fn portal_capture_preserves_invalid_returned_path() {
-        let path = test_path("portal-invalid");
-        fs::write(&path, b"").unwrap();
+    async fn portal_capture_cleans_same_tick_picture_and_preserves_existing_name() {
+        let directory = test_path("portal-pictures");
+        fs::create_dir_all(&directory).unwrap();
+        let existing = directory.join("existing.png");
+        fs::write(&existing, valid_png(1, 1)).unwrap();
+        let pictures = PortalPicturesSnapshot::new(directory.clone()).unwrap();
+        let path = directory.join("new.png");
+        let request = PortalScreenshotRequest {
+            requested_at: SystemTime::now(),
+            pictures: Some(pictures),
+        };
+        fs::write(&path, valid_png(1, 1)).unwrap();
+        let capture = read_portal_png_as_capture(path.clone(), request)
+            .await
+            .unwrap();
+        assert_eq!(capture.source, "xdg-desktop-portal");
+        assert!(!path.exists(), "same-tick portal capture was left behind");
+        let pictures = PortalPicturesSnapshot::new(directory.clone()).unwrap();
+        fs::remove_file(&existing).unwrap();
+        fs::write(&existing, valid_png(1, 1)).unwrap();
+        let request = PortalScreenshotRequest {
+            requested_at: UNIX_EPOCH,
+            pictures: Some(pictures),
+        };
+        read_portal_png_as_capture(existing.clone(), request)
+            .await
+            .unwrap();
+        assert!(existing.exists(), "preexisting filename was removed");
+        fs::remove_dir_all(directory).unwrap();
+    }
 
-        let error = read_png_as_capture(
-            path.clone(),
-            "xdg-desktop-portal",
-            ScreenshotCleanup::Preserve,
-        )
-        .await
-        .unwrap_err();
+    #[test]
+    fn portal_cleanup_preserves_a_replacement_file() {
+        let path = test_path("portal-replaced");
+        fs::write(&path, valid_png(1, 1)).unwrap();
+        let created = fs::metadata(&path).unwrap().created().unwrap();
+        let cleanup = OwnedScreenshotCleanup::new(ScreenshotCleanup::PortalPath {
+            path: path.clone(),
+            request: PortalScreenshotRequest {
+                requested_at: created,
+                pictures: None,
+            },
+        });
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, b"user replacement").unwrap();
+        drop(cleanup);
+        let result = fs::read(&path);
+        let _ = fs::remove_file(&path);
+        assert_eq!(result.unwrap(), b"user replacement");
+    }
 
-        assert!(error.to_string().contains("screenshot file was empty"));
-        assert!(path.exists());
+    #[tokio::test]
+    async fn screenshot_reader_rejects_symlinks() {
+        let target = test_path("symlink-target");
+        let link = test_path("symlink-link");
+        fs::write(&target, valid_png(1, 1)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let error = read_png_as_capture(link.clone(), "test", ScreenshotCleanup::Preserve)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("failed to open screenshot file"));
+        let _ = fs::remove_file(link);
+        let _ = fs::remove_file(target);
+    }
+
+    #[tokio::test]
+    async fn screenshot_reader_rejects_oversized_source_files() {
+        let path = test_path("oversized-source");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_SCREENSHOT_SOURCE_BYTES + 1).unwrap();
+
+        let error = read_png_as_capture(path.clone(), "test", ScreenshotCleanup::Preserve)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("over the"));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn png_dimensions_reject_decompression_bomb_dimensions() {
+        let png = valid_png(u32::MAX, u32::MAX);
+
+        assert!(png_dimensions(&png)
+            .unwrap_err()
+            .to_string()
+            .contains("pixel source limit"));
     }
 
     #[tokio::test]

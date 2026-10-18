@@ -33,9 +33,11 @@ fresh compact tree, or `compact: false` for complete backend metadata.
 `maxWidth`, `maxHeight`, `maxBytes`, `scale`, `format`, and `quality`. Screenshot
 methods already emit the image and should not be emitted a second time.
 
+X11 xdotool text dispatch warns that non-US or changing XKB layouts can silently substitute symbols even with `ok: true`. Inspect the actual text before Enter or submission. For direct MCP calls, use `include_tree: true` when AT-SPI exposes the text, or `screenshot_after: true`; neither automatically compares the field with the request. This warning does not fix the intermittent corruption.
+
 ## Runtime Dependencies
 
-The embedded backend includes the standalone v0.7.6 accessibility setup,
+The embedded backend tracks standalone v0.7.20, including MCP discovery before initialization, post-action screenshot/tree capture, GNOME and Wayland activity indicators, and the X11 layout warning. It retains the accessibility setup,
 guard, native activation, coordinate-contract, completion-notification, and
 accessibility-tree scoping changes. Setup verifies GNOME's saved toolkit-accessibility key even when
 runtime AT-SPI is ready, and warns when the saved key cannot be verified.
@@ -253,7 +255,7 @@ make install-native
 ```
 
 `make install-native` builds the required `codex-computer-use-linux` and
-`codex-computer-use-cosmic` release helpers once before staging the app.
+`codex-computer-use-cosmic` and `codex-computer-use-indicator` release helpers once before staging the app.
 Updater rebuilds consume those retained prebuilt helpers rather than compiling
 Rust for every OpenAI package update. To opt out, remove the feature ID and
 rebuild/reinstall.

@@ -1024,6 +1024,10 @@ stage_enabled_native_feature_artifacts() {
                     "$APP_DIR/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-cosmic" \
                     "$update_builder_root/target/release/codex-computer-use-cosmic" \
                     "$feature_id COSMIC helper"
+                stage_update_builder_native_artifact \
+                    "$APP_DIR/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-indicator" \
+                    "$update_builder_root/target/release/codex-computer-use-indicator" \
+                    "$feature_id activity indicator"
                 ;;
             global-dictation)
                 stage_update_builder_native_artifact \

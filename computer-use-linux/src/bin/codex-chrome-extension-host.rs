@@ -1424,6 +1424,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn queue_byte_reservation_is_bounded_and_does_not_overflow() {
+        let counter = AtomicUsize::new(3);
+
+        assert!(try_reserve_queue_bytes(&counter, 5, 8));
+        assert_eq!(counter.load(Ordering::Acquire), 8);
+        assert!(!try_reserve_queue_bytes(&counter, 1, 8));
+        assert!(!try_reserve_queue_bytes(&counter, usize::MAX, usize::MAX));
+        assert_eq!(counter.load(Ordering::Acquire), 8);
+    }
+
+    #[test]
     fn socket_directory_default_is_scoped_by_uid() {
         assert_eq!(
             default_socket_dir(1000),
@@ -1610,10 +1621,10 @@ mod tests {
 
     #[test]
     fn runtime_ensure_keeps_child_alive_after_request_returns() {
-        let root = unique_test_dir("codex-runtime-child");
+        let root = unique_test_dir("crc");
         let codex_home = root.join("codex-home");
         let resources = root.join("resources");
-        let runtime_root = root.join("runtime");
+        let runtime_root = root.join("r");
         fs::create_dir_all(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         fs::create_dir_all(&codex_home).unwrap();

@@ -186,6 +186,7 @@ test("update-builder copies staged native feature artifacts without Cargo worksp
   for (const artifact of [
     "codex-computer-use-linux",
     "codex-computer-use-cosmic",
+    "codex-computer-use-indicator",
     "codex-global-dictation-linux",
     "codex-mcp-helper-reaper",
     "codex-read-aloud-linux",
