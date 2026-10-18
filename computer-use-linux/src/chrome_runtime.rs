@@ -3276,9 +3276,10 @@ mod tests {
         })
     }
 
-    fn test_root(name: &str) -> PathBuf {
+    fn test_root(_name: &str) -> PathBuf {
+        // Leave room for app-server socket names under a private TMPDIR.
         env::temp_dir().join(format!(
-            "chrome-runtime-test-{name}-{}-{}",
+            "cr-{}-{}",
             std::process::id(),
             random_hex(4).unwrap()
         ))

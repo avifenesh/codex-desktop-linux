@@ -33,7 +33,9 @@ fresh compact tree, or `compact: false` for complete backend metadata.
 `maxWidth`, `maxHeight`, `maxBytes`, `scale`, `format`, and `quality`. Screenshot
 methods already emit the image and should not be emitted a second time.
 
-The embedded backend tracks Computer Use v0.7.18. Agent activity appears through the native GNOME indicator or the Wayland overlay helper. Captures hide the indicator before reading the screen. Portal captures clean new Pictures files and preserve existing images. Set `CODEX_COMPUTER_USE_INDICATOR=0` to disable action indicators; capture exclusion remains active. GNOME extension version 3 supports Shell 45 through 51. Existing Shell sessions need a logout and login to load refreshed extension files.
+X11 xdotool text dispatch warns that non-US XKB layouts (reported with Brazilian `br`/ABNT2) or changing keymap state can silently substitute symbols even with `ok: true`. Inspect the actual text before pressing Enter, submitting it, or treating it as delivered. Use `include_tree: true` when AT-SPI exposes the text, or `screenshot_after: true`; neither automatically compares the field with the request. Do not retry blindly.
+
+The embedded backend tracks Computer Use v0.7.19. MCP discovery probes are supported before initialization, including metadata-bearing discovery requests. Agent activity appears through the native GNOME indicator or the Wayland overlay helper. Captures hide the indicator before reading the screen. Portal captures clean new Pictures files and preserve existing images. Set `CODEX_COMPUTER_USE_INDICATOR=0` to disable action indicators; capture exclusion remains active. GNOME extension version 3 supports Shell 45 through 51. Existing Shell sessions need a logout and login to load refreshed extension files.
 
 ## Runtime Dependencies
 
