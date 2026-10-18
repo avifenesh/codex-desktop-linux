@@ -1621,7 +1621,7 @@ mod tests {
 
     #[test]
     fn runtime_ensure_keeps_child_alive_after_request_returns() {
-        let root = unique_test_dir("codex-runtime-child");
+        let root = unique_test_dir("crc");
         let codex_home = root.join("codex-home");
         let resources = root.join("resources");
         let runtime_root = root.join("runtime");
