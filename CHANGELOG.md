@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- Synchronize the embedded Computer Use backend to standalone v0.7.23. Keep scoped semantic recovery, exact Unicode text verification, Qt native actions, KWin fractional-scale and dialog targeting, and single-dispatch X11 monitoring. Preserve Codex identities, Chrome integration and cancellation guards.
+- Synchronize the embedded Computer Use backend to standalone v0.7.24. Keep scoped semantic recovery, exact Unicode text verification, Qt native actions, KWin fractional-scale and dialog targeting, and single-dispatch X11 monitoring. Preserve Codex identities, Chrome integration and cancellation guards.
 
 - Sync the embedded Computer Use backend to standalone v0.7.7 as
   `0.7.7-linux-alpha1`. Niri window listing and exact focus fall back to direct
