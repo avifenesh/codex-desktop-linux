@@ -79,6 +79,12 @@ X11/EWMH window origins come from the X server instead of `wmctrl -lG`, which
 counts the frame offset twice, so window crops and relative clicks line up
 with the client area.
 
+Native X11 connections and replies share a transport deadline; a stalled server
+closes the query connection instead of leaving a blocked worker behind. Unix
+sockets, literal IP addresses, and `localhost` need no resolver helper. A remote
+hostname in `DISPLAY` requires `getent ahosts` for bounded name resolution;
+missing or failed resolution reports the X11 route as unavailable.
+
 Element-targeted `click` and `scroll` refuse an `element_index` from another
 app's `get_app_state` snapshot and ask for a snapshot of the target. On GNOME
 Wayland with a scaled monitor, portal pointer input multiplies the stream point
@@ -268,6 +274,17 @@ You can also run the backend directly:
 ./codex-app/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-linux screenshot
 ```
 
+The direct MCP server also exposes `run_shell` only when explicitly started
+with `CODEX_COMPUTER_USE_ENABLE_SHELL=1`. The standalone
+`COMPUTER_USE_LINUX_ENABLE_SHELL=1` alias is used only when the Codex variable
+is unset; an explicit Codex value of `0` keeps it disabled. The in-app native
+adapter does not expose this tool. It runs `/bin/sh -c` with the current user's
+host permissions, without a sandbox or login profiles. The host must approve
+the requested command. Ambient credentials and agent sockets are removed from
+the environment; additional variables must be supplied explicitly. Execution
+defaults to 30 seconds (maximum 120), and returned output is bounded. An audit
+digest is written to backend stderr without logging command text.
+
 ## Enable The In-App UI
 
 Use the optional-feature wizard and enable `computer-use-linux`:
@@ -286,7 +303,7 @@ make install-native
 ```
 
 `make install-native` builds the required `codex-computer-use-linux` and
-`codex-computer-use-cosmic` release helpers once before staging the app.
+`codex-computer-use-cosmic` and `codex-computer-use-indicator` release helpers once before staging the app.
 Updater rebuilds consume those retained prebuilt helpers rather than compiling
 Rust for every OpenAI package update. To opt out, remove the feature ID and
 rebuild/reinstall.

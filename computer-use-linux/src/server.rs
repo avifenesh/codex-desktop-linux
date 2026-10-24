@@ -8494,7 +8494,7 @@ mod tests {
     #[test]
     fn pointer_coordinate_backend_dispatch_is_safe() {
         let dir = std::env::temp_dir().join(format!(
-            "cul-pointer-safety-{}-{}",
+            "cp-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -12423,6 +12423,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         }
 
         let _serial = SHELL_ENV_TEST_LOCK.lock().await;
+        let _alias = EnvVarGuard::unset(SHELL_ENABLE_ENV_STANDALONE);
         {
             let _disabled = EnvVarGuard::set(SHELL_ENABLE_ENV, "0");
             assert_refused().await;
@@ -12431,6 +12432,26 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             let _unset = EnvVarGuard::unset(SHELL_ENABLE_ENV);
             assert_refused().await;
         }
+    }
+
+    #[tokio::test]
+    async fn shell_execution_primary_disable_overrides_standalone_alias() {
+        let _serial = SHELL_ENV_TEST_LOCK.lock().await;
+        let _disabled = EnvVarGuard::set(SHELL_ENABLE_ENV, "0");
+        let _alias = EnvVarGuard::set(SHELL_ENABLE_ENV_STANDALONE, "1");
+        let output = execute_shell(RunShellParams {
+            command: "printf must-not-run".into(),
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_seconds: None,
+        })
+        .await;
+        assert!(!output.ok);
+        assert!(output.stdout.is_empty());
+        assert!(output
+            .error
+            .unwrap()
+            .contains("shell execution is disabled"));
     }
 
     #[test]

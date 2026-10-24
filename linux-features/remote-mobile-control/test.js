@@ -11,6 +11,7 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
+require("./gentoo-support.test.js");
 
 const {
   enabledLinuxFeatureStageHooks,

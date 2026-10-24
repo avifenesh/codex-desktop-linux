@@ -4,6 +4,11 @@ set -Eeuo pipefail
 plugin_template="$SCRIPT_DIR/plugins/openai-bundled/plugins/read-aloud"
 runner_source="$SCRIPT_DIR/linux-features/read-aloud/bin"
 installer_source="$SCRIPT_DIR/linux-features/read-aloud/install-kokoro-runtime.sh"
+# Packaged builders retain the plugin's staged runners without the UI feature.
+if [ -f "$plugin_template/bin/kokoro-stdin" ] || [ -f "$plugin_template/bin/kokoro_stdin.py" ]; then
+    runner_source="$plugin_template/bin"
+    installer_source="$runner_source/install-kokoro-runtime.sh"
+fi
 target_plugin="$INSTALL_DIR/resources/plugins/openai-bundled/plugins/read-aloud"
 target_marketplace="$INSTALL_DIR/resources/plugins/openai-bundled/.agents/plugins/marketplace.json"
 

@@ -728,8 +728,12 @@ mod tests {
         }
     }
 
-    fn scratch_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("cul-{}-{name}", std::process::id()));
+    fn scratch_dir(_name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ci-{}-{:016x}",
+            std::process::id(),
+            getrandom::u64().unwrap()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> | 简体中文
+  <a href="README.md">English</a> | 简体中文 | <a href="README.fa.md">فارسی</a>
 </p>
 
 `codex-desktop` 是 OpenAI 官方 Linux ChatGPT 桌面应用的非官方社区发行版。
@@ -53,8 +53,18 @@ cd codex-desktop-linux
 | Fedora | `make bootstrap-native` | 构建并安装 RPM |
 | openSUSE | `make bootstrap-native` | 构建并安装 RPM |
 | Arch、Manjaro、EndeavourOS | `make bootstrap-native` | 构建并安装 pacman 软件包 |
+| Gentoo | `make bootstrap-native` | 构建本地 ebuild 并通过 Portage 安装；支持 `ui-tweaks` 和 `remote-mobile-control`，不含更新器 |
 | NixOS 或其他 Nix 系统 | `nix run github:ilysenko/codex-desktop-linux` | 构建并运行 flake；参阅 [Nix](docs/nix.md) |
 | Atomic 桌面或其他发行版 | `make build-app && make appimage` | 生成不含原生更新器的本地 AppImage |
+
+Gentoo 的应用合并会忽略 `EMERGE_DEFAULT_OPTS`，从生成的 ebuild 安装载荷，而非复用
+二进制包缓存；不会修改全局 Portage 配置。
+Gentoo 已提供分阶段依赖和包资源框架；现已支持 `ui-tweaks` 和
+`remote-mobile-control`，且仍默认关闭。手机远程控制沿用由 Desktop 管理的
+app-server；ebuild 不安装或启用远程控制服务。
+其他仓库功能需单独审查并声明支持。字段约定见[Gentoo 功能契约](docs/linux-features-architecture.md#gentoo-feature-contract)。
+Gentoo 本地 ebuild 安装路径已在 OpenRC 环境测试，尚未测试 Gentoo systemd
+环境；验证范围见[Gentoo 原生安装说明](docs/native-setup.md#gentoo-local-ebuild)。
 
 推荐的原生安装命令：
 
@@ -72,7 +82,23 @@ make bootstrap-native
 make install-native
 ```
 
-需要先选择可选扩展时：
+若要使用图形化引导安装器，请运行仓库中的独立入口：
+
+```bash
+./install-community
+```
+
+（`make guided-install` 调用同一个入口。）安装器属于仓库安装流程本身，
+不是一个可选 Linux 扩展。在支持 GTK4/PyGObject 的桌面环境中，它会依次
+完成扩展选择、安装选项、配置确认以及带实时日志的构建/安装进度。依赖扩展
+会自动选中；与当前选择冲突的扩展会被禁用，并显示原因。
+
+图形化安装器不会修改扩展实现或扩展设置。它只更新被启用的扩展列表以及
+gitignored 的 `linux-features/features.json` 中属于安装器自己的偏好，
+已有扩展设置会保持不变。无论是否包含自动更新器，原生输出始终保持
+`codex-desktop` 软件包身份并安装到 `/opt/codex-desktop`。
+
+如果只想配置扩展而暂不安装，仍然使用：
 
 ```bash
 make setup-native
@@ -101,9 +127,10 @@ UPSTREAM_DEB=/path/to/chatgpt_<version>_<arch>.deb make build-app
 - 构建需要 Node.js 20+、npm、Python 3、curl、`gpgv`、`dpkg-deb`、tar、
   make 和 C/C++ 工具链。更新器及启用的原生扩展 helper 还需要 Rust。
   `make bootstrap-native` 会安装或提示这些依赖。
-- 官方 `chatgpt` 与自定义 `codex-desktop` 可以同时安装，但两者会共享上游
-  `Codex` 用户 profile。请勿同时运行；上游 single-instance lock 可能把第二次
-  启动交给已经运行的进程。
+- 官方 `chatgpt` 与自定义 `codex-desktop` 可以同时安装。默认情况下两者会
+  共享上游 `Codex` 用户 profile，因此不应同时运行。可选的
+  `community-profile-isolation` 扩展会为 Community 使用独立的 Codex 与
+  Electron 状态，并固定其内置 CLI，从而避免这条共享 profile 边界。
 - AppImage 不会自动添加 `--no-sandbox`。若发行版禁用了 unprivileged user
   namespaces，请使用原生软件包或参阅[故障排除](docs/troubleshooting.md)。
 
@@ -140,6 +167,10 @@ sudo zypper remove codex-desktop
 
 # Arch / Manjaro
 sudo pacman -R codex-desktop
+
+# Gentoo
+sudo emerge --deselect app-misc/codex-desktop
+sudo emerge --unmerge app-misc/codex-desktop
 ```
 
 原生包卸载时会禁用用户更新服务。若旧安装或手动安装仍留下服务：
@@ -170,9 +201,13 @@ Nix 用户应从 profile、Home Manager 配置或 NixOS module 中删除该包�
 ~/.cache/codex-update-manager
 ```
 
+若启用了 `community-profile-isolation`，Community 自己的状态位于
+`~/.codex-community`，Electron profile 位于 `~/.config/Codex-Community`。
+只有在确实要删除这份隔离的 Community 数据时才删除这些路径。
+
 若启用了 `remote-mobile-control`，删除 private device keys 前请先撤销配对设备。
-除非你确实希望删除官方与 Community 共用的 Codex profile、配置、插件和项目
-状态，否则不要删除 `~/.codex`。
+除非你确实希望删除默认共享的 Codex profile、配置、插件和项目状态，否则不要
+删除 `~/.codex`。
 
 ## 功能矩阵
 
@@ -197,6 +232,7 @@ Nix 用户应从 profile、Home Manager 配置或 NixOS module 中删除该包�
 
 | 扩展 ID | 用途 | 文档 |
 |---|---|---|
+| `account-switcher` | 实验性功能：从个人资料菜单切换加密保存的 ChatGPT 登录；需要 Secret Service 和 `secret-tool`；本地聊天和设置共用 | [文档](linux-features/account-switcher/README.md) |
 | `agent-workspace` | 隐藏桌面环境中的 agent-workspace 设置和 bridge | [文档](linux-features/agent-workspace/README.md) |
 | `api-key-model-visibility` | 显示 API-key compatible provider 返回的模型 | [文档](linux-features/api-key-model-visibility/README.md) |
 | `api-key-service-tier` | API-key compatible provider 的 Fast/service-tier UI | [文档](linux-features/api-key-service-tier/README.md) |
@@ -205,8 +241,13 @@ Nix 用户应从 profile、Home Manager 配置或 NixOS module 中删除该包�
 | `authenticated-proxy` | 带用户名和密码的 HTTP proxy | [文档](linux-features/authenticated-proxy/README.md) |
 | `automation-extensions` | 多时间调度和 eager `automation_update` | [文档](linux-features/automation-extensions/README.md) |
 | `browser-proxy` | 让 Browser Use 的网络辅助进程继承显式代理设置 | [文档](linux-features/browser-proxy/README.zh-CN.md) |
+| `chatgpt-dil-markdown-fallback` | 交互式 ChatGPT 回复渲染失败时显示已保存的 Markdown 正文 | [文档](linux-features/chatgpt-dil-markdown-fallback/README.md) |
+| `chatgpt-dots-any-country` | 当账号响应受到国家限制时，仍显示 ChatGPT Dots 入口和可用性说明 | [文档](linux-features/chatgpt-dots-any-country/README.md) |
+| `chatgpt-sidebar-separate-history` | ChatGPT 历史记录默认仅显示聊天，并记住聊天 / Work / 全部筛选选项 | [文档](linux-features/chatgpt-sidebar-separate-history/README.md) |
 | `chronicle-skysight` | 可选的 Linux 桌面活动记忆与受限 Skysight MCP 工具 | [文档](linux-features/chronicle-skysight/README.md) |
 | `codex-micro` | 使用上游 `node-hid` 的 Codex Micro hotplug/hidraw policy | [文档](linux-features/codex-micro/README.md) |
+| `community-features-in-gui-settings` | 在常规设置页顶部的独立一节查看功能与子功能树，子功能分别计数，已安装状态标绿；支持英语和简体中文 | [文档](linux-features/community-features-in-gui-settings/README.md) |
+| `community-profile-isolation` | 将 Community 的 Codex/Electron 状态与子进程 CLI 解析和官方 ChatGPT 隔离 | [文档](linux-features/community-profile-isolation/README.md) |
 | `computer-use-linux` | Linux desktop-control UI 与原生 MCP backend | [文档](linux-features/computer-use-linux/README.md) |
 | `copilot-reasoning-effort` | Copilot auth 的 reasoning-effort 默认值 | [文档](linux-features/copilot-reasoning-effort/README.md) |
 | `directory-only-working-tree-watch` | 有界 Watchbound 工作树监听 | [文档](linux-features/directory-only-working-tree-watch/README.md) |
@@ -214,6 +255,8 @@ Nix 用户应从 profile、Home Manager 配置或 NixOS module 中删除该包�
 | `flatpak-chrome-native-messaging` | 将官方 Chrome 扩展连接到 Flatpak Google Chrome | [文档](linux-features/flatpak-chrome-native-messaging/README.md) |
 | `frameless-titlebar` | 隐藏官方 Linux overlay 按钮，改由 compositor 管理窗口装饰 | [文档](linux-features/frameless-titlebar/README.md) |
 | `global-dictation` | X11 / XDG portal 全局听写快捷键 | [文档](linux-features/global-dictation/README.md) |
+| `wayland-global-shortcuts` | 为弹出聊天、Mini/Pet 等全局快捷键提供原生 Wayland 支持；可独立于听写启用 | [文档](linux-features/wayland-global-shortcuts/README.md) |
+| `global-dictation-gnome` | 无需 RemoteDesktop 会话的可选 GNOME Shell 粘贴扩展；依赖 `global-dictation`，必须显式启用扩展 | [文档](linux-features/global-dictation-gnome/README.md) |
 | `linux-performance-workarounds` | 针对受影响系统的 renderer workaround | [文档](linux-features/linux-performance-workarounds/README.md) |
 | `mcp-helper-reaper` | 安全清理孤立 MCP helper | [文档](linux-features/mcp-helper-reaper/README.md) |
 | `model-picker-default-presets` | 配置 ChatGPT Default 的有序 model/effort 组合 | [文档](linux-features/model-picker-default-presets/README.md) |
@@ -226,14 +269,30 @@ Nix 用户应从 profile、Home Manager 配置或 NixOS module 中删除该包�
 | `project-task-sort` | 恢复 alternate Projects 的 Created 排序 | [文档](linux-features/project-task-sort/README.md) |
 | `read-aloud` | 为 assistant response 添加 Linux 朗读控件 | [文档](linux-features/read-aloud/README.md) |
 | `read-aloud-mcp` | 让 agent 通过 Linux Read Aloud backend 发声 | [文档](linux-features/read-aloud-mcp/README.md) |
+| `reasoning-visibility` | 在常规设置中添加默认关闭且已翻译的推理摘要开关；重启后生效 | [文档](linux-features/reasoning-visibility/README.md) |
 | `record-and-replay` | 将 Linux 操作演示录制为可复用 skill | [文档](linux-features/record-and-replay/README.md) |
 | `remote-control-ui` | 显示实验性 remote-control 设置 | [文档](linux-features/remote-control-ui/README.md) |
 | `remote-mobile-control` | 实验性 Linux remote-host / outbound-control flow | [文档](linux-features/remote-mobile-control/README.md) |
 | `shallow-repository-watches` | 避免临时 repo preview 在主线程递归遍历 | [文档](linux-features/shallow-repository-watches/README.md) |
 | `shared-app-server-socket` | 共享 protocol-transparent Unix app-server socket | [文档](linux-features/shared-app-server-socket/README.md) |
+| `start-minimized-to-tray` | 在常规设置中添加默认关闭的启动到系统托盘选项，可选择每次启动或仅登录自动启动时隐藏窗口 | [文档](linux-features/start-minimized-to-tray/README.md) |
 | `thorium-chrome-plugin` | 为官方 Chrome integration 添加 Thorium | [文档](linux-features/thorium-chrome-plugin/README.md) |
 | `tray-usage` | 在 Linux 系统托盘菜单显示剩余用量 | [文档](linux-features/tray-usage/README.md) |
 | `ui-tweaks` | 可选 UI 与交互自定义 | [文档](linux-features/ui-tweaks/README.md) |
+
+若要在 GNOME Wayland 下听写时避免 RemoteDesktop 权限提示，请通过
+`make setup-native` 同时选择 `global-dictation` 和 `global-dictation-gnome`，
+然后重新构建并安装。首次启动应用会为当前用户安装配套扩展；注销并重新登录后，
+显式执行 `gnome-extensions enable global-dictation-gnome@chatgpt-community.local`。
+启用扩展后请重启应用/helper。helper 会在启动时自动检查配套扩展的版本：
+已启用且兼容时选择 GNOME，否则选择 RemoteDesktop；此选择在重启前保持不变。
+一旦选择 GNOME，粘贴错误不会回退到 RemoteDesktop，也不会自动重试。
+构建功能仅负责分发和安装配套扩展；手动安装的兼容扩展也会被自动检测。
+快捷键授权仍使用 GlobalShortcuts。关闭构建功能不会卸载用户扩展；详见
+[启用与移除说明](linux-features/global-dictation-gnome/README.md)。
+
+可选的 Computer Use backend 提供 `guard-accessibility` 命令，可显式在前台保持
+GNOME 辅助功能开启。它不会自动启动；详见 [Linux Computer Use](docs/linux-computer-use.md)。
 
 启用 `shared-app-server-socket` 并保持 Desktop 运行后，可使用
 `codex-desktop --cli` 将 Codex CLI 连接到 Desktop 的 app-server。详见
@@ -241,6 +300,23 @@ Nix 用户应从 profile、Home Manager 配置或 NixOS module 中删除该包�
 
 ChatGPT account rollout 和 server-side 功能仍由 OpenAI 控制。重新构建本项目
 不会解锁账号功能。
+
+如需输入 CSS 字体 fallback 列表，可启用可选的
+[`ui-tweaks` 自定义字体输入](linux-features/ui-tweaks/README.md#appearancecustomfontinput)，
+在外观设置的字体菜单中切换系统字体列表与手填字体栈。这个子选项默认关闭，
+需在本地 feature settings 中启用后重新构建。
+
+`ui-tweaks` 的可选子选项 `tweaks.selection.moreDetails.enabled` 可恢复 Codex
+回复正文选中文字菜单中的“更多详情”，让 ChatGPT Quick Chat 结合原对话上下文解释
+所选文字。此子选项默认关闭；详见 [UI Tweaks 配置](linux-features/ui-tweaks/README.md#selectionmoredetails)。
+
+测试本地构建时，通过 `codex-app/start.sh` 启动，并保留正常桌面启动器中的
+Electron 参数，包括需要的 `--proxy-server=...`。ChatGPT 账号初始化完成后，
+Quick Chat 入口才会可用。
+
+`ui-tweaks` 的可选子选项 `tweaks.selection.annotationSubmit.enabled` 默认关闭：
+选中文字后，当前有活动的批注文字编辑器时，Ctrl+Enter 发送批注文字，不被常规输入框拦截。
+详见[批注发送配置](linux-features/ui-tweaks/README.md#selectionannotationsubmit)。
 
 ## 配置可选扩展
 

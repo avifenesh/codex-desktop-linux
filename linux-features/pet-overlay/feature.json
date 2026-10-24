@@ -4,8 +4,13 @@
   "description": "Optional Linux avatar overlay placement and compositor hints.",
   "defaultEnabled": false,
   "entrypoints": {
-    "patchDescriptors": "./patch.js"
+    "patchDescriptors": "./patch.js",
+    "stageHook": "./stage.sh"
   },
+  "resources": [
+    { "source": "kwin-bridge.cjs", "target": ".codex-linux/features/pet-overlay/kwin-bridge.cjs", "mode": "0644" },
+    { "source": "kwin-script.cjs", "target": ".codex-linux/features/pet-overlay/kwin-script.cjs", "mode": "0644" }
+  ],
   "runtimeHooks": {
     "launcher": {
       "source": "launcher-hook.sh",

@@ -109,6 +109,16 @@ let
   assertionsFail = evaluated: lib.any (item: !item.assertion) evaluated.config.assertions;
   invalidHomeFiles = map (cfg: assertionsFail (evalHome cfg)) invalidEnvironmentFileConfigs;
   invalidNixOSFiles = map (cfg: assertionsFail (evalNixOS cfg)) invalidEnvironmentFileConfigs;
+  accountSwitcherPackage = packages.codex-desktop.override {
+    linuxFeatureIds = [ "account-switcher" ];
+  };
+  # hasInfix builds a regex, whose pattern cannot carry Nix store context.
+  # Only the comparison pattern loses context; the package keeps its dependency.
+  secretToolBin = builtins.unsafeDiscardStringContext "${lib.getBin pkgs.libsecret}/bin";
+  maximalPackages = [
+    packages.codex-desktop-maximal-directory-watch
+    packages.codex-desktop-maximal-shallow-watch
+  ];
 in
 assert lib.assertMsg
   (features.normalize [ "ui-tweaks" "ui-tweaks" "agent-workspace" ] == [ "agent-workspace" "ui-tweaks" ])
@@ -116,6 +126,12 @@ assert lib.assertMsg
 assert lib.assertMsg
   (features.normalize [ "record-and-replay" ] == [ "chronicle-skysight" "record-and-replay" ])
   "Nix feature dependencies were not added to an existing direct selection";
+assert lib.assertMsg
+  (features.normalize [ "global-dictation" ] == [ "global-dictation" ])
+  "dictation must remain independently selectable";
+assert lib.assertMsg
+  (features.normalize [ "wayland-global-shortcuts" ] == [ "wayland-global-shortcuts" ])
+  "Wayland shortcuts must remain independently selectable";
 assert lib.assertMsg
   (features.normalize [ "codex-wrapper-updater" "zed-opener" ] == [ ])
   "known retired and aliased-retired feature IDs were not ignored";
@@ -125,6 +141,25 @@ assert lib.assertMsg
 assert lib.assertMsg
   (!(builtins.tryEval (features.normalize [ "directory-only-working-tree-watch" "shallow-repository-watches" ])).success)
   "conflicting watcher features were accepted";
+assert lib.assertMsg
+  (!(builtins.tryEval (features.normalize [ "community-profile-isolation" "shared-app-server-socket" ])).success)
+  "Community profile isolation conflict with shared app-server socket was accepted";
+assert lib.assertMsg
+  (!(builtins.tryEval (features.normalize [ "account-switcher" "shared-app-server-socket" ])).success)
+  "Account switching conflict with shared app-server socket was accepted";
+assert lib.assertMsg
+  (lib.all (package:
+    let selected = package.passthru.linuxFeatureIds;
+    in features.normalize selected == selected
+      && lib.elem "shared-app-server-socket" selected
+      && !(lib.elem "account-switcher" selected)
+  ) maximalPackages)
+  "Maximal Nix profiles must retain the shared server without conflicting account switching";
+assert lib.assertMsg
+  (accountSwitcherPackage.passthru.linuxFeatureIds == [ "account-switcher" ]
+    && lib.hasInfix secretToolBin accountSwitcherPackage.installPhase
+    && !(lib.hasInfix secretToolBin packages.codex-desktop.installPhase))
+  "Account switching must remain selectable with its conditional Secret Service CLI runtime";
 assert lib.assertMsg
   (!features.optionType.check [ "not-a-feature" ]
     && features.optionType.check [ "codex-wrapper-updater" ])

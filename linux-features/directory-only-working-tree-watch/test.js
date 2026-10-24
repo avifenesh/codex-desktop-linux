@@ -1171,11 +1171,19 @@ function createPackageFixture(t, name, version, files, metadataOverrides = {}) {
 const QUALIFIED_ELECTRON_VERSION = "42.3.0";
 
 function writeExtractedAppRuntime(extractedDir, electron = QUALIFIED_ELECTRON_VERSION) {
-  writeJson(path.join(extractedDir, "package.json"), {
+  const metadata = {
     name: "openai-codex-electron",
     version: "0.0.0-test",
-    devDependencies: { electron },
-  });
+  };
+  if (electron != null) metadata.devDependencies = { electron };
+  writeJson(path.join(extractedDir, "package.json"), metadata);
+}
+
+function writeObservedRuntimeExecutable(extractedDir, ...nodeVersions) {
+  writeFile(
+    path.join(extractedDir, "ChatGPT"),
+    Buffer.from(nodeVersions.map((version) => `node.js/v${version}\0`).join("")),
+  );
 }
 
 function packageStageOptions(extractedDir, fixture, overrides = {}) {
@@ -1347,7 +1355,7 @@ test("the artifact manifest requires every supported Codex architecture", (t) =>
   }
 });
 
-test("Watchbound staging uses pinned runtime metadata without executing Electron", async (t) => {
+test("Watchbound staging uses observed runtime evidence without executing Electron", async (t) => {
   const fixture = packageFixtureManifest(t);
   const extractedDir = tempDirectory(t, "watchbound-runtime-app-");
   writeExtractedAppRuntime(extractedDir);
@@ -1376,6 +1384,52 @@ test("Watchbound staging uses pinned runtime metadata without executing Electron
     node: "24.15.0",
     qualification: "pinned-artifact-manifest",
   });
+
+  writeExtractedAppRuntime(extractedDir, null);
+  assert.throws(
+    () => validateTargetRuntime(
+      extractedDir,
+      fixture.manifest,
+      undefined,
+      undefined,
+    ),
+    /Observed upstream runtime evidence is missing/u,
+  );
+
+  writeObservedRuntimeExecutable(extractedDir, "24.15.0");
+  assert.deepEqual(validateTargetRuntime(
+    extractedDir,
+    fixture.manifest,
+    undefined,
+    undefined,
+  ), {
+    electron: QUALIFIED_ELECTRON_VERSION,
+    node: "24.15.0",
+    qualification: "signed-runtime-executable",
+  });
+
+  writeObservedRuntimeExecutable(extractedDir, "24.15.0", "24.16.0");
+  assert.throws(
+    () => validateTargetRuntime(
+      extractedDir,
+      fixture.manifest,
+      undefined,
+      undefined,
+    ),
+    /Observed upstream runtime evidence is ambiguous/u,
+  );
+
+  writeObservedRuntimeExecutable(extractedDir, "24.15.0");
+  assert.throws(
+    () => validateTargetRuntime(
+      extractedDir,
+      fixture.manifest,
+      undefined,
+      "24.16.0",
+    ),
+    /Observed upstream Node\.js 24\.15\.0 does not match build target 24\.16\.0/u,
+  );
+  writeExtractedAppRuntime(extractedDir);
 
   assert.deepEqual(validateTargetRuntime(
     extractedDir,
@@ -1430,6 +1484,37 @@ test("Watchbound staging uses pinned runtime metadata without executing Electron
     () => validateArtifactManifest(unsupportedNodeManifest),
     /target runtime contract is invalid/u,
   );
+});
+
+test("Watchbound staging prefers the copied app runtime over the upstream fallback", async (t) => {
+  const fixture = packageFixtureManifest(t);
+  const extractedDir = tempDirectory(t, "watchbound-runtime-copied-app-");
+  const upstreamAppDir = tempDirectory(t, "watchbound-runtime-upstream-app-");
+  writeExtractedAppRuntime(extractedDir, null);
+  writeObservedRuntimeExecutable(extractedDir, "24.15.0");
+  writeObservedRuntimeExecutable(upstreamAppDir, "24.16.0");
+
+  const previousUpstreamAppDir = process.env.UPSTREAM_APP_DIR;
+  process.env.UPSTREAM_APP_DIR = upstreamAppDir;
+  t.after(() => {
+    if (previousUpstreamAppDir == null) delete process.env.UPSTREAM_APP_DIR;
+    else process.env.UPSTREAM_APP_DIR = previousUpstreamAppDir;
+  });
+
+  const result = await stageWatchboundPackages(packageStageOptions(
+    extractedDir,
+    fixture,
+    {
+      arch: "x64",
+      materializePackage: fixtureMaterializer(fixture),
+    },
+  ));
+
+  assert.deepEqual(result.runtime, {
+    electron: QUALIFIED_ELECTRON_VERSION,
+    node: "24.15.0",
+    qualification: "signed-runtime-executable",
+  });
 });
 
 test("verified Watchbound packages stage idempotently into app node_modules", async (t) => {

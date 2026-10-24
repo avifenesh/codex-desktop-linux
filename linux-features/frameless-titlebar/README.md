@@ -14,7 +14,7 @@ to `native`.
 Use it on compositors or window managers that already provide move, resize,
 minimize, maximize, and close, such as Hyprland. It is also a diagnostic
 switch for GNOME/X11 titlebar right-click lockups, because it removes the
-Linux Window Controls Overlay path from the main window.
+Linux Window Controls Overlay path from primary and detached windows.
 
 The default build leaves the official Linux overlay buttons in place. Enable
 this only when those built-in buttons conflict with your desktop environment.
@@ -39,6 +39,7 @@ is created when the window is constructed.
 | Surface | Current official contract | Result on Linux |
 |---|---|---|
 | Main window options | `win32\|\|linux` hidden titlebar plus `titleBarOverlay` | Linux keeps `titleBarStyle: hidden` and does not receive an overlay |
+| Detached window options | Non-macOS hidden titlebar plus `titleBarOverlay` | Linux keeps `titleBarStyle: hidden` and does not receive an overlay |
 | Zoom overlay | `setWindowZoom` calls `setTitleBarOverlay` on Linux | Overlay updates stay Windows-only |
 | Theme overlay sync | `installApplicationMenuTitleBarOverlaySync` runs on Linux | Theme changes do not restore Linux overlay buttons |
 | Webview chrome mapping | Electron Linux uses `application-menu` | Linux uses `native` chrome and hides the in-app menu |

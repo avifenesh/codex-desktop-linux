@@ -122,7 +122,8 @@
           ++ lib.optionals (
             lib.elem "read-aloud" featureIds || lib.elem "read-aloud-mcp" featureIds
           ) [ pkgs.alsa-utils ]
-          ++ lib.optionals (lib.elem "computer-use-linux" featureIds) [ pkgs.glib ];
+          ++ lib.optionals (lib.elem "computer-use-linux" featureIds) [ pkgs.glib pkgs.fontconfig ]
+          ++ lib.optionals (lib.elem "account-switcher" featureIds) [ pkgs.libsecret ];
         runtimePathFor = featureIds:
           lib.makeBinPath (lib.unique (
             baseRuntimePackages ++ featureRuntimePackages featureIds
@@ -371,6 +372,13 @@
           cargoLock.lockFile = ./global-dictation-linux/Cargo.lock;
           doCheck = false;
         };
+        petKwinHelper = staticCratesBuildRustPackage {
+          pname = "codex-pet-kwin";
+          version = "0.1.0";
+          src = ./linux-features/pet-overlay/kwin-helper;
+          cargoLock.lockFile = ./linux-features/pet-overlay/kwin-helper/Cargo.lock;
+          doCheck = false;
+        };
         mcpReaperHelper = staticCratesBuildRustPackage {
           pname = "codex-mcp-helper-reaper";
           version = "0.1.0";
@@ -547,8 +555,11 @@
               ${lib.optionalString recordReplayBackendEnabled ''
               export CODEX_RECORD_REPLAY_LINUX_SOURCE="${workspaceHelpers}/bin/codex-record-replay-linux"
               ''}
-              ${lib.optionalString (lib.elem "global-dictation" effectiveFeatureIds) ''
+              ${lib.optionalString (lib.elem "global-dictation" effectiveFeatureIds || lib.elem "wayland-global-shortcuts" effectiveFeatureIds) ''
               export CODEX_GLOBAL_DICTATION_LINUX_SOURCE="${globalDictationHelper}/bin/codex-global-dictation-linux"
+              ''}
+              ${lib.optionalString (lib.elem "pet-overlay" effectiveFeatureIds) ''
+              export CODEX_PET_KWIN_SOURCE="${petKwinHelper}/bin/codex-pet-kwin"
               ''}
               ${lib.optionalString (lib.elem "mcp-helper-reaper" effectiveFeatureIds) ''
               export CODEX_MCP_HELPER_REAPER_SOURCE="${mcpReaperHelper}/bin/codex-mcp-helper-reaper"
@@ -632,12 +643,18 @@
         remoteMobile = codexDesktop.override { linuxFeatureIds = [ "remote-mobile-control" ]; };
         computerUse = codexDesktop.override { linuxFeatureIds = [ "computer-use-linux" ]; };
         chronicleSkysight = codexDesktop.override { linuxFeatureIds = [ "chronicle-skysight" ]; };
+        # Maximal profiles keep the historical shared-profile feature set.
+        # Community profile isolation and account switching intentionally
+        # conflict with shared-app-server-socket; enable them separately.
+        maximalSharedProfileFeatureIds = lib.filter (
+          featureId: !(lib.elem featureId [ "community-profile-isolation" "account-switcher" ])
+        ) nixLinuxFeatures.supportedFeatureIds;
         maximalDirectoryFeatureIds = lib.filter (
           featureId: featureId != "shallow-repository-watches"
-        ) nixLinuxFeatures.supportedFeatureIds;
+        ) maximalSharedProfileFeatureIds;
         maximalShallowFeatureIds = lib.filter (
           featureId: featureId != "directory-only-working-tree-watch"
-        ) nixLinuxFeatures.supportedFeatureIds;
+        ) maximalSharedProfileFeatureIds;
         maximalDirectory = codexDesktop.override {
           linuxFeatureIds = maximalDirectoryFeatureIds;
         };
@@ -663,7 +680,7 @@
           lib.concatMapStringsSep "\n" toString (
             [
               sourceRoot upstreamDeb installedLauncher installerWorkspaceHelpers
-              globalDictationHelper mcpReaperHelper watchboundPackage pkgs.asar
+              globalDictationHelper petKwinHelper mcpReaperHelper watchboundPackage pkgs.asar
               pkgs.stdenv pkgs.stdenv.cc pkgs.bash pkgs.nodejs pkgs.patchelf
             ]
             ++ runtimeLibraries
@@ -792,6 +809,7 @@
             export CODEX_LINUX_READ_ALOUD_MCP_SOURCE="$all_helpers/bin/codex-read-aloud-linux"
             export CODEX_RECORD_REPLAY_LINUX_SOURCE="$all_helpers/bin/codex-record-replay-linux"
             export CODEX_GLOBAL_DICTATION_LINUX_SOURCE="${globalDictationHelper}/bin/codex-global-dictation-linux"
+            export CODEX_PET_KWIN_SOURCE="${petKwinHelper}/bin/codex-pet-kwin"
             export CODEX_MCP_HELPER_REAPER_SOURCE="${mcpReaperHelper}/bin/codex-mcp-helper-reaper"
             export CODEX_WATCHBOUND_PACKAGE_ROOT="${watchboundPackage}/lib/node_modules"
             upstream_contract_root="$(mktemp -d)"
@@ -1067,7 +1085,8 @@
             node ${sourceRoot}/scripts/ci/validate-patch-report.js \
               "$app/.codex-linux/patch-report.json" \
               --require-enabled-feature nix-store-bundled-marketplace-permissions \
-              --require-applied feature:nix-store-bundled-marketplace-permissions:bundled-marketplace-staging-copy-permissions
+              --require-applied feature:nix-store-bundled-marketplace-permissions:bundled-marketplace-staging-copy-permissions \
+              --require-applied feature:nix-store-bundled-marketplace-permissions:executor-plugin-copy-permissions
             ''}
             test -x ${pkgs.pipewire}/lib/alsa-lib/libasound_module_pcm_pipewire.so
             ! grep -q 'LD_LIBRARY_PATH=' ${package}/bin/codex-desktop

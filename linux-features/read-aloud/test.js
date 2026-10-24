@@ -7,7 +7,6 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const vm = require("node:vm");
 const {
   applyAppMainRoutePatch,
   applyGeneralSettingsPatch,
@@ -22,6 +21,7 @@ const {
   applySettingsSectionsNavPatch,
   applySettingsSharedNavPatch,
   descriptors: featurePatches,
+  matchesAssistantRuntimeContract,
 } = require("./patch.js");
 const {
   applyWebviewAssetPatchDescriptors,
@@ -108,6 +108,48 @@ function createDeferredSettingsWrites({ writeKey, enabled = false, speed = 1.05 
   return { settings, writes };
 }
 
+test("language routing uses dominant letters and preserves explicit overrides", () => {
+  const source = [
+    "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
+    'var h={handlers:{"set-vs-context":async()=>{},"native-desktop-apps":async()=>({apps:[]})}};',
+  ].join("");
+  const patched = twice(applyMainBundlePatch, source);
+  const env = {};
+  const language = new Function("require", "process", `${patched};return codexLinuxReadAloudLanguage;`)(
+    require, { platform: "linux", env },
+  );
+  for (const [text, expected] of [
+    ["שלום עולם", "he"],
+    ["This is a test.", "en"],
+    ["A test with a label and a caption.", "en"],
+    ["你好，这是中文测试。", "zh"],
+    ["こんにちは世界", "ja"],
+    ["안녕하세요", "ko"],
+    ["Привет мир", "ru"],
+    ["The Chinese greeting 你好 means hello.", "en"],
+    ["The Russian greeting привет means hello.", "en"],
+    ["The Japanese greeting こんにちは means hello.", "en"],
+    ["The Korean greeting 안녕 means hello.", "en"],
+    ["The Hebrew greeting שלום means hello.", "en"],
+    ["中文说明应当使用中文音色，末尾包含 Python API 术语。", "zh"],
+    ["今天は晴天です。", "ja"],
+    ["这是中文说明，日语字符「あ」只是一个示例，请继续使用中文朗读。", "zh"],
+    ["中文回答中提到日语问候语こんにちは，但这段话的主要内容仍然是中文。", "zh"],
+    ["中中中aa", "en"],
+    ["中中中中aa", "zh"],
+    ["中中aabb", "en"],
+    ["1234，。!? שלום!", "he"],
+    ["1234!?", "en"],
+    ["", "en"],
+    ["𠀀𠀀𠀀𠀀a", "zh"],
+    ["שָׁלוֹם", "he"],
+  ]) assert.equal(language(text), expected, text);
+  for (const explicit of ["es", "fr", "de", "it", "pt", "he"]) {
+    env.CODEX_LINUX_READ_ALOUD_LANGUAGE = ` ${explicit.toUpperCase()} `;
+    assert.equal(language("This is a test."), explicit);
+  }
+});
+
 test("main bundle patch adds a Linux read aloud handler", () => {
   const source = [
     "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
@@ -125,6 +167,7 @@ test("main bundle patch adds a Linux read aloud handler", () => {
   assert.match(patched, /codex-linux-read-aloud-kokoro-python/);
   assert.match(patched, /codex-linux-read-aloud-kokoro-speed/);
   assert.match(patched, /codex-linux-read-aloud-kokoro-voices/);
+  assert.match(patched, /CODEX_LINUX_READ_ALOUD_KOKORO_LANGUAGE_VOICE/);
   assert.match(patched, /CODEX_LINUX_SETTINGS_FILE/);
   assert.match(patched, /CODEX_LINUX_APP_ID/);
   assert.match(patched, /CODEX_LINUX_READ_ALOUD_KOKORO_SPEED/);
@@ -146,9 +189,7 @@ test("main bundle patch adds a Linux read aloud handler", () => {
   assert.doesNotMatch(patched, /\|\|\s*`female1`/);
   assert.match(patched, /spd-say/);
   assert.match(patched, /espeak-ng/);
-  // A custom voice must win, otherwise fall back by language; without the
-  // parentheses any custom voice forced the Hebrew espeak voice.
-  assert.match(patched, /let espeakVoice=voice\|\|\(hasHebrew\?`he`:`en-us`\);/);
+  assert.match(patched, /let espeakVoice=voice\|\|\(language===`en`\?`en-us`:nativeLanguage\);/);
   assert.doesNotThrow(() => new Function("require", "process", patched));
 });
 
@@ -837,6 +878,90 @@ test("main handler passes the configured Kokoro Python to the runner", async () 
     assert.equal(result.engine, "kokoro");
     assert.equal(spawned[0]?.command, runner);
     assert.equal(spawned[0]?.options?.env?.CODEX_LINUX_READ_ALOUD_KOKORO_PYTHON, python);
+
+    const chineseResult = await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudHandle({action:"speak",source:"button",text:"你好，这是中文朗读测试。"});`,
+    )(requireStub, {
+      platform: "linux",
+      env: {
+        HOME: root,
+        CODEX_LINUX_READ_ALOUD_ENABLED: "1",
+        CODEX_LINUX_READ_ALOUD_KOKORO_PYTHON: python,
+        CODEX_LINUX_READ_ALOUD_KOKORO_MODEL: model,
+        CODEX_LINUX_READ_ALOUD_KOKORO_VOICES: voices,
+      },
+      resourcesPath,
+    });
+    assert.equal(chineseResult.spoken, true);
+    assert.equal(chineseResult.lang, "cmn");
+    assert.equal(chineseResult.voice, "zf_xiaobei");
+    assert.equal(spawned[1]?.options?.env?.CODEX_LINUX_READ_ALOUD_KOKORO_MODEL, model);
+    assert.equal(spawned[1]?.options?.env?.CODEX_LINUX_READ_ALOUD_KOKORO_VOICES, voices);
+    assert.equal(spawned[1]?.options?.env?.CODEX_LINUX_READ_ALOUD_KOKORO_LANG, "cmn");
+    for (const text of ["The Chinese greeting 你好 means hello.", "The Russian greeting привет means hello."]) {
+      const mixed = new Function("require", "process", "text", `${patched};return codexLinuxReadAloudHandle({action:"speak",source:"button",text});`)(requireStub, {
+        platform: "linux",
+        env: {
+          HOME: root,
+          CODEX_LINUX_READ_ALOUD_KOKORO_PYTHON: python,
+          CODEX_LINUX_READ_ALOUD_KOKORO_MODEL: model,
+          CODEX_LINUX_READ_ALOUD_KOKORO_VOICES: voices,
+        },
+        resourcesPath,
+      }, text);
+      assert.equal(mixed.language, "en");
+      assert.equal(mixed.voice, "bm_george");
+      assert.equal(mixed.lang, "en-us");
+      assert.equal(spawned.at(-1).options.env.CODEX_LINUX_READ_ALOUD_KOKORO_VOICE, "bm_george");
+    }
+
+    for (const text of ["שלום עולם", "Привет мир", "안녕하세요"]) {
+      const overridden = new Function("require", "process", "text", `${patched};return codexLinuxReadAloudHandle({action:"speak",source:"button",text});`)(requireStub, {
+        platform: "linux",
+        env: {
+          HOME: root,
+          CODEX_LINUX_READ_ALOUD_KOKORO_PYTHON: python,
+          CODEX_LINUX_READ_ALOUD_KOKORO_MODEL: model,
+          CODEX_LINUX_READ_ALOUD_KOKORO_VOICES: voices,
+          CODEX_LINUX_READ_ALOUD_KOKORO_VOICE: "af_heart",
+          CODEX_LINUX_READ_ALOUD_KOKORO_LANG: "en-us",
+          CODEX_LINUX_READ_ALOUD_NATIVE_FALLBACK: "0",
+        },
+        resourcesPath,
+      }, text);
+      assert.equal(overridden.spoken, true);
+      assert.equal(overridden.engine, "kokoro");
+      assert.equal(overridden.voice, "af_heart");
+      assert.equal(overridden.lang, "en-us");
+    }
+
+    for (const [overrides, expectedVoice, expectedLang] of [
+      [{ CODEX_LINUX_READ_ALOUD_LANGUAGE: "en" }, "bm_george", "en-us"],
+      [{ CODEX_LINUX_READ_ALOUD_KOKORO_VOICE: "af_heart", CODEX_LINUX_READ_ALOUD_KOKORO_LANG: "en-us" }, "af_heart", "en-us"],
+      [{ CODEX_LINUX_READ_ALOUD_KOKORO_VOICE: "af_heart", CODEX_LINUX_READ_ALOUD_KOKORO_LANGUAGE_VOICE: "zf_xiaoni" }, "zf_xiaoni", "cmn"],
+    ]) {
+      const overridden = new Function(
+        "require", "process",
+        `${patched};return codexLinuxReadAloudHandle({action:"speak",source:"button",text:"你好，这是中文测试。"});`,
+      )(requireStub, {
+        platform: "linux",
+        env: {
+          HOME: root,
+          CODEX_LINUX_READ_ALOUD_KOKORO_PYTHON: python,
+          CODEX_LINUX_READ_ALOUD_KOKORO_MODEL: model,
+          CODEX_LINUX_READ_ALOUD_KOKORO_VOICES: voices,
+          ...overrides,
+        },
+        resourcesPath,
+      });
+      assert.equal(overridden.voice, expectedVoice);
+      assert.equal(overridden.lang, expectedLang);
+      assert.equal(spawned.at(-1).options.env.CODEX_LINUX_READ_ALOUD_KOKORO_VOICE, expectedVoice);
+      assert.equal(spawned.at(-1).options.env.CODEX_LINUX_READ_ALOUD_KOKORO_LANG, expectedLang);
+    }
+
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -886,8 +1011,64 @@ test("main handler falls back to native speech without forcing spd-say voice typ
     const speakCall = spawned.find((entry) => entry.command === "spd-say" && entry.args.includes("--"));
     assert.ok(speakCall);
     assert.equal(speakCall.args.includes("-t"), false);
+
+    const chineseResult = await new Function(
+      "require",
+      "process",
+      `${patched};return codexLinuxReadAloudHandle({action:"speak",source:"button",text:"你好，这是中文测试。"});`,
+    )(requireStub, {
+      platform: "linux",
+      env: { HOME: root, CODEX_LINUX_READ_ALOUD_ENABLED: "1" },
+      resourcesPath: path.join(root, "resources"),
+    });
+    assert.equal(chineseResult.spoken, true);
+    assert.equal(chineseResult.engine, "spd-say");
+    const chineseCall = spawned.find(
+      (entry) => entry.command === "spd-say" && entry.args.includes("cmn"),
+    );
+    assert.ok(chineseCall);
+    const hebrewResult = new Function(
+      "require", "process",
+      `${patched};return codexLinuxReadAloudHandle({action:"speak",source:"button",text:"שלום עולם"});`,
+    )(requireStub, {
+      platform: "linux",
+      env: { HOME: root, CODEX_LINUX_READ_ALOUD_ENABLED: "1" },
+      resourcesPath: path.join(root, "resources"),
+    });
+    assert.equal(hebrewResult.language, "he");
+    assert.ok(spawned.some(({ command, args }) => command === "spd-say" && args.includes("he")));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("native espeak fallback preserves English defaults and configured voices", () => {
+  const source = [
+    "let e=require(`node:child_process`),f=require(`node:fs`),p=require(`node:path`),o=require(`node:os`);",
+    'var h={handlers:{"set-vs-context":async()=>{},"native-desktop-apps":async()=>({apps:[]})}};',
+  ].join("");
+  const patched = twice(applyMainBundlePatch, source);
+  for (const [text, overrides, expectedVoice] of [
+    ["This is a test.", {}, "en-us"],
+    ["你好，这是中文测试。", {}, "cmn"],
+    ["שלום עולם", {}, "he"],
+    ["test", { CODEX_LINUX_READ_ALOUD_LANGUAGE: "hi" }, "hi"],
+    ["שלום עולם", { CODEX_LINUX_READ_ALOUD_VOICE: "configured-voice" }, "configured-voice"],
+  ]) {
+    const spawned = [];
+    const requireStub = (name) => {
+      if (name === "node:fs") return { existsSync: () => false, accessSync() { throw Error("missing"); }, constants: fs.constants };
+      if (name === "node:child_process") return {
+        spawnSync: (command, args) => ({ status: command === "which" && args[0] === "espeak-ng" ? 0 : 1 }),
+        spawn: (command, args) => { spawned.push({ command, args }); return { on() {}, unref() {} }; },
+      };
+      return require(name);
+    };
+    const result = new Function("require", "process", "text", `${patched};return codexLinuxReadAloudHandle({action:"speak",source:"button",text});`)(
+      requireStub, { platform: "linux", env: overrides, resourcesPath: "/missing" }, text,
+    );
+    assert.equal(result.engine, "espeak-ng");
+    assert.equal(spawned.at(-1).args[1], expectedVoice);
   }
 });
 
@@ -988,15 +1169,28 @@ test("main handler downloads setup files atomically", async () => {
   }
 });
 
-test("assistant render patch adds an explicit read aloud button under the message", () => {
-  const source = "return (0,$.jsx)(Ov,{item:n,alwaysShowActions:M,assistantCopyText:p,turnId:m,autoReviewStats:y,hookStats:b,completedThreadGoal:x,after:g,conversationId:o,cwd:u,forceCodeBlockWordWrap:V,hasArtifacts:F,onAddSelectedTextToChat:H,onFileLinkOpen:v,onFork:D,renderCodeBlocksAsWritingBlocks:V})";
-  const patched = twice(applyAssistantRenderPatch, source);
-  assert.match(patched, /codex-linux-read-aloud-button/);
-  assert.match(patched, /codex-linux-read-aloud-icon/);
-  assert.match(patched, /viewBox:"0 0 24 24"/);
+function assistantRenderFixture({ jsxVar = "$", component = "Vb" } = {}) {
+  const sourceTurnCall = `(0,${jsxVar}.jsx)(${component},{item:o,alwaysShowActions:ge,assistantCopyText:a,sourceTurnId:T,savedContentResponseId:E,after:A,compactAttachment:M,electronAfter:N,autoReviewStats:L,hookStats:R,completedThreadGoal:te,conversationId:p,cwd:b,hostId:x,reportEntityType:S,markdownMediaCacheKey:e,projectlessOutputDirectory:Ee,outputFileLinks:O,forceCodeBlockWordWrap:Ye,hasArtifacts:De,onAddResponseTextAnnotation:s,onNavigateResponseTextAnnotation:qe,onFileLinkOpen:I,onFork:ie,renderCodeBlocksAsWritingBlocks:Ye,showActionRow:_e,showTimestampHeader:r,showTimestampWithoutActions:ye,timestampHoverOnly:be,trailingActions:fe})`;
+  const liveTurnCall = `(0,${jsxVar}.jsx)(${component},{item:n,showShimmer:we,alwaysShowActions:ge,assistantCopyText:w,turnId:T,savedContentResponseId:E,autoReviewStats:L,hookStats:R,completedThreadGoal:te,after:A,compactAttachment:M,electronAfter:N,conversationId:p,getVisualizeTurnTriggerType:m,cwd:b,hostId:x,reportEntityType:S,markdownMediaCacheKey:e,projectlessOutputDirectory:Ee,outputFileLinks:O,forceCodeBlockWordWrap:Ye,hasArtifacts:De,onAddResponseTextAnnotation:i,onNavigateResponseTextAnnotation:qe,onFileLinkOpen:I,onFork:ie,renderCodeBlocksAsWritingBlocks:Ye,showActionRow:_e,showTimestampHeader:r,showTimestampWithoutActions:ye,timestampHoverOnly:be,allowCopyWhileStreaming:Fe,additionalActions:ce,trailingActions:fe,persistentAdditionalActions:de})`;
+  const prefix = "const partition={collapsibleUnits:[],persistentUnits:[]}";
+  return {
+    liveTurnCall,
+    prefix,
+    source: `${prefix};${sourceTurnCall};${liveTurnCall}`,
+    sourceTurnCall,
+  };
+}
+
+test("assistant render patch atomically adds buttons to the current two-call topology", () => {
+  const fixture = assistantRenderFixture();
+  const patched = twice(applyAssistantRenderPatch, fixture.source);
+  assert.equal((patched.match(/codex-linux-read-aloud-button/g) ?? []).length, 2);
+  assert.equal((patched.match(/codex-linux-read-aloud-icon/g) ?? []).length, 2);
+  assert.equal((patched.match(/viewBox:"0 0 24 24"/g) ?? []).length, 2);
   assert.doesNotMatch(patched, /children:"Read aloud"/);
-  assert.match(patched, /globalThis\.codexLinuxReadAloudClick\?\.\(n,p,o,e\.currentTarget\)/);
-  assert.match(patched, /\$\.Fragment/);
+  assert.match(patched, /globalThis\.codexLinuxReadAloudClick\?\.\(o,a,p,e\.currentTarget\)/);
+  assert.match(patched, /globalThis\.codexLinuxReadAloudClick\?\.\(n,w,p,e\.currentTarget\)/);
+  assert.equal(matchesAssistantRuntimeContract(patched), true);
 });
 
 test("assistant render patch ignores normalized assistant items without render props", () => {
@@ -1008,12 +1202,12 @@ test("assistant render patch ignores normalized assistant items without render p
 });
 
 test("assistant render patch still warns when an assistant render candidate drifts", () => {
-  const source = "return (0,Q.jsx)(Ov,{item:n,assistantCopyText:p,conversationId:o,renderOptions:{writingBlocks:V}})";
+  const source = "return (0,Q.jsx)(Ov,{item:n,assistantCopyText:p,conversationId:o,renderCodeBlocksAsWritingBlocks:V})";
   const { result: patched, warnings } = captureWarnings(() => applyAssistantRenderPatch(source));
 
   assert.equal(patched, source);
   assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /Could not find assistant message render call/);
+  assert.match(warnings[0], /Could not find complete assistant message render call set/);
 });
 
 test("assistant render patch ignores the current shared component definition", () => {
@@ -1024,64 +1218,74 @@ test("assistant render patch ignores the current shared component definition", (
   assert.deepEqual(warnings, []);
 });
 
-test("assistant render patch preserves the current JSX runtime alias", () => {
-  const source = "return (0,Q.jsx)(Ov,{item:n,alwaysShowActions:M,assistantCopyText:p,turnId:m,autoReviewStats:y,hookStats:b,completedThreadGoal:x,after:g,conversationId:o,cwd:u,forceCodeBlockWordWrap:V,hasArtifacts:F,onAddSelectedTextToChat:H,onFileLinkOpen:v,onFork:D,renderCodeBlocksAsWritingBlocks:V})";
-  const patched = twice(applyAssistantRenderPatch, source);
+test("assistant render patch preserves the current JSX runtime alias across both calls", () => {
+  const patched = twice(applyAssistantRenderPatch, assistantRenderFixture({ jsxVar: "Q" }).source);
 
-  assert.match(patched, /Q\.Fragment/);
-  assert.match(patched, /\(0,Q\.jsx\)\("button"/);
-  assert.match(patched, /globalThis\.codexLinuxReadAloudClick\?\.\(n,p,o,e\.currentTarget\)/);
+  assert.equal((patched.match(/Q\.Fragment/g) ?? []).length, 2);
+  assert.equal((patched.match(/\(0,Q\.jsx\)\("button"/g) ?? []).length, 2);
 });
 
-test("assistant render patch covers the current shared assistant message call", () => {
-  const source = "return (0,t8.jsx)(K6c,{item:n,alwaysShowActions:re,assistantCopyText:b,turnId:x,processTargets:S,autoReviewStats:A,hookStats:j,threadDetailLevel:p,completedThreadGoal:M,after:T,electronAfter:E,conversationId:d,getVisualizeTurnTriggerType:f,cwd:g,hostId:_,reportEntityType:v,markdownMediaCacheKey:e,projectlessOutputDirectory:de,forceCodeBlockWordWrap:we,hasArtifacts:fe,onAddResponseTextAnnotation:r,onFileLinkOpen:k,onFork:B,renderCodeBlocksAsWritingBlocks:we,showActionRow:ie,showTimestampWithoutActions:ae,timestampHoverOnly:oe,showProcessBadges:i,allowCopyWhileStreaming:q})";
-  const patched = twice(applyAssistantRenderPatch, source);
+test("assistant render patch ignores unrelated JSX calls beside the complete topology", () => {
+  const fixture = assistantRenderFixture();
+  const unrelated = `(0,$.jsx)(Other,{item:q,label:"Preview",conversationId:s})`;
+  const source = `${fixture.source};${unrelated}`;
+  const patched = applyAssistantRenderPatch(source);
 
-  assert.match(patched, /t8\.Fragment/);
-  assert.match(patched, /\(0,t8\.jsx\)\("button"/);
-  assert.match(patched, /globalThis\.codexLinuxReadAloudClick\?\.\(n,b,d,e\.currentTarget\)/);
+  assert.equal((patched.match(/codex-linux-read-aloud-button/g) ?? []).length, 2);
+  assert.equal(patched.endsWith(unrelated), true);
 });
 
-test("shared assistant button preserves the render and speaks only after an explicit click", () => {
-  const source = "(0,$.jsx)(Vb,{item:n,assistantCopyText:w,conversationId:p,renderCodeBlocksAsWritingBlocks:Ye})";
-  const calls = [];
-  const item = { content: "response" };
-  const jsx = (component, props) => ({ component, props });
-  const context = {
-    $: { jsx, jsxs: jsx, Fragment: "fragment" },
-    Vb: "assistant", n: item, w: "copy text", p: "thread", Ye: true,
-    codexLinuxReadAloudClick: (...args) => calls.push(args),
-  };
-  const rendered = vm.runInNewContext(applyAssistantRenderPatch(source), context);
-  const [original, row] = rendered.props.children;
-  assert.equal(original.component, "assistant");
-  assert.equal(original.props.item, item);
-  assert.equal(original.props.renderCodeBlocksAsWritingBlocks, true);
-  assert.equal(calls.length, 0);
-  let stopped = false;
-  const button = row.props.children;
-  const target = {};
-  button.props.onClick({ currentTarget: target, stopPropagation() { stopped = true; } });
-  assert.equal(stopped, true);
-  assert.deepEqual(calls, [[item, "copy text", "thread", target]]);
+test("assistant render patch rejects a missing current render call without modifying the asset", () => {
+  const fixture = assistantRenderFixture();
+  const source = `${fixture.prefix};${fixture.liveTurnCall}`;
+  const { result, warnings } = captureWarnings(() => applyAssistantRenderPatch(source));
+
+  assert.equal(result, source);
+  assert.equal(matchesAssistantRuntimeContract(source), false);
+  assert.equal(warnings.length, 1);
 });
 
-test("assistant runtime descriptor selects the shared renderer by content after chunk renames", () => {
+test("assistant render patch rejects an additional assistant-shaped call without modifying the asset", () => {
+  const fixture = assistantRenderFixture();
+  const source = `${fixture.source};(0,$.jsx)(Other,{item:q,assistantCopyText:r,conversationId:s})`;
+  const { result, warnings } = captureWarnings(() => applyAssistantRenderPatch(source));
+
+  assert.equal(result, source);
+  assert.equal(matchesAssistantRuntimeContract(source), false);
+  assert.equal(warnings.length, 1);
+});
+
+test("assistant render patch rejects duplicate topology roles without modifying the asset", () => {
+  const fixture = assistantRenderFixture();
+  const source = `${fixture.source};${fixture.sourceTurnCall}`;
+  const { result, warnings } = captureWarnings(() => applyAssistantRenderPatch(source));
+
+  assert.equal(result, source);
+  assert.equal(matchesAssistantRuntimeContract(source), false);
+  assert.equal(warnings.length, 1);
+});
+
+test("assistant render patch rejects mixed patched and unpatched topology without modifying the asset", () => {
+  const fixture = assistantRenderFixture();
+  const patched = applyAssistantRenderPatch(fixture.source);
+  const firstWrapperStart = patched.indexOf("(0,$.jsxs)($.Fragment");
+  const secondWrapperSeparator = patched.indexOf(";(0,$.jsxs)($.Fragment", firstWrapperStart);
+  assert.notEqual(firstWrapperStart, -1);
+  assert.notEqual(secondWrapperSeparator, -1);
+  const mixed = `${patched.slice(0, firstWrapperStart)}${fixture.sourceTurnCall}${patched.slice(secondWrapperSeparator)}`;
+  const { result, warnings } = captureWarnings(() => applyAssistantRenderPatch(mixed));
+
+  assert.equal(result, mixed);
+  assert.equal(matchesAssistantRuntimeContract(mixed), false);
+  assert.equal(warnings.length, 1);
+});
+
+test("assistant runtime descriptor targets current shared assistant bundles", () => {
   const descriptor = featurePatches.find((patch) => patch.id === "assistant-runtime");
   assert.ok(descriptor);
-  for (const name of ["sites-end-resource-5f5276fe8984.js", "renamed-shared-renderer.js"]) {
-    assert.equal(descriptor.pattern.test(name), true);
-  }
-  assert.equal(descriptor.assetMatch(
-    "(0,$.jsx)(Vb,{item:n,assistantCopyText:w,conversationId:p,renderCodeBlocksAsWritingBlocks:Ye})",
-  ), true);
-  for (const decoy of [
-    "console.log(`assistantCopyText: renderCodeBlocksAsWritingBlocks:`)",
-    "(0,$.jsx)(Turn,{item:n,assistantCopyText:w,conversationId:p})",
-    "(0,$.jsx)(Vb,{item:{content:w},assistantCopyText:w,conversationId:p,renderCodeBlocksAsWritingBlocks:Ye})",
-  ]) {
-    assert.equal(descriptor.assetMatch(decoy), false, decoy);
-  }
+  assert.equal(descriptor.pattern.test("sites-end-resource-current.js"), true);
+  assert.equal(descriptor.assetMatch(assistantRenderFixture({ jsxVar: "Q" }).source), true);
+  assert.equal(descriptor.assetMatch("const unrelated=true"), false);
 });
 
 test("webview runtime descriptor targets the official app bootstrap", () => {
@@ -1098,7 +1302,7 @@ test("assistant runtime descriptor fails soft and atomically when the current re
     fs.mkdirSync(assetsDir, { recursive: true });
     const assetPath = path.join(
       assetsDir,
-      "sites-end-resource-5f5276fe8984.js",
+      "sites-end-resource-current.js",
     );
     const source = "console.log(`assistant render contract moved`);";
     fs.writeFileSync(assetPath, source);
@@ -1113,7 +1317,7 @@ test("assistant runtime descriptor fails soft and atomically when the current re
     assert.equal(fs.readFileSync(assetPath, "utf8"), source);
     assert.equal(report.patches.length, 1);
     assert.equal(report.patches[0].status, "skipped-optional");
-    assert.match(report.patches[0].reason, /Could not find current primary thread assistant bundle/);
+    assert.match(report.patches[0].reason, /current primary thread assistant bundle/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -1126,12 +1330,9 @@ test("assistant runtime descriptor reports applied then already-applied for the 
     fs.mkdirSync(assetsDir, { recursive: true });
     const assetPath = path.join(
       assetsDir,
-      "sites-end-resource-5f5276fe8984.js",
+      "sites-end-resource-current.js",
     );
-    fs.writeFileSync(
-      assetPath,
-      "return (0,DX.jsx)(Jft,{item:n,assistantCopyText:_,conversationId:l,renderCodeBlocksAsWritingBlocks:ie})",
-    );
+    fs.writeFileSync(assetPath, assistantRenderFixture({ jsxVar: "DX", component: "Jft" }).source);
     const descriptor = featurePatches.find((patch) => patch.id === "assistant-runtime");
     const descriptors = normalizePatchDescriptors([
       { ...descriptor, featureId: "read-aloud", sourceKind: "feature" },
@@ -1143,31 +1344,10 @@ test("assistant runtime descriptor reports applied then already-applied for the 
     applyWebviewAssetPatchDescriptors(root, descriptors, {}, secondReport);
 
     const patched = fs.readFileSync(assetPath, "utf8");
-    assert.match(patched, /codex-linux-read-aloud-button/);
+    assert.equal((patched.match(/codex-linux-read-aloud-button/g) ?? []).length, 2);
     assert.doesNotMatch(patched, /codexLinuxReadAloudVersion/);
     assert.equal(firstReport.patches[0].status, "applied");
     assert.equal(secondReport.patches[0].status, "already-applied");
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("assistant runtime descriptor rejects duplicate renderer assets without changing either", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-read-aloud-ambiguous-"));
-  try {
-    const assetsDir = path.join(root, "webview", "assets");
-    fs.mkdirSync(assetsDir, { recursive: true });
-    const source = "(0,$.jsx)(Vb,{item:n,assistantCopyText:w,conversationId:p,renderCodeBlocksAsWritingBlocks:Ye})";
-    const names = ["sites-end-resource-current.js", "another-shared-renderer.js"];
-    for (const name of names) fs.writeFileSync(path.join(assetsDir, name), source);
-    const descriptor = featurePatches.find((patch) => patch.id === "assistant-runtime");
-    const report = createPatchReport();
-    applyWebviewAssetPatchDescriptors(root, normalizePatchDescriptors([
-      { ...descriptor, featureId: "read-aloud", sourceKind: "feature" },
-    ]), {}, report);
-    assert.equal(report.patches[0].status, "skipped-optional");
-    assert.match(report.patches[0].reason, /ambiguous/i);
-    for (const name of names) assert.equal(fs.readFileSync(path.join(assetsDir, name), "utf8"), source);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

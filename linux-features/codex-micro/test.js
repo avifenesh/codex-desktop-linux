@@ -39,7 +39,7 @@ function settingsPageSource() {
     "const bridge=`codex-micro-bridge-current.js`",
     "const routes=[`/settings/codex-micro`,`/settings/codex-micro`,`/settings/codex-micro`]",
     "const enabled=gg(`3207467860`)",
-    "const setupEnabled=gg(`3207467860`)",
+    "const dictation=gg(`3207467860`)",
   ].join(";");
 }
 

@@ -1,0 +1,13 @@
+[package]
+name = "codex-pet-kwin"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0.102"
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
+serde_json = "1.0.150"
+tokio = { version = "1.51.1", features = ["io-std", "io-util", "macros", "rt", "signal", "sync", "time"] }
+zbus = { version = "5.14.0", default-features = false, features = ["tokio"] }

@@ -19,7 +19,7 @@ const {
 } = require("./patch.js");
 
 const currentProjectSource =
-  "function CQr(e,t){switch(e.kind){case`local`:return e.summary==null?e.at:t===`updated_at`?e.summary.recencyAt??e.summary.updatedAt:e.summary.createdAt;case`remote`:return((t===`updated_at`?e.task.updated_at??e.task.created_at:e.task.created_at??e.task.updated_at)??0)*1e3}}";
+  "function d4n(e,t){switch(e.kind){case`local`:return e.summary==null?e.at:t===`updated_at`?e.summary.recencyAt??e.summary.updatedAt:e.summary.createdAt;case`remote`:return((t===`updated_at`?e.task.updated_at??e.task.created_at:e.task.created_at??e.task.updated_at)??0)*1e3}}";
 
 function captureWarns(fn) {
   const originalWarn = console.warn;
@@ -85,7 +85,7 @@ test("feature is disabled until selected", () => {
   });
 });
 
-test("populated local summaries recover Created time from UUIDv7 keys", () => {
+test("populated local conversations recover Created time from UUIDv7 keys", () => {
   const timestamp = timestampFunction();
   const older = {
     key: "local:019e0000-0000-7000-8000-000000000001",
@@ -132,7 +132,7 @@ test("explicit, pending, legacy, invalid, and remote timestamps retain upstream 
 
 test("semantic comparator matching is independent of minified aliases", () => {
   const renamed = currentProjectSource
-    .replace("CQr(e,t)", "createdComparator(task,mode)")
+    .replace("d4n(e,t)", "createdComparator(task,mode)")
     .replaceAll("e.", "task.")
     .replaceAll("t===", "mode===");
   const timestamp = timestampFunction(renamed);
