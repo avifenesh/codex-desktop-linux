@@ -46,9 +46,8 @@ MCP discovery probes are supported before initialization, including metadata-bea
 
 ## Runtime Dependencies
 
-The embedded backend includes the standalone v0.7.7 accessibility setup,
-guard, native activation, coordinate-contract, completion-notification,
-accessibility-tree scoping, and Niri window-targeting changes. Setup verifies
+The embedded backend supports scoped AT-SPI trees and native actions, compositor
+window targeting, keyboard and pointer input backends, and bounded screenshots. Setup verifies
 GNOME's saved toolkit-accessibility key even when
 runtime AT-SPI is ready, and warns when the saved key cannot be verified.
 Other accessibility tools can change the key later; setup does not hold it on.
@@ -323,3 +322,18 @@ nix run github:ilysenko/codex-desktop-linux#codex-desktop-computer-use-ui-remote
 COSMIC window queries wait for compositor focus state and verify activation.
 Native X11 text input sends LF and CRLF as Return. Focused terminals are valid
 keyboard targets without an EditableText interface.
+
+## Manual isolated X11 regression
+
+The opt-in typing guard regression runs in its own Xvfb display and private
+D-Bus session. It requires Python 3, Xvfb, xterm, xdotool, xkbcomp, setxkbmap,
+libX11 and dbus-run-session. It checks stable text delivery, restored layout
+and focus changes, keyboard grabs, no fixed focus and PointerRoot monitoring.
+
+```bash
+cargo build --locked -p codex-computer-use-linux
+python3 computer-use-linux/scripts/x11_type_guard_test.py \
+  target/debug/codex-computer-use-linux
+```
+
+This is a manual check; the script is not run by the default CI jobs.
