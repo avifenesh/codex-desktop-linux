@@ -37,9 +37,16 @@ function resumeHarness(source) {
   const resumeSource = owner(source, call.index);
   const cache = only(resumeSource, new RegExp(`=(${IDENT})\\?await (${IDENT})\\((${IDENT})\\):null,${IDENT}=\\1\\?(${IDENT})\\(\\):`, "g"));
   const select = only(resumeSource, new RegExp(`\\?\\.selection\\?\\?await (${IDENT})\\(`, "g"));
-  const config = only(resumeSource, new RegExp(`let ${IDENT}=await (${IDENT})\\(\\{\\.\\.\\.${IDENT},selection:${call[4]},hostServicesPipePath:${IDENT}\\|\\|!${IDENT}\\.computerAudio\\?${IDENT}\\.hostServicesPipePath:null\\}\\)`, "g"));
-  const principal = only(resumeSource, new RegExp(`(${IDENT})=${IDENT}\\?await ${cache[3]}\\.getAuthenticatedPrincipal\\(\\)\\.catch\\(\\(\\)=>null\\):null`, "g"));
-  const identity = only(resumeSource, new RegExp(`(${IDENT})\\(${principal[1]}\\)\\?\\?(${IDENT}):null`, "g"));
+  const config = only(resumeSource, new RegExp(
+    `let ${call[1]}=await (${IDENT})\\(\\{\\.\\.\\.(${IDENT}),selection:${call[4]},` +
+    `hostServicesPipePath:${IDENT}\\|\\|!${IDENT}\\.computerAudio\\?\\2\\.hostServicesPipePath:null\\}\\)`,
+    "g",
+  ));
+  const principal = only(resumeSource, new RegExp(
+    `(${IDENT})=${cache[1]}\\?await ${cache[3]}\\.getAuthenticatedPrincipal\\(\\)\\.catch\\(\\(\\)=>null\\):null`,
+    "g",
+  ));
+  const identity = only(resumeSource, new RegExp(`(${IDENT})\\(${principal[1]}\\)`, "g"));
   const env = only(resumeSource, new RegExp(`\\[(${IDENT})\\]:${IDENT},\\[(${IDENT})\\]:(${IDENT})\\.default\\.env\\.CODEX_APP_TOOLS_PIPE_PATH\\?\\?\`\`,\\[(${IDENT})\\]:`, "g"));
   const fallback = only(resumeSource, new RegExp(`\\?\\{\\.\\.\\.${IDENT},\\.\\.\\.(${IDENT})\\}`, "g"));
   const cleanup = only(resumeSource, new RegExp(`\\)\\),(${IDENT})\\(${IDENT}\\[\`mcp_servers\\.node_repl\`\\],${call[4]}\\.cuaReplSurfaces\\)`, "g"));
@@ -61,18 +68,22 @@ function resumeHarness(source) {
     [select[1]]: () => { throw Error("Unexpected fallback instead of cached selection"); },
     [config[1]]: async () => ({ "mcp_servers.node_repl": { command: "/node", env: { node: "/node", packageRoot: "/bundled" } } }),
     [identity[1]]: () => "test-identity",
-    [identity[2]]: null,
     [env[1]]: "identity", [env[2]]: "toolsPipe", [env[4]]: "browserIdentity",
     [env[3]]: { default: { env: {} } },
     [fallback[1]]: { "mcp_servers.cua_repl": { enabled: false } },
     [cleanup[1]]: () => {},
-    process: { platform: "linux", env: { CODEX_LINUX_CUA_HOST_SOCKET: "/runtime/cua.sock" } },
+    process: { env: { CODEX_LINUX_CUA_HOST_SOCKET: "/runtime/cua.sock" } },
   };
   // Function declarations need a shared lexical scope for the builder call.
   const sharedResume = vm.runInNewContext(`${buildSource}\n(${resumeSource})`, globals);
   return async (selection, enabled = true) => {
     cached = { selection, cuaReplEnabled: enabled };
-    return sharedResume({ appServerConnection: { hostConfig: { kind: "local" }, getAuthenticatedPrincipal: async () => ({}) } });
+    return sharedResume({
+      appServerConnection: {
+        hostConfig: { kind: "local" },
+        getAuthenticatedPrincipal: async () => ({}),
+      },
+    });
   };
 }
 

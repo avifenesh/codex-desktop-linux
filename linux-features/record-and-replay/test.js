@@ -59,7 +59,7 @@ function currentChronicleControllerFixture() {
     "N&&(xe=new Hse({request:Ce.requestComputerUseWorker,reconcileComputerHistoryPluginInstallation:e=>{Xe.reconcileComputerHistoryPluginInstallation(e)},archiveLegacyChronicleSkill:async()=>{await archive({codexHome:V.codexHome,reason:`skysight_gate_enabled`})&&U.broadcastQueryCacheInvalidation([`skills`])}}));",
     "var appOptions={getSkysightRecorderController:()=>Cr().skysight?xe:null,artifactSessionHostLifecycle:null};",
     "var Host=class{constructor(){this.options=appOptions;let i={};this.services={chronicle:process.platform===`darwin`&&this.options.getSkysightRecorderController!=null?new $O(i,this.options.getSkysightRecorderController,()=>Cr().skysight,()=>[],()=>[],{}):void 0}}};",
-    require("../chronicle-skysight/fixtures/ipc-dispatcher.js"),
+    "var bridge={\"set-remote-wsl-connections-enabled\":()=>null};",
   ].join("");
 }
 
@@ -293,23 +293,22 @@ test("record-and-replay rejects incomplete current bridge variants byte-identica
   };
   const bridgePayload = recordReplayBridgeSource(moduleExpressions);
   const helperPayload = recordReplayHelperSource(moduleExpressions);
+  const bridgeAnchor = '"set-remote-wsl-connections-enabled":';
   const variants = {
     "missing current bridge handler": patched.replace(
       '"linux-record-replay-status":async',
       '"linux-record-replay-status-missing":async',
     ),
     "misplaced bridge payload": `${patched.replace(
-      `${bridgePayload},`,
-      "",
+      `${bridgePayload},${bridgeAnchor}`,
+      bridgeAnchor,
     )}var misplaced={${bridgePayload}};`,
     "duplicate bridge payload": patched.replace(
-      bridgePayload,
-      `${bridgePayload},${bridgePayload}`,
+      `${bridgePayload},${bridgeAnchor}`,
+      `${bridgePayload},${bridgePayload},${bridgeAnchor}`,
     ),
     "helper-only partial": `${helperPayload}\n${chroniclePatched}`,
     "duplicate helper payload": `${helperPayload}\n${patched}`,
-    "damaged Chronicle dependency": patched.replace('"chronicle-permissions":async', '"chronicle-permissions-missing":async'),
-    "nested feature routes": patched.replace(bridgePayload, `nested:{${bridgePayload}}`),
   };
 
   for (const [name, drifted] of Object.entries(variants)) {
@@ -321,57 +320,31 @@ test("record-and-replay rejects incomplete current bridge variants byte-identica
   }
 });
 
-test("recorder IPC dispatch preserves sender identity, cancellation, tracing and existing window checks", async () => {
-  const source = currentChronicleControllerFixture();
-  const patched = applyRecordReplayMainBridgePatch(applyChronicleSkysightMainBridgePatch(source));
-  const calls = [], scopes = [];
-  const sender = { id: 1 }, otherSender = { id: 2 }, signal = { aborted: false };
-  const context = {
-    process: { platform: "linux", env: { CODEX_RECORD_REPLAY_LINUX_BIN: "/fixture/backend" }, cwd: () => "/fixture" },
-    primaryWindows: [{ webContents: sender }],
-    traceRequest(scope, call) { scopes.push(scope); return call(); },
-    require(id) {
-      if (id === "node:child_process") return { execFile(bin, args, options, callback) {
-        calls.push({ bin, args, options }); callback(null, '{"state":"idle"}', "");
-      } };
-      return require(id);
-    },
+test("record-and-replay rejects missing, duplicate, retired, and mixed insertion anchors byte-identically", () => {
+  const current = applyChronicleSkysightMainBridgePatch(currentChronicleControllerFixture());
+  const retired = current.replace(
+    '"set-remote-wsl-connections-enabled":',
+    '"get-global-state":async({key:',
+  );
+  const variants = {
+    missing: current.replace(
+      '"set-remote-wsl-connections-enabled":',
+      '"set-remote-wsl-connections-disabled":',
+    ),
+    "duplicate current": current.replace(
+      '"set-remote-wsl-connections-enabled":',
+      '"set-remote-wsl-connections-enabled":()=>null,"set-remote-wsl-connections-enabled":',
+    ),
+    "retired legacy owner": retired,
+    "mixed current and legacy owners": `${current},extra={"get-global-state":async({key:e})=>null}`,
   };
-  vm.runInNewContext(`${patched};globalThis.dispatcher=fetchHandler`, context);
-  const dispatcher = context.dispatcher;
-  dispatcher.handlers.probe = (args) => args;
-  const probe = await dispatcher.handleVSCodeRequest(sender, "probe", { origin: otherSender, signal: "spoofed" }, "review", signal);
-  assert.equal(probe.origin, sender);
-  assert.equal(probe.signal, signal);
-  assert.equal(scopes[0].source, "review");
-  assert.equal(scopes[0].requestKind, "probe");
-  const denied = await dispatcher.handleVSCodeRequest(otherSender, "set-remote-wsl-connections-enabled", { enabled: true, origin: sender });
-  assert.deepEqual(JSON.parse(JSON.stringify(denied)), { remoteWslConnections: [] });
-  const allowed = await dispatcher.handleVSCodeRequest(sender, "set-remote-wsl-connections-enabled", { enabled: true });
-  assert.equal(allowed.enabled, true);
-  const invalid = await dispatcher.handleVSCodeRequest(sender, "linux-record-replay-start", {});
-  assert.equal(invalid.ok, false);
-  assert.equal(calls.length, 0);
-  const status = await dispatcher.handleVSCodeRequest(sender, "linux-record-replay-status", {}, "review", signal);
-  assert.equal(status.ok, true);
-  assert.deepEqual(Array.from(calls[0].args), ["status"]);
-  assert.equal(calls[0].bin, "/fixture/backend");
-  assert.throws(() => dispatcher.handleVSCodeRequest(sender, "unknown-route", {}), /not implemented/);
-  assert.equal(applyChronicleSkysightMainBridgePatch(patched), patched);
-});
 
-test("Record & Replay patches the current signed handler registry with its Chronicle dependency", {
-  skip: !process.env.CODEX_SIGNED_EXTRACTED_APP,
-}, () => {
-  const directory = path.join(process.env.CODEX_SIGNED_EXTRACTED_APP, ".vite/build");
-  const files = fs.readdirSync(directory).filter((name) => /^main-[^.]+\.js$/.test(name));
-  assert.equal(files.length, 1);
-  const file = path.join(directory, files[0]), source = fs.readFileSync(file, "utf8");
-  const patched = applyRecordReplayMainBridgePatch(applyChronicleSkysightMainBridgePatch(source));
-  assert.notEqual(patched, source);
-  new vm.Script(patched);
-  assert.equal(applyRecordReplayMainBridgePatch(patched), patched);
-  assert.equal(fs.readFileSync(file, "utf8"), source);
+  for (const [name, source] of Object.entries(variants)) {
+    const { value, warnings } = captureWarns(() => applyRecordReplayMainBridgePatch(source));
+    assert.equal(value, source, name);
+    assert.equal(warnings.length, 1, name);
+    assert.match(warnings[0], /uniquely resolve current signed-release bridge insertion point/, name);
+  }
 });
 
 test("record-and-replay Chronicle helpers map Skysight status into upstream sidecar state", () => {

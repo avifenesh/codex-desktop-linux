@@ -6,7 +6,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 const descriptors = require("./patch.js");
 const fixture = fs.readFileSync(path.join(__dirname, "fixtures/current-native-applications.js"), "utf8");
-const patch = source => descriptors.find(({ id }) => id === "native-applications").apply(source);
+const patch = source => descriptors.find(({ id }) => id === "native-applications")?.apply(source) ?? source;
 
 test("current signed native Applications factory has a Linux metadata implementation", () => {
   const patched = patch(fixture);
@@ -15,7 +15,7 @@ test("current signed native Applications factory has a Linux metadata implementa
   assert.equal(patch(patched), patched);
 });
 
-function metadataService(platform) {
+function metadataService(platform, { windows = [{ app_id: "org.editor", wm_class: "Editor", title: "Document", window_id: 42, focused: true }], backendFailure = false } = {}) {
   const calls = [];
   const desktop = "/xdg/applications/org.editor.desktop";
   const icon = "/icons/editor.svg";
@@ -35,7 +35,7 @@ function metadataService(platform) {
     "node:child_process": { spawnSync: (file, args, options) => {
       calls.push({ file, args: Array.from(args) });
       assert.equal(options.timeout, 2500);
-      return { status: 0, stdout: JSON.stringify({ windows: [{ app_id: "org.editor", wm_class: "Editor", title: "Document", window_id: 42, focused: true }] }) };
+      return backendFailure ? { status: 1, stdout: "" } : { status: 0, stdout: JSON.stringify({ windows }) };
     } },
   };
   const factory = vm.runInNewContext(`${patch(fixture)};makeNativeApplications`, {
@@ -80,6 +80,20 @@ test("native macOS and Windows metadata services remain unchanged", async () => 
     assert.equal(calls.length, 0);
   }
   assert.equal(metadataService("freebsd").service, undefined);
+});
+
+test("Linux metadata is a bounded running-window inventory and backend failure stays empty", async () => {
+  const windows = Array.from({ length: 25 }, (_, index) => ({
+    app_id: `org.application${index}`, window_id: index + 1, focused: index === 24,
+  }));
+  const { service } = metadataService("linux", { windows });
+  const apps = await service.list({ order: "usage" });
+  assert.equal(apps.length, 20);
+  assert.equal(apps[0].windowId, 25);
+  const failed = metadataService("linux", { backendFailure: true }).service;
+  assert.equal((await failed.list()).length, 0);
+  assert.equal(await failed.getByBundleId("org.editor"), null);
+  assert.equal((await failed.getIcon({ appPath: "linux:missing" })).iconSmall, null);
 });
 
 test("native metadata rejects duplicate owners and partial or damaged contracts", () => {

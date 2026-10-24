@@ -22,7 +22,7 @@ function requireUsages(source, name, expected) {
 }
 
 function rootGuard(name) {
-  return `if(process.platform===\`linux\`&&(typeof ${name}!==\`string\`||${name}.length===0))throw Error(\`Linux Computer Use trusted plugin root is unavailable\`);`;
+  return `if(typeof ${name}!==\`string\`||${name}.length===0)throw Error(\`Linux Computer Use trusted plugin root is unavailable\`);`;
 }
 
 function lifecycleContract(source, builder, syncSource) {
@@ -47,12 +47,10 @@ function lifecycleContract(source, builder, syncSource) {
     `nodeRepl:${ID}\\}(?<root>,\\k<selection>\\.${ROOT_KEY})?\\)`, "g"),
   "expected one thread configuration builder call");
   const resumeOwner = enclosingFunction(source, resume.index);
-  const resumeSource = source.slice(resumeOwner.start, resumeOwner.end);
-  const cache = uniqueMatch(resumeSource, new RegExp(
-    `(?<cached>${ID})=${ID}\\.browserUseTinysky\\?${ID}:null(?=,)`, "g"),
-  "expected thread configuration to select its authenticated cached state");
-  uniqueMatch(resumeSource, new RegExp(
-    `${escapeRegExp(resume.groups.selection)}=${escapeRegExp(cache.groups.cached)}\\?\\.selection\\?\\?await ${ID}\\(`, "g"),
+  uniqueMatch(source.slice(resumeOwner.start, resumeOwner.end), new RegExp(
+    `(?<cached>${ID})=${ID}\\.browserUseTinysky\\?${ID}:null,` +
+    `${ID}=${ID}\\?await ${ID}\\.getAuthenticatedPrincipal\\(\\)\\.catch\\(\\(\\)=>null\\):null,` +
+    `${escapeRegExp(resume.groups.selection)}=\\k<cached>\\?\\.selection\\?\\?await ${ID}\\(`, "g"),
   "expected thread configuration to reuse the cached selection");
   if (sync.groups.context != null && sync.groups.selection !== cached.groups.selection) {
     throw new Error("Linux unified Computer Use contract drift: plugin root receiver is not the cached selection");
@@ -83,14 +81,14 @@ function freshBuilderRoot(source) {
 function applyUnifiedComputerUsePatch(source) {
   // Match the current selector, including variable relationships. Both pristine
   // and patched forms must have exactly one owner; drift must abort the build.
-  const pattern = /(?<native>[\w$]+)=(?<nativeValue>(?<ready>[\w$]+)&&(?<features>[\w$]+)\.computerUse&&(?<legacy>[\w$]+)\.enabled&&\((?<runtime>[\w$]+)\.platform===`win32`\|\|\k<runtime>\.platform===`darwin`&&\k<legacy>\.paths\.serviceAppPath!=null\))(?<linux>\|\|\k<ready>&&\k<runtime>\.platform===`linux`&&\k<features>\.computerUse&&\k<legacy>\.enabled)?,(?<mode>[\w$]+)=(?<modeLinux>\k<runtime>\.platform===`linux`\?\k<native>:)?(?<modeValue>\k<features>\.computerUse&&\(!\k<features>\.browserUseTinysky\|\|\k<runtime>\.platform!==`darwin`\|\|\k<legacy>\.enabled\))(?=,)/g;
+  const pattern = /(?<native>[\w$]+)=(?<ready>[\w$]+)&&(?<features>[\w$]+)\.computerUse&&(?<legacy>[\w$]+)\.enabled&&\((?<runtime>[\w$]+)\.platform===`win32`\|\|\k<runtime>\.platform===`darwin`&&\k<legacy>\.paths\.serviceAppPath!=null\)(?<linux>\|\|\k<ready>&&\k<runtime>\.platform===`linux`&&\k<features>\.computerUse&&\k<legacy>\.enabled)?,(?<mode>[\w$]+)=(?<modeLinux>\k<runtime>\.platform===`linux`\?\k<native>:)?(?<modeValue>\k<features>\.computerUse&&\(!\k<features>\.browserUseTinysky\|\|\k<runtime>\.platform!==`darwin`\|\|\k<legacy>\.enabled\))(?=,)/g;
   const matches = [...source.matchAll(pattern)];
   const owners = [...source.matchAll(/[\w$]+=[\w$]+&&[\w$]+\.computerUse&&[\w$]+\.enabled&&\([\w$]+\.platform===`win32`\|\|[\w$]+\.platform===`darwin`&&[\w$]+\.paths\.serviceAppPath/g)];
   if (matches.length !== 1 || owners.length !== 1 || !source.includes("cuaReplSurfaces:")) {
     throw new Error("Linux unified Computer Use contract drift: expected one native surface selector");
   }
   const match = matches[0];
-  const { native, nativeValue, ready, runtime, features, legacy, mode, modeValue, linux, modeLinux } = match.groups;
+  const { native, ready, runtime, features, legacy, mode, modeValue, linux, modeLinux } = match.groups;
   if (Boolean(linux) !== Boolean(modeLinux)) {
     throw new Error("Linux unified Computer Use contract drift: partial native selector patch");
   }
@@ -115,20 +113,26 @@ function applyUnifiedComputerUsePatch(source) {
     "g",
   );
   const patchedServicePattern = new RegExp(
-    `${surfaces}\\.includes\\(\`computer\`\\)&&\\((?<services>[\\w$]+)\\.sky=process\\.platform===\`linux\`\\?(?<path>[\\w$]+)\\.default\\.join\\((?<pluginRoot>[\\w$]+),\`scripts\`,\`native-service\\.mjs\`\\):\`@oai/sky/service\`\\)`,
+    `${surfaces}\\.includes\\(\`computer\`\\)&&\\((?<services>[\\w$]+)\\.sky=(?<path>[\\w$]+)\\.default\\.join\\((?<pluginRoot>[\\w$]+),\`scripts\`,\`native-service\\.mjs\`\\)\\)`,
     "g",
   );
   const currentServices = [...builderSource.matchAll(currentServicePattern)];
   const patchedServices = [...builderSource.matchAll(patchedServicePattern)];
-  const audio = `(?<audio>\\.\\.\\.${builder.groups.nodeRepl}\\?\\.env\\.SKY_AUDIO_ATTACHMENTS===\`1\`\\?\\{SKY_ENABLE_AUDIO:${surfaces}\\.includes\\(\`computer\`\\)\\?\`1\`:\`0\`,SKY_AUDIO_ATTACHMENTS:${surfaces}\\.includes\\(\`computer\`\\)\\?\`1\`:\`0\`,NODE_REPL_ENABLE_AUDIO:\`0\`\\}:\\{\\},)?`;
+  const audioEnvironmentPattern =
+    `(?<audio>\\.\\.\\.${builder.groups.nodeRepl}\\?\\.env\\.SKY_AUDIO_ATTACHMENTS===\`1\`\\?\\{` +
+    `SKY_ENABLE_AUDIO:${surfaces}\\.includes\\(\`computer\`\\)\\?\`1\`:\`0\`,` +
+    `SKY_AUDIO_ATTACHMENTS:${surfaces}\\.includes\\(\`computer\`\\)\\?\`1\`:\`0\`,` +
+    "NODE_REPL_ENABLE_AUDIO:`0`\\}:\\{\\},)";
   const currentBannerPattern = new RegExp(
-    `CUA_REPL_ENABLED_SURFACES:${surfaces}\\.join\\(\`,\`\\),${audio}\\[(?<constants>[\\w$]+)\\.(?<constant>[\\w$]+)\\]:JSON\\.stringify\\((?<services>[\\w$]+)\\)`,
+    `CUA_REPL_ENABLED_SURFACES:${surfaces}\\.join\\(\`,\`\\),${audioEnvironmentPattern}` +
+      `\\[(?<constants>[\\w$]+)\\.(?<constant>[\\w$]+)\\]:JSON\\.stringify\\((?<services>[\\w$]+)\\)`,
     "g",
   );
   const patchedBannerPattern = new RegExp(
-    `CUA_REPL_ENABLED_SURFACES:${surfaces}\\.join\\(\`,\`\\),\\.\\.\\.process\\.platform===\`linux\`\\?\\{CODEX_LINUX_CUA_HOST_SOCKET:process\\.env\\.CODEX_LINUX_CUA_HOST_SOCKET,` +
+    `CUA_REPL_ENABLED_SURFACES:${surfaces}\\.join\\(\`,\`\\),CODEX_LINUX_CUA_HOST_SOCKET:process\\.env\\.CODEX_LINUX_CUA_HOST_SOCKET,` +
       `NODE_REPL_JS_BANNER:\`await import\\("@oai/cua/tinyskyAlt"\\);await\\(await import\\(\\$\\{JSON\\.stringify\\((?<path>[\\w$]+)\\.default\\.join\\((?<pluginRoot>[\\w$]+),\`scripts\`,\`native-client\\.mjs\`\\)\\)\\}\\)\\)\\.installLinuxComputerUse\\(cua\\);\`,` +
-      `\\}:\\{\\},${audio}\\[(?<constants>[\\w$]+)\\.(?<constant>[\\w$]+)\\]:JSON\\.stringify\\((?<services>[\\w$]+)\\)`,
+      audioEnvironmentPattern +
+      `\\[(?<constants>[\\w$]+)\\.(?<constant>[\\w$]+)\\]:JSON\\.stringify\\((?<services>[\\w$]+)\\)`,
     "g",
   );
   const currentBanners = [...builderSource.matchAll(currentBannerPattern)];
@@ -197,23 +201,24 @@ function applyUnifiedComputerUsePatch(source) {
       index: match.index,
       length: match[0].length,
       replacement:
-        `${native}=${nativeValue}` +
+        `${native}=${ready}&&${features}.computerUse&&${legacy}.enabled&&(${runtime}.platform===\`win32\`||${runtime}.platform===\`darwin\`&&${legacy}.paths.serviceAppPath!=null)` +
         `||${ready}&&${runtime}.platform===\`linux\`&&${features}.computerUse&&${legacy}.enabled,` +
         `${mode}=${runtime}.platform===\`linux\`?${native}:${modeValue}`,
     },
     {
       index: builderOwner.start + service.index,
       length: service[0].length,
-      replacement: `${surfaces}.includes(\`computer\`)&&(${service.groups.services}.sky=process.platform===\`linux\`?${pathAlias}.default.join(${builderRoot},\`scripts\`,\`native-service.mjs\`):\`@oai/sky/service\`)`,
+      replacement: `${surfaces}.includes(\`computer\`)&&(${service.groups.services}.sky=${pathAlias}.default.join(${builderRoot},\`scripts\`,\`native-service.mjs\`))`,
     },
     {
       index: builderOwner.start + banner.index,
       length: banner[0].length,
       replacement:
         `CUA_REPL_ENABLED_SURFACES:${surfaces}.join(\`,\`),` +
-        `...process.platform===\`linux\`?{CODEX_LINUX_CUA_HOST_SOCKET:process.env.CODEX_LINUX_CUA_HOST_SOCKET,` +
+        `CODEX_LINUX_CUA_HOST_SOCKET:process.env.CODEX_LINUX_CUA_HOST_SOCKET,` +
         `NODE_REPL_JS_BANNER:\`await import("@oai/cua/tinyskyAlt");await(await import(\${JSON.stringify(${pathAlias}.default.join(${builderRoot},\`scripts\`,\`native-client.mjs\`))})).installLinuxComputerUse(cua);\`,` +
-        `}:{},${banner.groups.audio ?? ""}[${banner.groups.constants}.${banner.groups.constant}]:JSON.stringify(${banner.groups.services})`,
+        banner.groups.audio +
+        `[${banner.groups.constants}.${banner.groups.constant}]:JSON.stringify(${banner.groups.services})`,
     },
     {
       index: builder.index + builder[0].length - 2,

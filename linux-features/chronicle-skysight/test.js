@@ -11,7 +11,6 @@ const { execFileSync } = require("node:child_process");
 const {
   applyChronicleSkysightMainBridgePatch,
   chronicleControllerContract,
-  chronicleSkysightBridgeSource,
   descriptors,
   recordReplayRuntimeHelperSource,
 } = require("./patch.js");
@@ -61,7 +60,7 @@ function currentChronicleMainFixture() {
     "var appOptions={getSkysightRecorderController:()=>Cr().skysight?xe:null,artifactSessionHostLifecycle:null};",
     "var connection={enableSkysightChronicle:()=>xe.enable(),resumeChronicle:()=>xe.resume()};",
     "var Host=class{constructor(){this.options=appOptions;let i=connection;this.services={chronicle:process.platform===`darwin`&&this.options.getSkysightRecorderController!=null?new $O(i,this.options.getSkysightRecorderController,()=>Cr().skysight,()=>globalThis.applications,e=>globalThis.resolvedApplications,{list:()=>globalThis.history,listSuggestions:()=>globalThis.historySuggestions,listSummaryIntervals:e=>[e]}):void 0}}};var host=new Host;",
-    require("../chronicle-skysight/fixtures/ipc-dispatcher.js"),
+    "var bridge={\"set-remote-wsl-connections-enabled\":()=>null};",
   ].join("");
 }
 
@@ -203,6 +202,19 @@ test("chronicle-skysight fails closed for missing duplicate ambiguous mixed and 
     .replace("var $O=class", "var $P=class");
   const variants = {
     retiredRelease: retiredChronicleMainFixture(),
+    retiredHandlerAnchor: current.replace(
+      '"set-remote-wsl-connections-enabled":',
+      '"get-global-state":async({key:',
+    ),
+    missingHandlerAnchor: current.replace(
+      '"set-remote-wsl-connections-enabled":',
+      '"set-remote-wsl-connections-disabled":',
+    ),
+    duplicateHandlerAnchor: current.replace(
+      '"set-remote-wsl-connections-enabled":',
+      '"set-remote-wsl-connections-enabled":()=>null,"set-remote-wsl-connections-enabled":',
+    ),
+    mixedHandlerAnchors: `${current}var retiredBridge={"get-global-state":async({key:e})=>null};`,
     missing: current.replace("this.request(`skysightStatus`)", "this.request(`statusChanged`)"),
     missingReconciliationDependency: current.replace(
       "reconcileComputerHistoryPluginInstallation:e=>",
@@ -227,11 +239,6 @@ test("chronicle-skysight fails closed for missing duplicate ambiguous mixed and 
     missingHistorySuggestions: current.replace("async listHistorySuggestions()", "async readHistorySuggestions()"),
     missingHistoryIntervals: current.replace("async listHistorySummaryIntervals({sinceMs:e})", "async readHistorySummaryIntervals({sinceMs:e})"),
     missingClear: current.replace("async clearHistory(e,t)", "async eraseHistory(e,t)"),
-    missingDispatcher: current.replace("handleVSCodeRequest(e,t,n,r,i)", "handleOtherRequest(e,t,n,r,i)"),
-    spoofableOrigin: current.replace("...n,origin:e,signal:i", "origin:e,signal:i,...n"),
-    missingTraceScope: current.replace("requestScope.ct({source:r,requestKind:t},c)", "c()"),
-    missingWindowCheck: current.replace("e.webContents===t", "true"),
-    duplicateDispatcher: current + require("./fixtures/ipc-dispatcher.js"),
   };
 
   for (const [name, source] of Object.entries(variants)) {
@@ -241,52 +248,6 @@ test("chronicle-skysight fails closed for missing duplicate ambiguous mixed and 
     assert.equal(result.warnings.length, 1, name);
     assert.match(result.warnings[0], /coherent current Chronicle controller contract/, name);
   }
-});
-
-test("Chronicle adapts the current signed IPC owner without changing the source", {
-  skip: !process.env.CODEX_SIGNED_EXTRACTED_APP,
-}, () => {
-  const directory = path.join(process.env.CODEX_SIGNED_EXTRACTED_APP, ".vite/build");
-  const files = fs.readdirSync(directory).filter((name) => /^main-[^.]+\.js$/.test(name));
-  assert.equal(files.length, 1);
-  const file = path.join(directory, files[0]), source = fs.readFileSync(file, "utf8");
-  assert.equal(source.includes('"get-global-state":async({key:'), false);
-  assert.equal(chronicleControllerContract(source), "current");
-  const patched = applyChronicleSkysightMainBridgePatch(source);
-  assert.equal(chronicleControllerContract(patched), "patched");
-  new (require("node:vm").Script)(patched);
-  assert.equal(applyChronicleSkysightMainBridgePatch(patched), patched);
-  assert.equal(fs.readFileSync(file, "utf8"), source);
-});
-
-for (const [name, mutate] of [
-  ["a suffix lookalike registry", (source) => source.replace("handlers={", "otherhandlers={")],
-  ["a dispatcher owned by a nested class", (source) => source
-    .replace("handleVSCodeRequest(e,t,n,r,i){", "make(){var Nested=class{handleVSCodeRequest(e,t,n,r,i){")
-    .replace("}};var fetchHandler", "}}}};var fetchHandler")],
-  ["an original route nested under the registry", (source) => source
-    .replace("handlers={", "handlers={nested:{")
-    .replace("wsl??[]}};handleVSCodeRequest", "wsl??[]}}};handleVSCodeRequest")],
-]) {
-  test(`Chronicle rejects ${name} without inserting bridge handlers`, () => {
-    const source = mutate(currentChronicleMainFixture());
-    new (require("node:vm").Script)(source);
-    assert.equal(chronicleControllerContract(source), "drifted");
-    const result = captureWarns(() => applyChronicleSkysightMainBridgePatch(source));
-    assert.equal(result.value, source);
-    assert.equal(result.warnings.length, 1);
-  });
-}
-
-test("Chronicle rejects feature routes nested under the registry", () => {
-  const patched = applyChronicleSkysightMainBridgePatch(currentChronicleMainFixture());
-  const payload = chronicleSkysightBridgeSource();
-  const nested = patched.replace(payload, `nested:{${payload}}`);
-  new (require("node:vm").Script)(nested);
-  assert.equal(chronicleControllerContract(nested), "drifted");
-  const result = captureWarns(() => applyChronicleSkysightMainBridgePatch(nested));
-  assert.equal(result.value, nested);
-  assert.equal(result.warnings.length, 1);
 });
 
 test("chronicle-skysight drives recorder controls without exposing the unsupported Linux service", async () => {

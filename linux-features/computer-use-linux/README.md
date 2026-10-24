@@ -66,12 +66,12 @@ MCP tools. Upstream owns browser control. Missing or ambiguous bundle contracts
 abort an enabled build.
 
 The current signed app's `nativeApplications` service supplies the native app
-picker. On Linux this feature uses the existing running-window backend and
-desktop-entry icons, with the service's array, lookup, and icon-size contracts.
-This inventory covers running apps, not a complete installed-app or usage-history
-catalog. The macOS and Windows service implementations remain upstream-owned.
-The native component is hidden only by the Plugins presentation filter; the
-shared Any App settings query retains the real installed and enabled state.
+picker. On Linux this feature uses the running-window backend and desktop-entry
+icons. It returns at most 20 running apps. Default and usage ordering put focused
+apps first; display-name ordering sorts that inventory alphabetically. It does
+not provide an installed-app catalog, usage history, or date-based filtering.
+The service preserves its array, nullable lookup, and icon-size contracts.
+The macOS and Windows implementations remain upstream-owned.
 
 `make install-native` builds `codex-computer-use-linux` and
 `codex-computer-use-cosmic` and `codex-computer-use-indicator` once before staging the package. Direct
