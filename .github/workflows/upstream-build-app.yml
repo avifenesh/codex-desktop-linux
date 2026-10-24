@@ -334,6 +334,11 @@ jobs:
           npx --yes @electron/asar extract \
             "${{ steps.upstream.outputs.asar }}" \
             "$extracted_asar"
+          CODEX_SIGNED_EXTRACTED_APP="$extracted_asar" \
+          CODEX_UPSTREAM_APP_DIR="${{ steps.upstream.outputs.app_dir }}" \
+            node --test \
+              linux-features/computer-use-linux/current-signed.test.js \
+              linux-features/computer-use-linux/resume.test.js
           node scripts/ci/verify-official-linux-features.js \
             "$extracted_asar" \
             "${{ steps.upstream.outputs.app_dir }}"

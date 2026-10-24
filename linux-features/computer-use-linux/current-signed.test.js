@@ -7,14 +7,29 @@ const test = require("node:test");
 const vm = require("node:vm");
 const descriptors = require("./patch.js");
 const { applyUnifiedComputerUsePatch } = require("./unified.js");
+const { findMainBundle } = require("../../scripts/patches/lib/assets.js");
 
 const current = fs.readFileSync(path.join(__dirname, "fixtures/current-unified-runtime.js"), "utf8");
 
 test("current signed Windows-aware unified contract patches and revalidates", () => {
-  const patched = applyUnifiedComputerUsePatch(current);
-  assert.notEqual(patched, current);
-  assert.doesNotThrow(() => new vm.Script(patched));
-  assert.equal(applyUnifiedComputerUsePatch(patched), patched);
+  const sources = [current];
+  if (process.env.CODEX_SIGNED_EXTRACTED_APP) {
+    const main = findMainBundle(process.env.CODEX_SIGNED_EXTRACTED_APP);
+    assert(main, "Expected the verified main-process bundle");
+    const actual = fs.readFileSync(path.join(main.buildDir, main.mainBundle), "utf8");
+    sources.push(actual);
+    const native = descriptors.find(({ id }) => id === "native-applications");
+    const patchedNative = native.apply(actual);
+    assert.notEqual(patchedNative, actual);
+    assert.equal(native.apply(patchedNative), patchedNative);
+    assert.doesNotThrow(() => new vm.Script(patchedNative));
+  }
+  for (const source of sources) {
+    const patched = applyUnifiedComputerUsePatch(source);
+    assert.notEqual(patched, source);
+    assert.doesNotThrow(() => new vm.Script(patched));
+    assert.equal(applyUnifiedComputerUsePatch(patched), patched);
+  }
 });
 
 test("native Settings presentation owner can live in the primary app bundle", () => {
@@ -32,25 +47,24 @@ function runtime(platform, { principal = { id: "verified-principal" } } = {}) {
   };
   const node = { command: "/node", env: { node: "/node", package: "/bundled", SKY_AUDIO_ATTACHMENTS: "1", NODE_REPL_JS_BANNER: "official-banner" } };
   const globals = {
-    C: { default: path }, yi: "backends", i: {
-      us: "services", as: "node", is: "package", rs: "cua_repl", Yo: "unified-computer-use",
-      qt: metadata => {
+    path: { default: path }, constants: {
+      services: "services",
+      pluginRoot: metadata => {
         assert.equal(metadata.pluginName, "unified-computer-use");
         assert.equal(metadata.localVersion, "verified-version");
         return "/trusted-plugin";
       },
     },
     process: { platform, env: { CODEX_LINUX_CUA_HOST_SOCKET: "/runtime/cua.sock" } },
-    _o: () => ({ plugin: { installed: true, localVersion: "verified-version", name: "unified-computer-use" }, marketplace: { name: "bundled" } }),
-    A: { readFile: async () => '{"mcpServers":{"cua_repl":{}}}', writeFile: async () => {}, rename: async () => {} },
-    bre: { parse: value => value }, v: { randomUUID: () => "nonce" },
-    jc: async () => ({ selection, cuaReplEnabled: true }),
-    va: () => ({ browserUseTinysky: true }),
-    Ec: async () => ({ "mcp_servers.node_repl": structuredClone(node) }),
-    Pc: value => value?.id ?? null, Nc: null, Si: "identity", xi: "toolsPipe", Ci: "browserIdentity",
-    I: { default: { env: {} } }, Do: { "mcp_servers.cua_repl": { enabled: false } }, Oo: () => {},
+    lookup: () => ({ plugin: { installed: true, localVersion: "verified-version", name: "unified-computer-use" }, marketplace: { name: "bundled" } }),
+    cachedSelection: async () => ({ selection, cuaReplEnabled: true }),
+    features: () => ({ browserUseTinysky: true }),
+    nodeConfiguration: async () => ({ "mcp_servers.node_repl": structuredClone(node) }),
+    normalizePrincipal: value => value?.id ?? null,
+    selectForThread: () => { throw Error("Unexpected fallback instead of cached selection"); },
+    disabledConfig: { "mcp_servers.cua_repl": { enabled: false } },
   };
-  const functions = vm.runInNewContext(`${applyUnifiedComputerUsePatch(current)};({build:ko,resume:Ic,sync:xre})`, globals);
+  const functions = vm.runInNewContext(`${applyUnifiedComputerUsePatch(current)};({build:buildServices,resume:resumeSelection,sync:synchronizePlugin})`, globals);
   return { ...functions, selection, node, connection: { hostConfig: { kind: "local" }, getAuthenticatedPrincipal: async () => principal } };
 }
 

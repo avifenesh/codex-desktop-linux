@@ -29,7 +29,7 @@ function metadataService(platform) {
       return Buffer.from("<svg/>");
     },
   };
-  const native = { L: async () => [{ bundleId: "official-app" }], F: async id => ({ bundleId: id, displayName: "Official" }) };
+  const native = { list: async () => [{ bundleId: "official-app" }], findById: async id => ({ bundleId: id, displayName: "Official" }) };
   const modules = {
     "node:fs": fsMock, "node:path": path, "node:os": { homedir: () => "/home/test" },
     "node:child_process": { spawnSync: (file, args, options) => {
@@ -38,10 +38,10 @@ function metadataService(platform) {
       return { status: 0, stdout: JSON.stringify({ windows: [{ app_id: "org.editor", wm_class: "Editor", title: "Document", window_id: 42, focused: true }] }) };
     } },
   };
-  const factory = vm.runInNewContext(`${patch(fixture)};wJe`, {
+  const factory = vm.runInNewContext(`${patch(fixture)};makeNativeApplications`, {
     require: name => modules[name], Buffer,
     process: { platform, env: { HOME: "/home/test", XDG_DATA_HOME: "/xdg", XDG_DATA_DIRS: "/empty", CODEX_LINUX_COMPUTER_USE_BACKEND_SOURCE: "/backend" } },
-    s: native, lk: async () => null, Zl: async () => "official-medium", Xl: async () => "official-small",
+    catalog: native, cachedApp: async () => null, mediumIcon: async () => "official-medium", smallIcon: async () => "official-small",
   });
   return { service: factory(), native, calls };
 }
@@ -71,7 +71,7 @@ test("Linux native metadata uses direct arrays, nullable lookup, and both icon s
 test("native macOS and Windows metadata services remain unchanged", async () => {
   for (const platform of ["darwin", "win32"]) {
     const { service, native, calls } = metadataService(platform);
-    assert.equal(service.list, native.L);
+    assert.equal(service.list, native.list);
     assert.equal((await service.getByBundleId("official-app")).displayName, "Official");
     assert.equal((await service.getIcon({ appPath: "/official", size: "small" })).iconSmall, "official-small");
     const medium = await service.getIcon({ appPath: "/official", size: "medium" });
@@ -86,7 +86,7 @@ test("native metadata rejects duplicate owners and partial or damaged contracts"
   const patched = patch(fixture);
   for (const changed of [
     fixture + fixture, patched + fixture, patched + patched,
-    fixture.replace("nativeApplications=wJe()", "nativeApplications=other()"),
+    fixture.replace("nativeApplications=makeNativeApplications()", "nativeApplications=other()"),
     fixture.replace("nativeApplications:this.fetchHandler.nativeApplications", "nativeApplications:this.other.nativeApplications"),
     fixture.replace("iconSmall:null,iconMedium:", "iconSmall:undefined,iconMedium:"),
     patched.replace("list:async(e={})", "list:async(e=changed)"),

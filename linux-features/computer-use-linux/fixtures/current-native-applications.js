@@ -1,5 +1,5 @@
-// Current signed native metadata service. External services are inert test bindings.
+// Hand-authored native metadata factory and its assignment/exposure contract.
 const cp=require("node:child_process"),fs=require("node:fs"),os=require("node:os"),path=require("node:path");
-function wJe(){if(process.platform===`darwin`||process.platform===`win32`)return{getByBundleId:async e=>await lk(e)??await s.F(e),list:s.L,getIcon:async({appPath:e,size:t})=>t===`medium`?{iconSmall:null,iconMedium:await Zl(e)}:{iconSmall:await Xl(e)}}}
-class CurrentFetchHandler{nativeApplications=wJe()}
-function expose(){return {nativeApplications:this.fetchHandler.nativeApplications}}
+function makeNativeApplications(){if(process.platform===`darwin`||process.platform===`win32`)return{getByBundleId:async id=>await cachedApp(id)??await catalog.findById(id),list:catalog.list,getIcon:async({appPath:file,size:size})=>size===`medium`?{iconSmall:null,iconMedium:await mediumIcon(file)}:{iconSmall:await smallIcon(file)}}}
+class TestHandler{nativeApplications=makeNativeApplications()}
+function expose(){return{nativeApplications:this.fetchHandler.nativeApplications}}
