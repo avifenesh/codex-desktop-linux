@@ -35,7 +35,12 @@ methods already emit the image and should not be emitted a second time.
 
 X11 xdotool text dispatch warns that non-US XKB layouts (reported with Brazilian `br`/ABNT2) or changing keymap state can silently substitute symbols even with `ok: true`. The backend monitors XKB layout replacements, persistent mapping/group changes, keyboard grabs, and focus transitions across each dispatch. A detected change returns an error after text may already have been sent; input is never replayed. If monitoring cannot start, dispatch still proceeds with an explicit warning that layout and interception detection are unavailable. These guards do not prove field contents or detect every stable-map loss. Inspect the actual text before pressing Enter, submitting it, or treating it as delivered. Use `include_tree: true` when AT-SPI exposes the text, or `screenshot_after: true`; neither automatically compares the field with the request. Do not retry blindly.
 
-The embedded backend is a 0.7.23 development sync of Computer Use; this does not imply that a standalone v0.7.23 release tag exists. WebKitGTK AT-SPI socket children are resolved through their well-known bus names, and bounded indexed action reads avoid stalled `GetActions` calls. Native action matching uses stable machine-readable `GetName` values, including for Qt controls. Failed desktop actions and intentional refusals map to MCP `isError: true`; a successful action remains successful when only its post-action observation fails.
+PointerRoot focus cannot be monitored because pointer motion can redirect
+keyboard input without a focus event. It follows the same single-dispatch path
+with an explicit monitoring warning. A no-fixed-focus session can still dispatch
+without that PointerRoot warning.
+
+The embedded backend tracks Computer Use 0.7.23. WebKitGTK AT-SPI socket children are resolved through their well-known bus names, and bounded indexed action reads avoid stalled `GetActions` calls. Native action matching uses stable machine-readable `GetName` values, including for Qt controls. Failed desktop actions and intentional refusals map to MCP `isError: true`; a successful action remains successful when only its post-action observation fails.
 
 MCP discovery probes are supported before initialization, including metadata-bearing discovery requests. Agent activity appears through the native GNOME indicator or the Wayland overlay helper. Captures hide the indicator before reading the screen. Portal captures clean new Pictures files and preserve existing images. Set `CODEX_COMPUTER_USE_INDICATOR=0` to disable action indicators; capture exclusion remains active. GNOME extension version 3 supports Shell 45 through 51. Existing Shell sessions need a logout and login to load refreshed extension files.
 
@@ -119,6 +124,17 @@ clicks retain pointer semantics. Relative coordinates use the clipped screenshot
 crop origin in coordinate pixels: divide preview pixels by the returned scale.
 Raw GDK surface coordinates and widget-local coordinates are not that origin.
 This does not qualify every GNOME X11 EWMH move/resize or mixed-monitor mapping.
+
+On KDE Wayland, element clicks that need pointer dispatch match their AT-SPI
+frame to a unique same-PID KWin window using frame and client geometry. Input
+uses physical capture pixels for uinput and global logical coordinates for the
+portal. Verified uniform fractional scaling, actual decoration offsets, and
+negative output origins are supported. Ambiguous ownership, unknown desktop
+visibility, overlapping outputs, mixed or unknown output scales, and stale
+pointer dimensions fail before input. Explicit coordinates and relative clicks
+retain their coordinate contract. Real KDE desktop validation remains pending;
+the geometry and failure paths have fixture coverage. Successful dispatch does
+not verify UI activation.
 
 A semantic `perform_action` whose cached AT-SPI owner disappears during query or
 revalidation can refresh the original scoped snapshot once. Recovery must prove
