@@ -1,6 +1,8 @@
 "use strict";
 
 const { findMatchingBrace } = require("../../scripts/patches/lib/minified-js.js");
+const { hasIpcBridge, insertIpcBridge } = require("../../scripts/patches/lib/main-ipc.js");
+const { chronicleControllerContract } = require("../chronicle-skysight/patch.js");
 
 const RECORD_REPLAY_PLUGIN_NAME = "record-and-replay";
 const HUD_RUNTIME_VERSION = 5;
@@ -170,10 +172,10 @@ function recordReplayHelperSource({ fsVar, pathVar }) {
 function hasCompleteRecordReplayMainBridgePatch(source) {
   const helperPayload = recordReplayHelperSource(RECORD_REPLAY_MODULE_EXPRESSIONS);
   const bridgePayload = recordReplayBridgeSource(RECORD_REPLAY_MODULE_EXPRESSIONS);
-  const bridgeInsertion = `${bridgePayload},"get-global-state":async({key:`;
   return countOccurrences(source, helperPayload) === 1
     && countOccurrences(source, bridgePayload) === 1
-    && countOccurrences(source, bridgeInsertion) === 1;
+    && chronicleControllerContract(source) === "patched"
+    && hasIpcBridge(source, bridgePayload);
 }
 
 function hasAnyRecordReplayMainBridgeArtifact(source) {
@@ -189,22 +191,12 @@ function applyRecordReplayMainBridgePatch(currentSource) {
     }
     return currentSource;
   }
-  if (!currentSource.includes("codexLinuxRecordReplayRun")) {
+  if (chronicleControllerContract(currentSource) !== "patched") {
     warn("Chronicle / Skysight dependency bridge is missing", patchName);
     return currentSource;
   }
 
-  let patchedSource = currentSource;
-  const handlerNeedle = `"get-global-state":async({key:`;
-  if (!currentSource.includes(handlerNeedle)) {
-    warn("Could not find global-state bridge insertion point", patchName);
-    return currentSource;
-  }
-
-  patchedSource = `${recordReplayHelperSource(RECORD_REPLAY_MODULE_EXPRESSIONS)}\n${patchedSource.replace(
-    handlerNeedle,
-    `${recordReplayBridgeSource(RECORD_REPLAY_MODULE_EXPRESSIONS)},${handlerNeedle}`,
-  )}`;
+  const patchedSource = `${recordReplayHelperSource(RECORD_REPLAY_MODULE_EXPRESSIONS)}\n${insertIpcBridge(currentSource, recordReplayBridgeSource(RECORD_REPLAY_MODULE_EXPRESSIONS))}`;
   return patchedSource;
 }
 

@@ -1,5 +1,7 @@
 "use strict";
 
+const { ipcRegistry, hasIpcBridge, insertIpcBridge } = require("../../scripts/patches/lib/main-ipc.js");
+
 const CHRONICLE_MODULE_EXPRESSIONS = Object.freeze({
   childProcessVar: 'require("node:child_process")',
   fsVar: 'require("node:fs")',
@@ -183,14 +185,13 @@ function chronicleControllerContract(source) {
   };
   const helper = recordReplayRuntimeHelperSource(CHRONICLE_MODULE_EXPRESSIONS);
   const bridge = chronicleSkysightBridgeSource();
-  const bridgeInsertion = `${bridge},"get-global-state":async({key:`;
-  const handlerCount = countOccurrences(source, `"get-global-state":async({key:`);
+  const handlerCount = ipcRegistry(source) == null ? 0 : 1;
   const currentCoherent = coherentContract(current);
   const patchedCoherent = coherentContract(patched);
   const helperCount = countOccurrences(source, helper);
   const helperMarkerCount = countOccurrences(source, "function codexLinuxChronicleRequest(");
   const bridgeCount = countOccurrences(source, bridge);
-  const bridgeInsertionCount = countOccurrences(source, bridgeInsertion);
+  const bridgeInsertionCount = hasIpcBridge(source, bridge) ? 1 : 0;
 
   if (
     currentCoherent
@@ -228,7 +229,6 @@ function applyChronicleSkysightMainBridgePatch(currentSource) {
     return currentSource;
   }
 
-  const handlerNeedle = `"get-global-state":async({key:`;
   const helper = recordReplayRuntimeHelperSource(CHRONICLE_MODULE_EXPRESSIONS);
   const bridge = chronicleSkysightBridgeSource();
   const init = chronicleControllerInitMatches(currentSource, false)[0];
@@ -240,8 +240,8 @@ function applyChronicleSkysightMainBridgePatch(currentSource) {
   let patched = currentSource
     .replace(init[0], initReplacement)
     .replace(archiveDependency[0], archiveDependencyReplacement)
-    .replace(getter[0], getterReplacement)
-    .replace(handlerNeedle, `${bridge},${handlerNeedle}`);
+    .replace(getter[0], getterReplacement);
+  patched = insertIpcBridge(patched, bridge);
   patched = `${helper}\n${patched}`;
   if (chronicleControllerContract(patched) !== "patched") {
     warn("Chronicle controller contract changed while patching", patchName);
