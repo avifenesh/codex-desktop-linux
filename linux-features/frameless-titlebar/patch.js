@@ -10,15 +10,20 @@ const currentWindowOptionsPattern = new RegExp(
   "g",
 );
 const patchedWindowOptionsPattern = new RegExp(
-  `(${IDENT})===\\\`win32\\\`\\?\\{titleBarStyle:\\\`hidden\\\`,titleBarOverlay:(${IDENT})\\((${IDENT})\\)\\}:\\1===\\\`linux\\\`\\?\\{titleBarStyle:\\\`hidden\\\`\\}`,
+  `(${IDENT})===\\\`win32\\\`\\?\\{titleBarStyle:\\\`hidden\\\`,titleBarOverlay:(${IDENT})\\((${IDENT})\\)\\}:` +
+    `\\1===\\\`linux\\\`\\?\\{titleBarStyle:\\\`hidden\\\`\\}`,
   "g",
 );
+const detachedWindowPrefix =
+  `case\\\`detached\\\`:return (${IDENT})===\\\`darwin\\\`\\?` +
+  `(\\{titleBarStyle:\\\`hiddenInset\\\`,titleBarOverlay:!0,trafficLightPosition:${IDENT}\\(${IDENT},${IDENT}\\)\\}):`;
 const currentDetachedOptionsPattern = new RegExp(
-  `case\\\`detached\\\`:return (${IDENT})===\\\`darwin\\\`\\?(\\{titleBarStyle:\\\`hiddenInset\\\`,titleBarOverlay:!0,trafficLightPosition:${IDENT}\\(${IDENT},(${IDENT})\\)\\}):\\{titleBarStyle:\\\`hidden\\\`,titleBarOverlay:(${IDENT})\\(\\3\\)\\}`,
+  detachedWindowPrefix + `\\{titleBarStyle:\\\`hidden\\\`,titleBarOverlay:(${IDENT})\\((${IDENT})\\)\\}`,
   "g",
 );
 const patchedDetachedOptionsPattern = new RegExp(
-  `case\\\`detached\\\`:return (${IDENT})===\\\`darwin\\\`\\?(\\{titleBarStyle:\\\`hiddenInset\\\`,titleBarOverlay:!0,trafficLightPosition:${IDENT}\\(${IDENT},(${IDENT})\\)\\}):\\1===\\\`linux\\\`\\?\\{titleBarStyle:\\\`hidden\\\`\\}:\\{titleBarStyle:\\\`hidden\\\`,titleBarOverlay:(${IDENT})\\(\\3\\)\\}`,
+  detachedWindowPrefix + `\\1===\\\`linux\\\`\\?\\{titleBarStyle:\\\`hidden\\\`\\}:` +
+    `\\{titleBarStyle:\\\`hidden\\\`,titleBarOverlay:(${IDENT})\\((${IDENT})\\)\\}`,
   "g",
 );
 const currentZoomOverlayPattern = new RegExp(
@@ -103,9 +108,10 @@ function applyFramelessTitlebarMainPatch(source) {
     )
     .replace(
       currentDetachedOptionsPattern,
-      (_match, platform, macOptions, zoom, overlayHelper) =>
-        `case\`detached\`:return ${platform}===\`darwin\`?${macOptions}:` +
-        `${platform}===\`linux\`?{titleBarStyle:\`hidden\`}:{titleBarStyle:\`hidden\`,titleBarOverlay:${overlayHelper}(${zoom})}`,
+      (_match, platform, darwinOptions, overlayHelper, zoom) =>
+        `case\`detached\`:return ${platform}===\`darwin\`?${darwinOptions}:` +
+        `${platform}===\`linux\`?{titleBarStyle:\`hidden\`}:` +
+        `{titleBarStyle:\`hidden\`,titleBarOverlay:${overlayHelper}(${zoom})}`,
     )
     .replace(
       currentZoomOverlayPattern,

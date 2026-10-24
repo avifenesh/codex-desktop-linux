@@ -34,7 +34,7 @@ function rpc(socket) {
 }
 
 test('host bridge validates requests before launching the unsandboxed backend', async t => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'computer-use-host-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const socketPath = path.join(root, 'native.sock');
   const backend = path.join(root, 'backend.cjs');
@@ -80,7 +80,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
 });
 
 test('bridge socket path requires a private absolute runtime directory', async t => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'computer-use-path-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.chmodSync(root, 0o700);
   const { bridgeSocketPath } = await import('./host-service.mjs');
@@ -91,7 +91,7 @@ test('bridge socket path requires a private absolute runtime directory', async t
 });
 
 test('launcher hook leaves the app usable when XDG_RUNTIME_DIR is unavailable', t => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'computer-use-no-runtime-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const nodeBin = path.join(root, 'app/resources/cua_node/bin/node');
   const featuresDir = path.join(root, 'features');
@@ -115,7 +115,7 @@ test('launcher hook leaves the app usable when XDG_RUNTIME_DIR is unavailable', 
 });
 
 test('launcher reuses one host authority and only its owner token can stop it', async t => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'computer-use-launcher-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-'));
   let cleanup;
   t.after(() => {
     try { cleanup?.(); } catch {}
@@ -157,7 +157,7 @@ test('launcher reuses one host authority and only its owner token can stop it', 
 });
 
 test('launcher registers a new owner while the previous launcher exits', async t => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'computer-use-restart-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-'));
   let cleanup;
   t.after(() => {
     try { cleanup?.(); } catch {}

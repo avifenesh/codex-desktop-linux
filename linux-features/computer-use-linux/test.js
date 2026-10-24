@@ -39,7 +39,7 @@ test("computer-use-linux is opt-in and owns the current Linux descriptors", () =
       "avatar-cursor",
       "ui-feature",
       "plugin-gate",
-      "native-desktop-apps",
+      "native-applications",
       "ui-availability",
       "host-platform",
       "native-settings-visibility",
@@ -47,7 +47,11 @@ test("computer-use-linux is opt-in and owns the current Linux descriptors", () =
   );
   const visibility = descriptors.find(({ id }) => id === "native-settings-visibility");
   assert.equal(visibility.pattern.test("app-initial-3e128f859aa3.js"), true);
-  assert.equal(visibility.pattern.test("app-primary-72206882651c.js"), false);
+  assert.equal(visibility.pattern.test("app-primary-72206882651c.js"), true);
+  assert.equal(visibility.assetMatch(
+    "function f(p,h,r){if(h.length===0&&!r)return p;let s=new Set(h);return p.filter(e=>(!r||!x(e.plugin.id))&&!s.has(e.plugin.id))}",
+  ), true);
+  assert.equal(visibility.assetMatch("function unrelated(){return true}"), false);
   const hostPlatform = descriptors.find(({ id }) => id === "host-platform");
   assert.equal(hostPlatform.pattern.test("app-initial-currentHash.js"), true);
   assert.equal(hostPlatform.pattern.test("app-shared-oldHash.js"), true);
@@ -98,7 +102,7 @@ test("staging extends the hidden unified plugin and invalidates the browser-only
   stage();
   assert.ok(fs.existsSync(path.join(target, "bin/codex-computer-use-indicator")));
   const version = JSON.parse(fs.readFileSync(path.join(target, ".codex-plugin/plugin.json"))).version;
-  assert.equal(version, "26.908.31748-linux-native.6");
+  assert.equal(version, "26.908.31748-linux-native.8");
   assert.deepEqual(JSON.parse(fs.readFileSync(marketplacePath)).plugins.map(p => p.name), ["unified-computer-use", "browser", "computer-use"]);
   const settingsManifest = JSON.parse(fs.readFileSync(path.join(target, "../computer-use/.codex-plugin/plugin.json")));
   assert.equal(settingsManifest.mcpServers, undefined);
@@ -119,9 +123,9 @@ test("staging extends the hidden unified plugin and invalidates the browser-only
   previousManifest.version = "26.901.41600-linux-native.1";
   fs.writeFileSync(manifestPath, JSON.stringify(previousManifest));
   stage();
-  assert.equal(JSON.parse(fs.readFileSync(manifestPath)).version, "26.901.41600-linux-native.6");
+  assert.equal(JSON.parse(fs.readFileSync(manifestPath)).version, "26.901.41600-linux-native.8");
   stage();
-  assert.equal(JSON.parse(fs.readFileSync(manifestPath)).version, "26.901.41600-linux-native.6");
+  assert.equal(JSON.parse(fs.readFileSync(manifestPath)).version, "26.901.41600-linux-native.8");
   fs.writeFileSync(mcpPath, "upstream drift");
   assert.throws(stage, /unified.*contract/i);
 });

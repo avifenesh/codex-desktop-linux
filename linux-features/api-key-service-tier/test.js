@@ -6,7 +6,6 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const vm = require("node:vm");
 
 const {
   createPatchReport,
@@ -32,8 +31,6 @@ const {
   hasApiKeyModelListMappingShape,
 } = require("./patch.js");
 
-function currentGateFixture() { return "function tHi(e){let t=(0,nHi.c)(10),n=Y(Mi),r=e?.hostId??n,i=zYe(r),a=i?.authMethod===`chatgpt`||i?.authMethod===`personalAccessToken`,o=i?.authMethod??null,s;t[0]!==r||t[1]!==o?(s={authMethod:o,hostId:r},t[0]=r,t[1]=o,t[2]=s):s=t[2];let{data:c,isPending:l}=Ci(Ud,s),u=!!i?.isLoading||a&&l,d;t[3]!==c||t[4]!==u||t[5]!==a?(d=a&&!u&&c!=null?$Oe(c):null,t[3]=c,t[4]=u,t[5]=a,t[6]=d):d=t[6];let f=d,p;return t[7]!==u||t[8]!==f?(p={serviceTierAccess:f,isLoading:u},t[7]=u,t[8]=f,t[9]=p):p=t[9],p}"; }
-
 function applyPatchTwice(patchFn, source) {
   const once = patchFn(source);
   assert.notEqual(once, source);
@@ -43,6 +40,23 @@ function applyPatchTwice(patchFn, source) {
 
 function currentModelFixture() {
   return "function iti({additionalAvailableModels:e,apiKeyDaybreakSupported:q=!1,authMethod:t,availableModels:n,defaultModel:r,enabledReasoningEfforts:i,hasConfiguredModelCatalog:h,includeUltraReasoningEffort:a,isCustomModelProvider:o=!1,models:s,useHiddenModels:c}){let l=[],u=null,d=s.some(e=>e.supportedReasoningEfforts.some(({reasoningEffort:e})=>e===`max`)),f=a&&s.some(e=>e.supportedReasoningEfforts.some(({reasoningEffort:e})=>e===`ultra`));return s.forEach(r=>{if(ati({additionalAvailableModels:e,apiKeyDaybreakSupported:q,authMethod:t,availableModels:n,hasConfiguredModelCatalog:h,isCustomModelProvider:o,model:r,useHiddenModels:c})){let e=a?r.supportedReasoningEfforts:r.supportedReasoningEfforts.filter(({reasoningEffort:e})=>e!==`ultra`),n=(t===`copilot`?[e.find(e=>e.reasoningEffort===`medium`)??{reasoningEffort:`medium`,description:`medium effort`}]:e).filter(({reasoningEffort:e})=>cI(e)&&i.has(e)),o={...r,supportedReasoningEfforts:n};l.push(o),r.isDefault&&(u=o)}}),u??=l.find(e=>e.model===r)??null,{models:l,defaultModel:u,hasModelSupportingMaxReasoningEffort:d,hasModelSupportingUltraReasoningEffort:f}}";
+}
+
+function currentGateFixture() {
+  return "function gate(e){let t=(0,cache.c)(10),n=read(localHost),r=e?.hostId??n,i=getHost(r),a=i?.authMethod===`chatgpt`||i?.authMethod===`personalAccessToken`||i?.authMethod===`amazonBedrock`,o=i?.authMethod??null,s;t[0]!==r||t[1]!==o?(s={authMethod:o,hostId:r},t[0]=r,t[1]=o,t[2]=s):s=t[2];let{data:c,isPending:l}=query(requirementsQuery,s),u=!!i?.isLoading||a&&l,d;t[3]!==c||t[4]!==u||t[5]!==a?(d=a&&!u&&c!=null?resolveAccess(c):null,t[3]=c,t[4]=u,t[5]=a,t[6]=d):d=t[6];let f=d,p;return t[7]!==u||t[8]!==f?(p={serviceTierAccess:f,isLoading:u},t[7]=u,t[8]=f,t[9]=p):p=t[9],p}";
+}
+
+function gateHarness(source) {
+  return Function(`
+    let host, requirements, pending = false, calls = 0;
+    const memo = [], cache = {c: () => memo}, localHost = "local", requirementsQuery = {};
+    const read = value => value, getHost = () => host;
+    const query = () => ({data: requirements, isPending: pending});
+    const resolveAccess = data => {calls++; return data.access};
+    ${source}
+    return {gate, setHost: value => host = value, setRequirements: value => requirements = value,
+      setPending: value => pending = value, calls: () => calls};
+  `)();
 }
 
 function captureWarnings(callback) {
@@ -233,52 +247,46 @@ test("a missing exact current target gets its own skipped report entry", () => {
   });
 });
 
-test("current service-tier access supports API keys and preserves account requirements", () => {
-  const patched = applyPatchTwice(applyApiKeyServiceTierGatePatch, currentGateFixture());
-  for (const authMethod of ["apikey", "chatgpt", "personalAccessToken", "other"]) {
-    for (const isLoading of [false, true]) {
-      const cache = Array(10).fill(Symbol("empty"));
-      const context = {
-        nHi: { c: () => cache }, Y: () => "local", Mi: {},
-        zYe: () => ({ authMethod, isLoading }), Ud: {},
-        Ci: () => ({ data: { deny: true }, isPending: false }),
-        $Oe: () => ({ fast: false, ultrafast: false }),
-      };
-      const call = vm.runInNewContext(patched + ";tHi", context);
-      const result = call({});
-      assert.equal(result.isLoading, isLoading);
-      if (isLoading || authMethod === "other") assert.equal(result.serviceTierAccess, null);
-      else assert.equal(result.serviceTierAccess.fast, authMethod === "apikey");
-    }
+test("current service-tier access allows API-key Fast without enabling Ultrafast", () => {
+  const source = currentGateFixture();
+  assert.equal(hasApiKeyServiceTierGateShape(source), true);
+  const patched = applyPatchTwice(applyApiKeyServiceTierGatePatch, source);
+  assert.match(patched, /:o===`apikey`&&!u\?\{fast:!0,ultrafast:!1\}:null/);
+  assert.match(patched, /t\[5\]!==o/);
+  assert.match(patched, /t\[5\]=o/);
+  const driver = gateHarness(patched);
+  driver.setHost({authMethod: "apikey", isLoading: false});
+  assert.deepEqual(driver.gate().serviceTierAccess, {fast: true, ultrafast: false});
+  assert.equal(driver.calls(), 0);
+  driver.setHost({authMethod: "apikey", isLoading: true});
+  assert.deepEqual(driver.gate(), {serviceTierAccess: null, isLoading: true});
+});
+
+test("current gate preserves account requirements and pending state", () => {
+  const driver = gateHarness(applyApiKeyServiceTierGatePatch(currentGateFixture()));
+  for (const authMethod of ["chatgpt", "personalAccessToken", "amazonBedrock"]) {
+    driver.setHost({authMethod, isLoading: false});
+    const access = {fast: false, ultrafast: true};
+    driver.setRequirements({access});
+    assert.equal(driver.gate().serviceTierAccess, access);
+    driver.setPending(true);
+    assert.deepEqual(driver.gate(), {serviceTierAccess: null, isLoading: true});
+    driver.setPending(false);
+    driver.setRequirements(null);
+    assert.deepEqual(driver.gate(), {serviceTierAccess: null, isLoading: false});
   }
+  assert.equal(driver.calls(), 3);
 });
 
-test("access memo updates between API-key and other non-account hosts", () => {
-  const cache = Array(10).fill(Symbol("empty"));
-  const host = { authMethod: "other", isLoading: false };
-  const context = { nHi: { c: () => cache }, Y: () => "local", Mi: {},
-    zYe: () => host, Ud: {}, Ci: () => ({ data: null, isPending: false }), $Oe: () => null };
-  const call = vm.runInNewContext(applyApiKeyServiceTierGatePatch(currentGateFixture()) + ";tHi", context);
-  assert.equal(call({}).serviceTierAccess, null);
-  host.authMethod = "apikey";
-  assert.equal(call({}).serviceTierAccess.fast, true);
-  host.authMethod = "other";
-  assert.equal(call({}).serviceTierAccess, null);
-});
-
-test("missing, duplicate and partial access contracts are not mutated", () => {
-  for (const source of ["function unrelated(){}", currentGateFixture()+currentGateFixture(),
-    currentGateFixture().replace("t[5]=a", "t[5]=null")]) {
-    captureWarnings(() => assert.equal(applyApiKeyServiceTierGatePatch(source), source));
-  }
-});
-
-test("gate wrapper rejects duplicate and mixed cached access owners", () => {
-  const current = currentGateFixture();
-  const patched = applyApiKeyServiceTierGatePatch(current);
-  for (const source of [current+current, patched+patched, current+patched]) {
-    const warnings = captureWarnings(() => assert.equal(applyCurrentGatePatch(source), source));
-    assert.equal(warnings.length, 1);
+test("memoized current gate recomputes access when API-key authentication changes", () => {
+  const driver = gateHarness(applyApiKeyServiceTierGatePatch(currentGateFixture()));
+  const host = {authMethod: "apikey", isLoading: false};
+  driver.setHost(host);
+  assert.equal(driver.gate().serviceTierAccess.fast, true);
+  for (const authMethod of ["copilot", null, "apikey"]) {
+    host.authMethod = authMethod;
+    assert.deepEqual(driver.gate().serviceTierAccess,
+      authMethod === "apikey" ? {fast: true, ultrafast: false} : null);
   }
 });
 
@@ -286,6 +294,29 @@ test("current shared option owner synthesizes a fallback from its model argument
   const source = "function pNr(e,t){return[xNr,...(t??[]).map(t=>{let n=gN(t.id,t.name),r=n===`fast`?mNr(e):null;return{description:dNr(t,r),iconKind:n,label:uNr(t),speedMultiplier:r,tier:t,value:t.id}})]}";
   const patched = applyPatchTwice(applyFallbackFastTierPatch, source);
   assert.match(patched, /t\?\.length\?t:\[codexLinuxApiKeyFastTier\(e\)\]/u);
+});
+
+test("service-tier gate rejects ambiguous, partial and retired boolean contracts", () => {
+  const source = currentGateFixture();
+  const patched = applyApiKeyServiceTierGatePatch(source);
+  const partial = patched.replace("t[5]=o", "t[5]=a");
+  const retired = "function old(){let a=i?.authMethod===`chatgpt`||i?.authMethod===`personalAccessToken`,o=i?.authMethod??null;let d=a&&!u&&c!=null&&c?.requirements?.featureRequirements?.fast_mode!==!1;return{isServiceTierAllowed:d,isLoading:u}}";
+  const descriptor = descriptors.find(({id}) => id === "api-key-service-tier-gate");
+  for (const candidate of [source + source, patched + source, partial, retired]) {
+    assert.equal(descriptor.assetMatch(candidate), false);
+    captureWarnings(() => assert.equal(applyApiKeyServiceTierGatePatch(candidate), candidate));
+  }
+  assert.deepEqual(captureWarnings(() => {
+    assert.equal(applyApiKeyServiceTierGatePatch(retired), retired);
+  }), []);
+});
+
+test("service-tier gate rejects a recognizable unpatchable current access contract", () => {
+  const source = currentGateFixture().replace("resolveAccess(c)", "resolveAccess(c,other)");
+  assert.equal(hasApiKeyServiceTierGateShape(source), true);
+  assert.deepEqual(captureWarnings(() => {
+    assert.equal(applyApiKeyServiceTierGatePatch(source), source);
+  }), ["WARN: Could not find service tier auth gate - skipping API key service tier gate patch"]);
 });
 
 test("model list entries are marked only when loaded for API-key hosts", () => {
@@ -311,9 +342,9 @@ test("model list marker warning ignores unrelated app-main chunks", () => {
   }), []);
 });
 
-test("model list marker rejects the superseded pre-catalog signature byte-identically", () => {
+test("model list marker rejects the superseded pre-Daybreak signature byte-identically", () => {
   const source =
-    "function broken({additionalAvailableModels:e,apiKeyDaybreakSupported:q=!1,authMethod:t,availableModels:n,defaultModel:r,enabledReasoningEfforts:i,includeUltraReasoningEffort:a,isCustomModelProvider:o=!1,models:s,useHiddenModels:c}){return s.map(e=>({supportedReasoningEfforts:e.supportedReasoningEfforts,hasModelSupportingUltraReasoningEffort:e.isDefault}))}";
+    "function broken({additionalAvailableModels:e,authMethod:t,availableModels:n,defaultModel:r,enabledReasoningEfforts:i,hasConfiguredModelCatalog:h,includeUltraReasoningEffort:a,isCustomModelProvider:o=!1,models:s,useHiddenModels:c}){return s.map(e=>({supportedReasoningEfforts:e.supportedReasoningEfforts,hasModelSupportingUltraReasoningEffort:e.isDefault}))}";
 
   assert.equal(hasApiKeyModelListMappingShape(source), false);
   assert.deepEqual(captureWarnings(() => {

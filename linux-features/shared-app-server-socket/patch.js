@@ -18,13 +18,13 @@ function findTransportSymbols(source) {
 
   const sshClassSource = source.slice(classMatch.index, selectionLogIndex);
   const webSocketMatch = sshClassSource.match(
-    new RegExp(`new (${IDENT})\\.(${IDENT})\\((${IDENT}),\\{perMessageDeflate:!1,createConnection:`),
+    new RegExp(`new (${IDENT})\\.(${IDENT})\\((${IDENT}),\\{perMessageDeflate:!1,[^}]{0,160}createConnection:`),
   );
   if (webSocketMatch == null) return null;
   const [, namespace, webSocketClass, webSocketUrl] = webSocketMatch;
   const lifecycleMatch = sshClassSource.match(
     new RegExp(
-      `let ${IDENT}=new ${namespace}\\.(${IDENT})\\((${IDENT}),[^;]{0,120}\\);return ${namespace}\\.(${IDENT})\\(\\2,\\{onPongTimeout:`,
+      `let ${IDENT}=new ${namespace}\\.(${IDENT})\\((${IDENT}),[^;]{0,160}\\);[\\s\\S]{0,800}?${namespace}\\.(${IDENT})\\(\\2,\\{onPongTimeout:`,
     ),
   );
   if (lifecycleMatch == null) return null;
@@ -115,7 +115,7 @@ function applySharedAppServerSocketPatch(source) {
   const insertionIndex = insertionMatch.index + insertionMatch[0].length;
   const patchedFactory =
     factorySource.slice(0, insertionIndex) +
-    `if(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET&&e.hostConfig.kind===\`local\`)return new CodexLinuxSharedAppServerSocketTransport(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET,${getConfigOverrides});` +
+    `if(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET&&e.hostConfig.kind===\`local\`&&e.hostConfig.id===\`local\`)return new CodexLinuxSharedAppServerSocketTransport(process.env.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET,${getConfigOverrides});` +
     factorySource.slice(insertionIndex);
   return source.slice(0, factoryStart) + classSource + patchedFactory + source.slice(factoryEnd);
 }

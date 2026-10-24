@@ -33,8 +33,8 @@ package. Direct `./install.sh` builds must provide
 `CODEX_LINUX_READ_ALOUD_MCP_SOURCE`. Updater rebuilds reuse the packaged
 artifact and never invoke Cargo.
 
-If you also want the response-level speaker button and settings UI, enable both
-features:
+Updater rebuilds support `read-aloud-mcp` on its own. Enable both features if
+you also want the response-level speaker button and settings UI:
 
 ```json
 {
@@ -80,6 +80,7 @@ fallback.
 
 ```bash
 node linux-features/read-aloud-mcp/test.js
+node --test scripts/lib/package-common.test.js
 cargo check -p codex-read-aloud-linux
 cargo test -p codex-read-aloud-linux
 ```

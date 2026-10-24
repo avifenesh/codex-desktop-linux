@@ -1,0 +1,9 @@
+{
+  "id": "reasoning-visibility",
+  "title": "Reasoning Visibility Setting",
+  "description": "Add an opt-in General setting to show available reasoning summaries and keep them expanded after completion.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patchDescriptors": "./patch.js"
+  }
+}

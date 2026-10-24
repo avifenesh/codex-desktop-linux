@@ -2,12 +2,21 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
+const nativeLayout = require("./fixtures/native-layout.js");
+const nativeWindowGeometry = require("./fixtures/native-window-geometry.js");
+const nativeInputPolicy = require("./fixtures/native-input-policy.js");
+const nativePresentation = require("./fixtures/native-presentation.js");
+const { signal, session: kwinSession, bridgeForSession } = require("./fixtures/kwin-session.cjs");
+const settle = () => new Promise(resolve => setImmediate(resolve));
+require("./kwin-bridge.test.cjs");
+require("./renderer-gesture.test.cjs");
 
 const {
   discoverLinuxFeatureManifests,
@@ -17,13 +26,14 @@ const {
 const {
   DESCRIPTOR_ID,
   applyPetOverlayPatch,
+  applyPetOverlayRendererPatch,
   mergedPetOverlaySettings,
 } = require("./patch.js");
 
 function copyFeatureTo(featuresRoot) {
   const featureDir = path.join(featuresRoot, "pet-overlay");
   fs.mkdirSync(featureDir, { recursive: true });
-  for (const name of ["feature.json", "README.md", "patch.js", "launcher-hook.sh"]) {
+  for (const name of ["feature.json", "README.md", "patch.js", "launcher-hook.sh", "stage.sh", "native-kwin.cjs", "kwin-bridge.cjs", "kwin-script.cjs"]) {
     fs.copyFileSync(path.join(__dirname, name), path.join(featureDir, name));
   }
 }
@@ -47,37 +57,84 @@ function captureWarnings(callback) {
 
 function currentAvatarOverlayBundleFixture() {
   return [
-    "let a=require(`electron`),f=require(`node:child_process`),hm=50;function sl(){return!1}function cl(){return!0}function ll(e){return e.getBounds?.()??e.getContentBounds?.()??null}function Cp(e){return e.workArea??e.bounds}function Dm(e,t){return{x:Number(e?.x??0)+Number(t?.x??0),y:Number(e?.y??0)+Number(t?.y??0)}}function sp(){return{shouldDock:!0}}function Vp(e){return e}",
+    "let a=require(`electron`),f=require(`node:child_process`),hm=50;function sl(){return!1}function cl(){return!0}function ll(e){return e.getBounds?.()??e.getContentBounds?.()??null}function Cp(e){return e.workArea??e.bounds}function Dm(e,t){return{x:Number(e?.x??0)+Number(t?.x??0),y:Number(e?.y??0)+Number(t?.y??0)}}function sp(){return{shouldDock:!0}}function Vp(e){return e}var D=a,u={v:`avatar-overlay-position`},Fe={default:(e,t)=>JSON.stringify(e)===JSON.stringify(t)},jle=200;function yu(){return null}function Pp(e){return{x:e.x+e.width/2,y:e.y+e.height/2}}function Np(e){return JSON.stringify(e)}function Kp(){return`top-end`}function Gp(e){return e}function Wp(e){return e.workArea??e.bounds}function nm(e,t){return{x:Math.max(t.x,Math.min(t.x+t.width,e.x)),y:Math.max(t.y,Math.min(t.y+t.height,e.y))}}var tle=Dm,Sp=sp;function Op(id){return a.screen.getAllDisplays().find(display=>display.id===id)}",
     "var settingsHandlers={\"set-setting\":async({key:e,value:t})=>(await this.setSettingValue(e,t),{success:!0})};",
     "var rV=`/avatar-overlay`,zB={width:356,height:320},oV={width:112,height:121},k2={width:0,height:0},O2={width:276,height:131};",
     "var h2=class{constructor(e,t,n,r){this.cursorSource=e;this.pointerAnchorX=t;this.pointerAnchorY=n;this.displayBounds=r;this.hasMovementIntent=!1;this.hasMoved=!1}getCursorPointForSource({native:e,renderer:t}){return this.cursorSource===`native`?e:t}recordMove(e){this.hasMovementIntent=!0,this.hasMoved=!0,this.displayBounds=e}recordMovementIntent(){this.hasMovementIntent=!0}shouldSuppressRendererThrow(){return!1}};",
     "var fV=class{window=null;rendererReady=!1;layout=null;mascotSize=oV;traySize=null;pointerInteractive=!1;mousePassthroughEnabled=!1;windowStagedForNativePresentation=!1;layoutMode=`native`;nativeWindowDragStart=null;nativeWindowDragActive=!1;nativeWindowDragCompletionTimer=null;nativeWindowDragTargetRegistered=!1;hasDeferredLayout=!1;isQuickChatPresentation=!1;presentationOffset={x:0,y:0};anchor={x:0,y:0,width:112,height:121};compositionHost={setOverlayWindow(){},isNativeMaterialAttached(){return!1},updateMascotRect(){}};nativePositionController={clear(){}};",
     "constructor(e,t){this.windowManager=e,this.globalState=t}",
     "isOpen(){let e=this.window;return e!=null&&!e.isDestroyed()&&e.isVisible()&&!this.windowStagedForNativePresentation}",
-    "startDrag(e,t,n=!1){let r=this.window;if(r==null||r.isDestroyed()||r.webContents.id!==e)return;this.nativeWindowDragActive&&this.endDrag(e,void 0,`button-released`),this.cancelMomentum(),this.clearMovedWindowPersist(),this.clearNativeWindowDragCompletionTimer(),this.dockRestoreAnchor=null,this.nativeWindowDragActive=!1,this.suppressNextRendererThrow=!1,this.clearDetachedDisplayRestore();let i=this.getLayout(r),o=t.pointerScreenX!=null&&t.pointerScreenY!=null?{x:t.pointerScreenX,y:t.pointerScreenY}:a.screen.getCursorScreenPoint(),s=t.pointerWindowX-i.mascot.left,c=t.pointerWindowY-i.mascot.top;this.dragState=new h2(`renderer`,s,c,a.screen.getDisplayNearestPoint(o).bounds),this.nativeWindowDragStart=this.layoutMode===`native`&&this.nativeWindowDragTargetRegistered&&!n?{pointerScreenX:o.x,pointerScreenY:o.y}:null}",
-    "moveDrag(e,t){let n=this.window;if(n==null||n.isDestroyed()||n.webContents.id!==e||this.dragState==null)return;this.cancelMomentum();let r=this.dragState;if(r.recordMovementIntent(),this.nativeWindowDragActive)return;let i=this.nativeWindowDragStart;if(this.nativeWindowDragStart=null,i!=null){this.nativeWindowDragActive=!0;let e=this.getLayout(n).mascot,t=sl(n,i,a.screen.getAllDisplays().map(t=>{let n=Cp(t,this.layoutMode),r=this.getLayoutForDisplay(t,{...this.anchor,x:this.isQuickChatPresentation?n.x-this.mascotSize.width+26:n.x,y:n.y}).anchor,i=this.getLayoutForDisplay(t,{...this.anchor,x:n.x+n.width-(this.isQuickChatPresentation?26:0),y:n.y+n.height}).anchor;return{displayBounds:t.bounds,windowOriginBounds:{x:r.x-e.left,y:r.y-e.top,width:Math.max(0,i.x-r.x),height:Math.max(0,i.y-r.y)}}}));if(this.nativeWindowDragActive=t,this.logger().info(`Native pet window drag handoff`,{safe:{driver:`appkit-events`,started:t}}),t){this.nativeWindowDragCompletionTimer=setInterval(()=>{cl(n)||this.endDrag(n.webContents.id,void 0,`button-released`)},hm);return}}let o=a.screen.getCursorScreenPoint(),s=r.getCursorPointForSource({native:null,renderer:{x:t?.pointerScreenX??o.x,y:t?.pointerScreenY??o.y}});s!=null&&this.moveDragToPointer(n,s)}endDrag(e,t,n=`released`){let r=this.window;if(r==null||r.isDestroyed()||r.webContents.id!==e||this.dragState==null)return;let i=this.dragState,o=this.nativeWindowDragActive,s=o?ll(r):null;if(o)this.handleNativeWindowDragMove(r,s??void 0),this.logger().info(`Native pet window drag finished`,{safe:{reason:n}});else if(i.hasMovementIntent){let e=a.screen.getCursorScreenPoint(),n=i.getCursorPointForSource({native:null,renderer:{x:t?.pointerScreenX??e.x,y:t?.pointerScreenY??e.y}});n!=null&&this.moveDragToPointer(r,n)}if(this.suppressNextRendererThrow=o||i.shouldSuppressRendererThrow(),this.dragState=null,this.clearNativeWindowDragCompletionTimer(),this.nativeWindowDragActive=!1,this.nativeWindowDragStart=null,o?(this.rememberMovedWindow(r,s??this.layout?.windowBounds),(!this.isQuickChatPresentation||!i.hasMovementIntent)&&this.persistWindowBounds(r)):(this.hasDeferredLayout=!1,(!this.isQuickChatPresentation||!i.hasMovementIntent)&&this.reclampWindowToVisibleDisplay({shouldPersist:!0})),this.isQuickChatPresentation&&i.hasMovementIntent){let n=o||t==null?a.screen.getCursorScreenPoint():{x:t.pointerScreenX,y:t.pointerScreenY},i=a.screen.getDisplayNearestPoint(n);this.clearMovedWindowPersist(),this.hasDeferredLayout=!1;let s=null;if(n.x<=i.bounds.x+8?s=`left`:n.x>=i.bounds.x+i.bounds.width-8&&(s=`right`),s!=null&&a.screen.getDisplayNearestPoint({x:s===`left`?i.bounds.x-16:i.bounds.x+i.bounds.width+16,y:n.y}).id===i.id){this.setQuickChatStashed(e,s);return}o?this.persistWindowBounds(r):this.reclampWindowToVisibleDisplay({shouldPersist:!0}),this.snapQuickChatToPosition(i,Vp(n,i.workArea),!0);return}let c=this.dockTarget,l=Dm(this.anchor,this.presentationOffset);c!=null&&sp({current:l,next:l,target:{x:c.anchor.centerX,y:c.anchor.centerY}}).shouldDock&&this.dockPresentation(c.anchor,c.onDock)}",
+    "focusQuickChat(e){let t=this.window;this.windowManager.sendMessageToWebContents(t.webContents,{type:`avatar-overlay-action`,action:e==null?{type:`focus-quick-chat`}:{type:`focus-quick-chat`,requestId:e,wasHidden:!0}})}",
+    "setKeyboardInteraction(e,t,n=!1){let r=this.window;if(r==null||r.isDestroyed()||r.webContents.id!==e||t&&(!this.shouldPresentWindow()||this.pendingQuickChatFocus!=null))return;this.applyPointerInteractivityPolicy();let i=this.nonactivatingPanelBridge?.fromPointer(r.getNativeWindowHandle()).window()??null;if(!t){if(this.visibilityMode===`on-demand`&&!this.hiddenOnDemand&&this.nativeAppearanceBridge==null&&r.isVisible()){this.handleQuickChatKeyboardInteraction(!1);return}i?.isKeyWindow()&&i.resignKeyWindow(),r.setFocusable(!1),this.refreshNativeActiveAppearance(r),this.handleQuickChatKeyboardInteraction(!1,n&&i==null);return}this.handleQuickChatKeyboardInteraction(!0),r.setFocusable(!0),this.refreshNativeActiveAppearance(r),i==null?(this.windowManager.setPendingAuxiliaryActivationTarget(r),r.show(),process.platform===`darwin`&&D.app.focus({steal:!0}),r.focus(),r.webContents.focus()):(r.showInactive(),i.makeKeyAndOrderFront$(null)),this.applyPointerInteractivityPolicy(),this.logger().debug(`Pet keyboard focus requested`,{safe:{nonactivating:i!=null,isKeyWindow:i?.isKeyWindow()}}),this.windowManager.sendMessageToWebContents(r.webContents,{type:this.isNotchEnabled?`notch-overlay-keyboard-interaction-ready`:`avatar-overlay-keyboard-interaction-ready`})}",
+    "unregisterNativeWindowDragTarget(e){try{this.nativeWindowDragActive&&this.window!=null&&(this.suppressNextRendererThrow=!0)}finally{this.clearNativeWindowDragCompletionTimer(),this.dragState=null,this.hasDeferredLayout=!1,this.nativeWindowDragTargetRegistered=!1,this.nativeWindowDragStart=null,this.nativeWindowDragActive=!1}}",
+    "startDrag(e,t,n=!1){let r=this.window;if(r==null||r.isDestroyed()||r.webContents.id!==e)return;this.nativeWindowDragActive&&this.endDrag(e,void 0,!1,`button-released`),this.cancelMomentum(),this.clearMovedWindowPersist(),this.clearNativeWindowDragCompletionTimer(),this.dockRestoreAnchor=null,this.nativeWindowDragActive=!1,this.suppressNextRendererThrow=!1,this.clearDetachedDisplayRestore();let i=this.getLayout(r),o=t.pointerScreenX!=null&&t.pointerScreenY!=null?{x:t.pointerScreenX,y:t.pointerScreenY}:a.screen.getCursorScreenPoint(),s=t.pointerWindowX-i.mascot.left,c=t.pointerWindowY-i.mascot.top;this.dragState=new h2(`renderer`,s,c,a.screen.getDisplayNearestPoint(o).bounds),this.nativeWindowDragStart=this.layoutMode===`native`&&this.nativeWindowDragTargetRegistered&&!n?{pointerScreenX:o.x,pointerScreenY:o.y}:null}",
+    "moveDrag(e,t){let n=this.window;if(n==null||n.isDestroyed()||n.webContents.id!==e||this.dragState==null)return;this.cancelMomentum();let r=this.dragState;if(r.recordMovementIntent(),this.nativeWindowDragActive)return;let i=this.nativeWindowDragStart;if(this.nativeWindowDragStart=null,i!=null){this.nativeWindowDragActive=!0;let e=this.getLayout(n).mascot,t=sl(n,i,a.screen.getAllDisplays().map(t=>{let n=Cp(t,this.layoutMode),r=this.getLayoutForDisplay(t,{...this.anchor,x:this.isQuickChatPresentation?n.x-this.mascotSize.width+26:n.x,y:n.y}).anchor,i=this.getLayoutForDisplay(t,{...this.anchor,x:n.x+n.width-(this.isQuickChatPresentation?26:0),y:n.y+n.height}).anchor;return{displayBounds:t.bounds,windowOriginBounds:{x:r.x-e.left,y:r.y-e.top,width:Math.max(0,i.x-r.x),height:Math.max(0,i.y-r.y)}}}));if(this.nativeWindowDragActive=t,this.logger().info(`Native pet window drag handoff`,{safe:{driver:`appkit-events`,started:t}}),t){this.nativeWindowDragCompletionTimer=setInterval(()=>{cl(n)||this.endDrag(n.webContents.id,void 0,!1,`button-released`)},hm);return}}let o=a.screen.getCursorScreenPoint(),s=r.getCursorPointForSource({native:null,renderer:{x:t?.pointerScreenX??o.x,y:t?.pointerScreenY??o.y}});s!=null&&this.moveDragToPointer(n,s)}endDrag(e,t,n=!1,r=`released`){let i=this.window;if(i==null||i.isDestroyed()||i.webContents.id!==e||this.dragState==null)return;let a=this.dragState,o=this.nativeWindowDragActive,s=o?yu(i):null,c=s?.bounds,l=o?s?.altKey===!0:n;if(o)this.handleNativeWindowDragMove(i,c),this.logger().info(`Native pet window drag finished`,{safe:{reason:r}});else if(a.hasMovementIntent){let e=D.screen.getCursorScreenPoint(),n=a.getCursorPointForSource({native:null,renderer:{x:t?.pointerScreenX??e.x,y:t?.pointerScreenY??e.y}});n!=null&&this.moveDragToPointer(i,n)}if(this.suppressNextRendererThrow=o||a.shouldSuppressRendererThrow(),this.dragState=null,this.clearNativeWindowDragCompletionTimer(),this.nativeWindowDragActive=!1,this.nativeWindowDragStart=null,a.hasMovementIntent&&(this.isFreelyPositioned=!l,this.snapPosition=null),l&&a.hasMovementIntent){let e=D.screen.getCursorScreenPoint();o?e={x:this.anchor.x+a.pointerAnchorX,y:this.anchor.y+a.pointerAnchorY}:t!=null&&(e={x:t.pointerScreenX,y:t.pointerScreenY});let n=D.screen.getDisplayNearestPoint(e),r=nm(e,n.workArea);this.clearMovedWindowPersist(),this.hasDeferredLayout=!1,this.suppressNextRendererThrow=!0,this.isQuickChatPresentation?this.snapQuickChatToPosition(n,r,!0):(this.snapPosition=r,this.animatePresentationTo(this.getPetSnapAnchor(n,r),{x:0,y:0},()=>this.persistWindowBounds(i,n),null,!0));return}o?(this.rememberMovedWindow(i,c??this.layout?.windowBounds),this.persistWindowBounds(i)):(this.hasDeferredLayout=!1,this.reclampWindowToVisibleDisplay({shouldPersist:!0}));let u=this.dockTarget,d=tle(this.anchor,this.presentationOffset);u!=null&&Sp({current:d,next:d,target:{x:u.anchor.centerX,y:u.anchor.centerY}}).shouldDock&&this.dockPresentation(u.anchor,u.onDock)}",
     "setElementSize(e,{elementSizeRevision:t,isTrayVisible:n,mascot:r,nativeCompositionEnabled:a,tray:o}){let i=this.window;i==null||i.isDestroyed()||i.webContents.id!==e||(this.cancelMomentum(),this.layoutMode=n==null?`native`:`legacy`,this.mascotSize=r,this.traySize=o,this.applyLatestElementSizes(i),this.stageWindowForNativePresentation(i),this.showWindowIfReady(i))}",
     "applyLatestElementSizes(e){this.anchor={...this.anchor,width:this.mascotSize.width,height:this.mascotSize.height},this.applyLayout(e)}",
     "async createWindow(e){let t=await this.windowManager.createWindow({title:a.app.getName(),width:zB.width,height:zB.height,appearance:`avatarOverlay`,alwaysOnTop:process.platform===`linux`,skipTaskbar:process.platform===`linux`,focusable:process.platform===`linux`?!0:!1,show:!1,initialRoute:rV});return this.window=t,this.compositionHost.setOverlayWindow(t),this.rendererReady=this.windowManager.isWebContentsReady(t.webContents.id),this.displayBounds=null,this.displayId=null,this.dragState=null,this.layout=null,this.mascotSize=oV,this.mousePassthroughEnabled=!1,this.traySize=null,t.on(`closed`,()=>{this.window===t&&(this.cancelMomentum(),this.window=null,this.dragState=null,this.layout=null,this.rendererReady=!1,this.pointerInteractive=!1,this.mousePassthroughEnabled=!1,this.compositionHost.setOverlayWindow(null),this.broadcastOpenState())}),t}",
-    "applyLayout(e,t=this.getCurrentDisplay(),n=!1,r=!0,i=null){if(e.isDestroyed())return;let o=this.getLayoutForDisplay(t);this.displayId=t.id,this.layout=o,this.setWindowBounds(e,o.windowBounds,n,r),this.compositionHost.updateMascotRect(o.mascot),this.sendLayoutToRenderer(e,i)}getLayoutForDisplay(e){return UB({anchor:this.anchor,displayBounds:this.layoutMode===`native`?e.workArea:e.bounds,mode:this.layoutMode,mascotSize:this.mascotSize,nativeMaterialAttached:this.compositionHost.isNativeMaterialAttached(),previousPlacement:this.placement,traySize:this.traySize??(this.layoutMode===`native`?k2:O2)})}getLayout(e){if(this.layout??this.applyLayout(e),this.layout==null)throw Error(`Expected avatar overlay layout`);return this.layout}",
+    "applyLayout(e,t=this.getCurrentDisplay(),n=!1){if(e.isDestroyed())return;if(this.nativeWindowDragActive||this.movedWindowPersistTimer!=null){this.hasDeferredLayout=!0,this.handleNativeWindowDragMove(e);return}let r=this.getLayoutForDisplay(t);this.quickChatResizeDrawAnchor!=null&&(this.quickChatDrawOffset={x:this.quickChatResizeDrawAnchor.x-r.anchor.x,y:this.quickChatResizeDrawAnchor.y-r.anchor.y}),this.displayId=t.id,this.resolutionKey=Np(t.bounds),this.displayBounds=t.bounds,this.anchor={...r.anchor,y:this.realtimeCaptionAboveMascotPx>0?this.anchor.y:r.anchor.y},this.layout=r,this.placement=r.placement,this.setWindowBounds(e,r.windowBounds,n),this.publishRemoteHostedPIPContentHost(),this.sendLayoutToRenderer(e),this.computerUseCursorLocation!=null&&this.dragState==null&&this.sendComputerUseCursorLocationToRenderer(e)}getLayoutForDisplay(e,t=this.anchor){let l=a.screen.getAllDisplays(),n=UB({anchor:t,constrainNativeDrawWindowToDisplay:process.platform===`win32`,nativeDrawWindowBounds:process.platform===`darwin`&&l.length>1?e.bounds:void 0,displayBounds:this.layoutMode===`native`?e.workArea:e.bounds,mode:this.layoutMode,mascotSize:this.mascotSize,nativeMaterialAttached:this.compositionHost.isNativeMaterialAttached(),previousPlacement:this.placement,traySize:this.traySize??(this.layoutMode===`native`?k2:O2)});return n}getLayout(e){if(this.layout??this.applyLayout(e),this.layout==null)throw Error(`Expected avatar overlay layout`);return this.layout}",
     "showWindow(e){if(e.isDestroyed())return;let t=this.isOpen();this.windowStagedForNativePresentation&&=(e.setOpacity(1),!1),e.moveTop(),e.showInactive(),!t&&this.isOpen()&&(this.finishPendingPresentation(),this.broadcastOpenState())}showWindowIfReady(e){!this.rendererReady||this.initialPresentationState!==`ready`||(this.showWindow(e),this.applyPointerInteractivityPolicy())}stageWindowForNativePresentation(e){e.isDestroyed()||this.applyPointerInteractivityPolicy()}broadcastOpenState(){this.windowManager.sendMessageToAllRegisteredWindows({type:`avatar-overlay-open-state-changed`,isOpen:this.isOpen()})}",
-    "applyPointerInteractivityPolicy(){return null}cancelMomentum(){}clearMovedWindowPersist(){}clearDetachedDisplayRestore(){}clearNativeWindowDragCompletionTimer(){}finishPendingPresentation(){}handleNativeWindowDragMove(){}logger(){return{info(){}}}moveDragToPointer(){}persistWindowBounds(){}reclampWindowToVisibleDisplay(){}rememberMovedWindow(e,t){this.rememberedWindowBounds=t}sendLayoutToRenderer(){}setQuickChatStashed(){}setWindowBounds(){}snapQuickChatToPosition(){}getCurrentDisplay(){return{id:1,bounds:{x:0,y:0,width:1920,height:1080},workArea:{x:0,y:0,width:1920,height:1080}}}};",
+    "publishRemoteHostedPIPContentHost(){}isOverlayWindowPointerDragActive(){return!1}applyPointerInteractivityPolicy(){return null}cancelMomentum(){}clearMovedWindowPersist(){this.movedWindowPersistTimer!=null&&(clearTimeout(this.movedWindowPersistTimer),this.movedWindowPersistTimer=null)}clearDetachedDisplayRestore(){}clearNativeWindowDragCompletionTimer(){}finishPendingPresentation(){}handleNativeWindowDragMove(e,t){let n=this.layout;if(e.isDestroyed()||n==null)return;let r=t??e.getContentBounds();this.anchor={...this.anchor,x:r.x+n.mascot.left,y:r.y+n.mascot.top};let i=D.screen.getDisplayNearestPoint(Pp(this.anchor));this.dragState?.recordMove(i.bounds),this.displayBounds=i.bounds,this.displayId=i.id,this.resolutionKey=Np(i.bounds),this.placement=Kp(this.anchor,i.workArea);let a=this.getLayoutForDisplay(i);this.layout={...a,anchor:this.anchor,mascot:n.mascot,quickChat:a.quickChat==null?void 0:{...a.quickChat,workArea:Gp(r,i.workArea)},tray:a.tray==null?null:{...a.tray,left:a.windowBounds.x+a.tray.left-r.x,top:a.windowBounds.y+a.tray.top-r.y},viewport:{width:r.width,height:r.height},visibleBounds:Gp(r,Wp(i,this.layoutMode)),windowBounds:r},this.placement=a.placement,this.publishRemoteHostedPIPContentHost(),this.sendLayoutToRenderer(e)}logger(){return{info(){}}}moveDragToPointer(){}persistWindowBounds(e,t=this.getCurrentDisplay()){if(this.isNotchEnabled||e.isDestroyed())return;let n=t.bounds,r={x:this.anchor.x+this.presentationOffset.x,y:this.anchor.y+this.presentationOffset.y,displayBounds:n,displayId:t.id,placement:this.placement,isFreelyPositioned:this.isFreelyPositioned,snapPosition:this.snapPosition},i=this.globalState.get(u.v),a=Np(n);this.displayId=t.id,this.resolutionKey=a;let o={...r,byDisplayId:{...i?.byDisplayId,[String(t.id)]:r},byResolution:{...i?.byResolution,[a]:r}};(0,Fe.default)(i,o)||this.isNotchManager||this.globalState.set(u.v,o)}reclampWindowToVisibleDisplay({shouldPersist:e}){let t=this.window;if(t==null||t.isDestroyed())return;let n=this.getCurrentDisplay();this.applyLayout(t,n),e&&this.persistWindowBounds(t,n)}rememberMovedWindow(e,t){if(e.isDestroyed()||this.layout==null)return;let n=t??e.getContentBounds();this.anchor={...this.anchor,x:n.x+this.layout.mascot.left,y:n.y+this.layout.mascot.top};let r=D.screen.getDisplayNearestPoint(Pp(this.anchor));this.displayBounds=r.bounds,this.displayId=r.id,this.resolutionKey=Np(r.bounds),this.isOverlayWindowPointerDragActive()&&this.clearDetachedDisplayRestore(),this.clearMovedWindowPersist(),this.movedWindowPersistTimer=setTimeout(()=>{if(this.movedWindowPersistTimer=null,this.isOverlayWindowPointerDragActive()){this.rememberMovedWindow(e);return}this.hasDeferredLayout&&(this.hasDeferredLayout=!1,this.applyLatestElementSizes(e)),this.applyPointerInteractivityPolicy(),this.reclampWindowToVisibleDisplay({shouldPersist:!0})},jle)}sendLayoutToRenderer(){}setQuickChatStashed(){}setWindowBounds(e,t,n){if(!(e.isDestroyed()||Fe.default(e.getContentBounds(),t))){this.isSettingWindowBounds=!0;try{e.setContentBounds(t,n)}finally{this.isSettingWindowBounds=!1}}}snapQuickChatToPosition(){}getCurrentDisplay(){if(this.windowPresentation!=null)return this.windowPresentation.getDisplay();if(this.displayId!=null){let e=Op(this.displayId);if(e!=null)return e}return D.screen.getDisplayNearestPoint(Pp(this.anchor))}};",
     "function L9({platform:e,appearance:t,opaqueWindowSurfaceEnabled:n,prefersDarkColors:r}){return n?{backgroundColor:r?_ne:vne,backgroundMaterial:e===`win32`?`none`:null}:e===`win32`?{backgroundColor:k9,backgroundMaterial:`mica`}:{backgroundColor:k9,backgroundMaterial:null}}",
   ].join("").replace(
     "if(r.recordMovementIntent(),this.nativeWindowDragActive)return;",
     "if(r.recordMovementIntent(),this.quickChatStashedEdge!=null&&(this.quickChatStashedEdge=null,this.quickChatPosition=null,this.isFreelyPositioned=!0),this.nativeWindowDragActive)return;",
-  );
+  ).replace("publishRemoteHostedPIPContentHost(){}isOverlayWindowPointerDragActive(){return!1}",
+    nativeWindowGeometry + "isRemoteHostedPIPEnabled(){return!1}")
+    .replace("snapQuickChatToPosition(){}", "")
+    .replace("setQuickChatStashed(){}", nativeInputPolicy.slice(0, nativeInputPolicy.indexOf("}applyPointerInteractivityPolicy(") + 1) + "setQuickChatStashed(){}")
+    .replace("sendLayoutToRenderer(){}", "sendLayoutToRenderer(){let e=tm(this.layout),t=e;}") +
+    "function tm(e){return{...e}}var qde=class{completeQuickChatFocus(e,t){return this.manager.completeQuickChatFocus(this.origin.id,e,t)}};" +
+    "function fL(n){return n.pointerScreenX==null?null:{pointerScreenX:n.pointerScreenX,pointerScreenY:n.pointerScreenY}}" +
+    "function dragMessage(e,t,n){switch(n.type){case`avatar-overlay-drag-start`:{let r=fL(n),i=r==null?{pointerWindowX:n.pointerWindowX,pointerWindowY:n.pointerWindowY}:{...r,pointerWindowX:n.pointerWindowX,pointerWindowY:n.pointerWindowY};e.startDrag(t.id,i,n.usesOrbPhysics);return}}}";
 }
 
 function retiredCompactDragCompletionBundleFixture() {
   const source = currentAvatarOverlayBundleFixture();
-  const start = source.indexOf("endDrag(e,t,n=`released`){");
+  const start = source.indexOf("endDrag(e,t,n=!1,r=`released`){");
   const end = source.indexOf("setElementSize(e,", start);
   assert.ok(start >= 0 && end > start);
   const retiredEnd =
     "endDrag(e,t){let n=this.window;if(n==null||n.isDestroyed()||n.webContents.id!==e)return;let r=this.dragState,i=this.windowServerDragActive,a=null;this.dragState=null,this.windowServerDragActive=!1,this.windowServerDragWindowX=null,i?this.persistWindowBounds(n,a??this.getCurrentDisplay()):this.reclampWindowToVisibleDisplay({shouldPersist:!0});let o=this.dockTarget;o!=null&&this.dockPresentation(o.anchor,o.onDock)}";
   return source.slice(0, start) + retiredEnd + source.slice(end);
 }
+
+function nativePresentationBundleFixture() {
+  const source = currentAvatarOverlayBundleFixture();
+  const start = source.indexOf("showWindow(e){");
+  const end = source.indexOf("showWindowIfReady(e){", start);
+  assert.ok(start >= 0 && end > start);
+  return source.slice(0, start) + nativePresentation + source.slice(end);
+}
+
+test("native gesture service fails closed when RPC, dispatch or layout anchors drift", () => {
+  const original = currentAvatarOverlayBundleFixture();
+  for (const anchor of ["this.manager.completeQuickChatFocus", "case`avatar-overlay-drag-start`", "=tm(this.layout),"])
+    assert.equal(captureWarnings(() => applyPetOverlayPatch(original.replace(anchor, "drifted"))).result,
+      original.replace(anchor, "drifted"));
+  const duplicate = original + "var other=class{completeQuickChatFocus(e,t){return this.manager.completeQuickChatFocus(this.origin.id,e,t)}}";
+  assert.equal(captureWarnings(() => applyPetOverlayPatch(duplicate)).result, duplicate);
+});
+
+test("gesture identity reaches the controller and RPC completion retains its origin renderer", async () => {
+  const { context } = controllerFromPatchedSource(applyPetOverlayPatch(currentAvatarOverlayBundleFixture()));
+  const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  for (const screen of [undefined, 100]) {
+    let received;
+    context.dragMessage({ startDrag: (...args) => { received = args; } }, { id: 7 }, {
+      type: "avatar-overlay-drag-start", codexPetOverlayGestureId: id, pointerScreenX: screen, pointerWindowX: 74, pointerWindowY: 74,
+    });
+    assert.equal(received[0], 7);
+    assert.equal(received[1].codexPetOverlayGestureId, id);
+    assert.equal(received[1].pointerWindowX, 74);
+  }
+  const service = new context.qde();
+  service.origin = { id: 7 };
+  service.manager = { codexPetOverlayCompleteRendererDrag: (...args) => args };
+  assert.deepEqual(service.codexPetOverlayCompleteDrag(id, false), [7, id, false, null]);
+  const sample = { pointerScreenX: 130, pointerScreenY: 100 };
+  assert.deepEqual(service.codexPetOverlayCompleteDrag(id, false, sample), [7, id, false, sample]);
+});
 
 function legacyAvatarOverlayBundleFixture() {
   return [
@@ -94,14 +151,31 @@ function legacyAvatarOverlayBundleFixture() {
 function controllerFromPatchedSource(patched, overrides = {}) {
   const context = {
     globalThis: {},
+    Date: overrides.Date ?? Date,
     process: {
       env: {},
       pid: 4242,
       platform: "linux",
+      resourcesPath: "/fixture/resources",
       ...overrides.process,
     },
     clearTimeout: overrides.clearTimeout ?? clearTimeout,
+    setInterval: overrides.setInterval ?? setInterval,
+    clearInterval: overrides.clearInterval ?? clearInterval,
+    Cle: 32,
+    Me: 356,
+    am: 12,
+    je: {},
+    Ip: (point, rect) => point.x >= rect.x && point.y >= rect.y &&
+      point.x <= rect.x + rect.width && point.y <= rect.y + rect.height,
+    Pu: (...args) => { context.globalThis.contentHost = args; return true; },
+    rm: (point, _display, _mascot, size) => ({ ...point, ...size }),
     require(moduleName) {
+      if (moduleName.endsWith("/pet-overlay/kwin-bridge.cjs")) return { KWinBridge: overrides.KWinBridge ?? class {
+        epoch = 1;
+        request() { return Promise.resolve(null); }
+        invalidate() { this.epoch += 1; return Promise.resolve(); }
+      } };
       if (moduleName === "node:child_process") {
         return overrides.childProcess ?? { execFile() {} };
       }
@@ -110,7 +184,10 @@ function controllerFromPatchedSource(patched, overrides = {}) {
       if (moduleName === "node:path") return path;
       if (moduleName === "electron") {
         return {
-          app: { getName: () => "Codex" },
+          app: {
+            getName: () => "Codex",
+            commandLine: { getSwitchValue: () => overrides.ozonePlatform ?? "" },
+          },
           screen: {
             getCursorScreenPoint: () => ({ x: 0, y: 0 }),
             getDisplayNearestPoint: () => ({
@@ -123,6 +200,7 @@ function controllerFromPatchedSource(patched, overrides = {}) {
               id: 1,
               workArea: { x: 0, y: 0, width: 1920, height: 1080 },
             }],
+            ...overrides.screen,
           },
         };
       }
@@ -140,8 +218,10 @@ function controllerFromPatchedSource(patched, overrides = {}) {
   vm.runInNewContext(`${patched};globalThis.Controller=fV;`, context);
   const controller = new context.globalThis.Controller(
     { isWebContentsReady: () => true, sendMessageToAllRegisteredWindows() {} },
-    { set() {} },
+    { get() {}, set() {} },
   );
+  controller.shouldPresentWindow ??= () => true;
+  controller.setPetPointerProximity ??= () => {};
   return { context, controller };
 }
 
@@ -177,7 +257,11 @@ test("pet-overlay is discoverable and disabled until listed in features.json", (
     const descriptors = loadLinuxFeaturePatchDescriptors({ featuresRoot });
     assert.deepEqual(
       descriptors.map((descriptor) => [descriptor.id, descriptor.phase, descriptor.ciPolicy]),
-      [[`feature:pet-overlay:${DESCRIPTOR_ID}`, "main-bundle", "optional"]],
+      [
+        ["feature:pet-overlay:pet-overlay-kwin-gesture", "webview-asset", "optional"],
+        [`feature:pet-overlay:${DESCRIPTOR_ID}`, "main-bundle", "optional"],
+        ["feature:pet-overlay:pet-overlay-hidden-focus", "webview-asset", "optional"],
+      ],
     );
     const plan = enabledLinuxFeatureInstallPlan({ featuresRoot });
     assert.deepEqual(
@@ -187,6 +271,97 @@ test("pet-overlay is discoverable and disabled until listed in features.json", (
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+const quickChatFocusFixture = `function action(t){let e=t.requestId;return cr({requestId:e,layoutRevision:null})}
+function prepare(o,u,f){if(u==null||o?.layoutRevision==null)return;let{requestId:e,layoutRevision:t}=o,n=window.requestAnimationFrame(()=>{n=window.requestAnimationFrame(()=>{u.completeQuickChatFocus(e,t).then(t=>{t&&f(e)}).catch(failed)})});return()=>{window.cancelAnimationFrame(n)}}`;
+
+function quickChatFocusScenario(visibilityState) {
+  let serial = 0;
+  const timers = new Map(), frames = new Map(), calls = [], completed = [], errors = [];
+  const context = {
+    document: { visibilityState: "visible" },
+    cr: value => value,
+    window: {
+      setTimeout: callback => { timers.set(++serial, callback); return serial; },
+      clearTimeout: id => timers.delete(id),
+      requestAnimationFrame: callback => { frames.set(++serial, callback); return serial; },
+      cancelAnimationFrame: id => frames.delete(id),
+    },
+    failed: error => errors.push(error),
+  };
+  const patched = applyPetOverlayRendererPatch(quickChatFocusFixture);
+  assert.equal(applyPetOverlayRendererPatch(patched), patched);
+  vm.runInNewContext(patched, context);
+  const api = { completeQuickChatFocus: (...args) => { calls.push(args); return Promise.resolve(true); } };
+  const prepare = value => {
+    const preparation = context.action({ requestId: value.requestId, codexPetOverlayHiddenFocus: visibilityState === "hidden" });
+    preparation.layoutRevision = value.layoutRevision;
+    return context.prepare(preparation, api, id => completed.push(id));
+  };
+  const run = queue => {
+    const [id, callback] = queue.entries().next().value;
+    queue.delete(id);
+    callback();
+  };
+  return { timers, frames, calls, completed, errors, api, prepare, run };
+}
+
+for (const state of ["hidden", "visible"]) {
+  test(`Mini focus completes after two stages in a ${state} renderer`, async () => {
+    const scenario = quickChatFocusScenario(state);
+    scenario.prepare({ requestId: 9, layoutRevision: 12 });
+    const queue = state === "hidden" ? scenario.timers : scenario.frames;
+    assert.equal((state === "hidden" ? scenario.frames : scenario.timers).size, 0);
+    assert.equal(queue.size, 1);
+    scenario.run(queue);
+    assert.equal(scenario.calls.length, 0);
+    scenario.run(queue);
+    await Promise.resolve();
+    assert.deepEqual(scenario.calls, [[9, 12]]);
+    assert.deepEqual(scenario.completed, [9]);
+  });
+
+  for (const stage of [0, 1]) test(`Mini focus cancellation clears stage ${stage} in a ${state} renderer`, () => {
+    const scenario = quickChatFocusScenario(state);
+    const cancel = scenario.prepare({ requestId: 9, layoutRevision: 12 });
+    const queue = state === "hidden" ? scenario.timers : scenario.frames;
+    if (stage) scenario.run(queue);
+    cancel();
+    assert.equal(queue.size, 0);
+    assert.equal(scenario.calls.length, 0);
+  });
+}
+
+test("Mini focus waits for layout readiness and preserves native rejection and error handling", async () => {
+  const scenario = quickChatFocusScenario("hidden");
+  scenario.prepare({ requestId: 9, layoutRevision: null });
+  assert.equal(scenario.timers.size, 0);
+  scenario.api.completeQuickChatFocus = () => Promise.resolve(false);
+  scenario.prepare({ requestId: 9, layoutRevision: 12 });
+  scenario.run(scenario.timers);
+  scenario.run(scenario.timers);
+  await Promise.resolve();
+  assert.deepEqual(scenario.completed, []);
+  const error = new Error("Focus API unavailable");
+  scenario.api.completeQuickChatFocus = () => Promise.reject(error);
+  scenario.prepare({ requestId: 9, layoutRevision: 12 });
+  scenario.run(scenario.timers);
+  scenario.run(scenario.timers);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(scenario.errors, [error]);
+});
+
+test("Mini focus renderer patch rejects missing and duplicate scheduling anchors", () => {
+  assert.throws(() => applyPetOverlayRendererPatch(quickChatFocusFixture.replace(".completeQuickChatFocus(", ".other(")));
+  assert.throws(() => applyPetOverlayRendererPatch(quickChatFocusFixture + quickChatFocusFixture));
+});
+
+test("Mini focus renderer patch handles renamed minified identifiers and fails closed on action drift", () => {
+  const renamed = quickChatFocusFixture.replace(/\b[etnouf]\b/g, id => `$${id}`);
+  assert.doesNotThrow(() => new vm.Script(applyPetOverlayRendererPatch(renamed)));
+  assert.throws(() => applyPetOverlayRendererPatch(quickChatFocusFixture.replace("layoutRevision:null", "other:null")));
 });
 
 test("does not hard-code a default or custom pet", () => {
@@ -236,6 +411,79 @@ test("patches current avatar overlay layout, transparency, and window sync", () 
   assert.match(patched, /setSkipTaskbar/);
   assert.match(patched, /t===`avatarOverlay`\?\{backgroundColor:`#00000000`,backgroundMaterial:null\}/);
   assert.equal((patched.match(/codexPetOverlayLayoutForDisplay/g) ?? []).length, 2);
+});
+
+for (const [platform, ozonePlatform, expected] of [
+  ["linux", "wayland", true],
+  ["linux", "x11", false],
+  ["linux", "", false],
+  ["win32", "", true],
+  ["darwin", "", false],
+]) test(`native drawing constraint: ${platform} ${ozonePlatform}`, () => {
+  const { controller } = controllerFromPatchedSource(
+    applyPatchTwice(currentAvatarOverlayBundleFixture()),
+    {
+      process: { platform, env: { XDG_SESSION_TYPE: "wayland" } },
+      ozonePlatform,
+      UB: options => options.constrainNativeDrawWindowToDisplay,
+    },
+  );
+  assert.equal(controller.getLayoutForDisplay({ workArea: {}, bounds: {} }), expected);
+  const actions = [];
+  controller.windowManager.sendMessageToWebContents = (_contents, message) => actions.push(message.action);
+  controller.window = { isVisible: () => false, webContents: {} };
+  controller.focusQuickChat(9);
+  assert.equal(actions.at(-1).codexPetOverlayHiddenFocus, platform === "linux" && ozonePlatform === "wayland");
+  controller.window.isVisible = () => true;
+  controller.focusQuickChat(10);
+  assert.equal(actions.at(-1).codexPetOverlayHiddenFocus, false);
+  controller.focusQuickChat();
+  assert.deepEqual(Object.keys(actions.at(-1)), ["type"]);
+});
+
+for (const lockPosition of [false, true]) test(`native geometry keeps the pet inside a 1200px Wayland display: locked=${lockPosition}`, () => {
+  const display = {
+    id: 1,
+    bounds: { x: 0, y: 0, width: 1920, height: 1200 },
+    workArea: { x: 62, y: 0, width: 1858, height: 1200 },
+  };
+  const anchor = { x: 500, y: 100, width: 112, height: 87 };
+  const { controller } = controllerFromPatchedSource(
+    applyPetOverlayPatch(currentAvatarOverlayBundleFixture(), {
+      feature: { settings: { petOverlay: { lockPosition } } },
+    }),
+    {
+      ozonePlatform: "wayland",
+      UB: options => {
+        const bounded = options.constrainNativeDrawWindowToDisplay;
+        return {
+          anchor,
+          mascot: { left: 500, top: bounded ? 100 : 1241, width: 112, height: 87 },
+          tray: { left: 0, top: 0, width: 276, height: 131 },
+          windowBounds: { x: 0, y: bounded ? 0 : -1141, width: 1138, height: bounded ? 1200 : 2369 },
+        };
+      },
+    },
+  );
+  let bounds;
+  controller.setWindowBounds = (_window, value) => { bounds = value; };
+  controller.applyLayout({ isDestroyed: () => false }, display);
+  assert.ok(bounds.height <= display.workArea.height);
+  // A Wayland compositor may keep the window at y=0 despite the requested offset.
+  assert.ok(controller.layout.mascot.top >= 0);
+  assert.ok(controller.layout.mascot.top + controller.layout.mascot.height <= display.workArea.height);
+});
+
+for (const variant of ["missing", "duplicate", "foreign-owner"]) test(`native draw-constraint anchor fails closed: ${variant}`, () => {
+  const anchor = "constrainNativeDrawWindowToDisplay:process.platform===`win32`";
+  let source = currentAvatarOverlayBundleFixture().replace(
+    anchor,
+    variant === "duplicate" ? `${anchor},${anchor}` : "otherConstraint:!1",
+  );
+  if (variant === "foreign-owner") source += `class Other{getLayoutForDisplay(){return{${anchor}}}}`;
+  const { result, warnings } = captureWarnings(() => applyPetOverlayPatch(source));
+  assert.equal(result, source);
+  assert.match(warnings.join("\n"), /Pet overlay patch is incomplete/);
 });
 
 test("patches the current expanded drag completion as a syntactically complete callback", () => {
@@ -297,7 +545,7 @@ test("expanded endDrag completes KWin, Niri, and fallback once while preserving 
   assert.deepEqual(run("niri"), ["kwin", "niri", "clear", "reclamp", "dock"]);
   assert.deepEqual(run("fallback"), ["kwin", "niri", "clear", "reclamp", "dock"]);
   assert.deepEqual(run("fallback", { quickChat: true }), [
-    "kwin", "niri", "clear", "reclamp",
+    "kwin", "niri", "clear", "reclamp", "dock",
   ]);
   assert.deepEqual(run("fallback", { rendererId: 2 }), []);
 });
@@ -700,12 +948,14 @@ test("KWin start, move, and end use one compositor transport and one completion 
       childProcess: {
         execFileSync(command, args) {
           qdbusCalls.push([command, args]);
+          return args[2] === "org.kde.kwin.Scripting.loadScript" ? "0\n" : "";
         },
       },
     },
   );
   const window = {
     getBounds: () => ({ x: 100, y: 200, width: 356, height: 320 }),
+    getContentBounds: () => ({ x: 100, y: 200, width: 356, height: 320 }),
     isDestroyed: () => false,
     isVisible: () => true,
     webContents: { id: 1 },
@@ -750,6 +1000,963 @@ test("KWin start, move, and end use one compositor transport and one completion 
     "org.kde.kwin.Scripting.start",
     "org.kde.kwin.Scripting.unloadScript",
   ]);
+  controller.clearMovedWindowPersist();
+});
+
+function kwinMascotDragScenario({ ozonePlatform = "wayland", lockPosition = false, failNative = false, screen, nativeLayout } = {}) {
+  const calls = [], bridgeCalls = [], persisted = [], timers = [];
+  const cursorSignal = signal();
+  const pet = {
+    caption: "Codex Pet Overlay", pid: 4242, resourceClass: "codex-desktop", wantsInput: true,
+    internalId: "{60115083-b547-4bfe-b29f-3736ebcd996b}",
+    frameGeometry: { x: -976, y: 0, width: 1138, height: 1200 },
+    frameGeometryChanged: signal(),
+  };
+  const workspace = {
+    cursorPos: { x: 100, y: 850 }, cursorPosChanged: cursorSignal,
+    windowList: () => [pet], windowRemoved: signal(), windowAdded: signal(), windowActivated: signal(), raiseWindow() {},
+  };
+  const kwin = kwinSession(workspace);
+  kwin.send("prepare", { width: pet.frameGeometry.width, height: pet.frameGeometry.height });
+  let gate = async () => {};
+  const KWinBridge = bridgeForSession(kwin, { calls: bridgeCalls, beforeCommand: (...args) => gate(...args) });
+  const { controller } = controllerFromPatchedSource(applyPetOverlayPatch(currentAvatarOverlayBundleFixture(), {
+    feature: { settings: { petOverlay: { lockPosition } } },
+  }), {
+    ozonePlatform,
+    screen,
+    KWinBridge,
+    process: { env: { XDG_CURRENT_DESKTOP: "KDE" } },
+    UB: nativeLayout ?? (({ anchor, mascotSize }) => ({
+      anchor,
+      mascot: { left: 1050, top: 800, ...mascotSize },
+      windowBounds: { x: anchor.x - 1050, y: anchor.y - 800, width: 1138, height: 1200 },
+      tray: null,
+    })),
+    setTimeout: callback => { const timer = { callback, unref() {} }; timers.push(timer); return timer; },
+    childProcess: {
+      execFileSync(command, args) {
+        calls.push([command, args]);
+        if (failNative) throw Object.assign(new Error("qdbus unavailable"), { code: "ENOENT" });
+        if (command === "busctl") {
+          if (args[7] === "Match") return JSON.stringify({ type: "a(sssida{sv})", data: [
+            [[`0_${pet.internalId}`, pet.caption, "", 100, 0.8, {}]],
+          ] });
+          const info = { caption: { type: "s", data: pet.caption }, uuid: { type: "s", data: pet.internalId } };
+          for (const [key, value] of Object.entries(pet.frameGeometry)) info[key] = { type: "d", data: value };
+          return JSON.stringify({ type: "a{sv}", data: [info] });
+        }
+        assert.fail(`Native geometry tests must use the session bridge, not ${command}`);
+      },
+    },
+  });
+  const window = Object.assign(new EventEmitter(), {
+    getBounds: () => ({ ...pet.frameGeometry, x: 0, y: 0 }),
+    getContentBounds: () => ({ ...pet.frameGeometry, x: 0, y: 0 }),
+    setContentSize: (width, height) => { pet.frameGeometry = { ...pet.frameGeometry, width, height }; },
+    isDestroyed: () => false, isVisible: () => true, webContents: { id: 1 },
+  });
+  controller.window = window;
+  controller.mascotSize = { width: 112, height: 87 };
+  controller.layout = {
+    anchor: { x: 74, y: 800, width: 112, height: 87 },
+    mascot: { left: 1050, top: 800, width: 112, height: 87 },
+    tray: null, windowBounds: { ...pet.frameGeometry },
+  };
+  controller.globalState = {
+    get: () => persisted.at(-1),
+    set: (_key, value) => persisted.push(JSON.parse(JSON.stringify(value))),
+  };
+  let serial = 0, gestureId;
+  const startAt = (event, caller = 1) => {
+    gestureId = `aaaaaaaa-aaaa-aaaa-aaaa-${String(++serial).padStart(12, "0")}`;
+    controller.startDrag(caller, { ...event, codexPetOverlayGestureId: gestureId });
+    return gestureId;
+  };
+  const start = (caller = 1) => startAt({ pointerScreenX: workspace.cursorPos.x, pointerScreenY: workspace.cursorPos.y,
+    pointerWindowX: 1076, pointerWindowY: 850 }, caller);
+  const end = (altKey = false) => controller.codexPetOverlayCompleteRendererDrag(1, gestureId, altKey);
+  return { controller, window, pet, workspace, cursorSignal, calls, bridgeCalls, persisted, timers, start, startAt, end,
+    gate: fn => { gate = fn; } };
+}
+
+require("./native-kwin-tests.cjs")({ controllerFromPatchedSource, applyPetOverlayPatch, nativePresentationBundleFixture });
+
+test("Wayland mascot dragging uses the KWin cursor and crosses the old overlay boundary without a jump", async () => {
+  const scenario = kwinMascotDragScenario();
+  const { controller, window, pet, workspace, cursorSignal, calls, persisted } = scenario;
+  try {
+    const before = { ...pet.frameGeometry };
+    scenario.start(); await settle();
+    assert.equal(controller.nativeWindowDragActive, true);
+    assert.equal(controller.codexPetOverlayMascotDragState, undefined);
+    assert.deepEqual(JSON.parse(JSON.stringify(pet.frameGeometry)), before, "pointer-down must preserve the grab offset");
+    const discoveries = calls.length;
+    assert.deepEqual(scenario.bridgeCalls, ["drag"]);
+    workspace.cursorPos = { x: 1500, y: 500 };
+    cursorSignal.emit();
+    controller.moveDrag(1, { pointerScreenX: 9999, pointerScreenY: 9999 });
+    assert.equal(pet.frameGeometry.x + controller.layout.mascot.left, 1474);
+    assert.equal(pet.frameGeometry.y + controller.layout.mascot.top, 450);
+    assert.equal(calls.length, discoveries, "pointer motion must not spawn compositor processes");
+    const finalBounds = JSON.parse(JSON.stringify(pet.frameGeometry));
+    await scenario.end();
+    assert.deepEqual(JSON.parse(JSON.stringify(pet.frameGeometry)), finalBounds);
+    assert.equal(persisted.length, 1);
+    assert.equal(persisted[0].x, 1474);
+    assert.equal(persisted[0].y, 450);
+    assert.equal(persisted[0].byDisplayId["1"].x, 1474);
+    assert.equal(persisted[0].byDisplayId["1"].y, 450);
+    assert.equal(controller.codexPetOverlayKWinDragState, null);
+    assert.equal(controller.nativeWindowDragActive, false);
+    assert.equal(controller.dragState, null);
+    assert.equal(scenario.bridgeCalls.filter(op => op === "endDrag").length, 1);
+  } finally {
+    controller.codexPetOverlayEndKWinDrag(window);
+  }
+});
+
+test("deferred native layout keeps the compositor position after release", async () => {
+  const scenario = kwinMascotDragScenario();
+  const { controller, window, workspace, cursorSignal, timers, persisted } = scenario;
+  try {
+    scenario.start(); await settle();
+    workspace.cursorPos = { x: 1500, y: 500 };
+    cursorSignal.emit();
+    controller.applyLayout(window);
+    assert.equal(controller.hasDeferredLayout, true);
+    await scenario.end();
+    timers.at(-1).callback();
+    assert.equal(controller.hasDeferredLayout, false);
+    assert.equal(controller.anchor.x, 1474);
+    assert.equal(controller.anchor.y, 450);
+    assert.equal(controller.layout.windowBounds.x + controller.layout.mascot.left, 1474);
+    assert.equal(controller.layout.windowBounds.y + controller.layout.mascot.top, 450);
+    assert.equal(persisted.at(-1).x, 1474);
+    assert.equal(persisted.at(-1).y, 450);
+  } finally {
+    controller.unregisterNativeWindowDragTarget("hidden");
+  }
+});
+
+test("native Plasma restores the saved anchor before trusting the new Electron window origin", () => {
+  const { controller, window, pet } = kwinMascotDragScenario();
+  controller.anchor = { x: 1474, y: 450, width: 112, height: 87 };
+  controller.layout = null;
+  controller.applyLayout(window);
+  assert.equal(controller.codexPetOverlayDesiredWindowBounds.x, 570);
+  assert.equal(controller.codexPetOverlayDesiredWindowBounds.y, -46);
+  let placements = 0;
+  controller.codexPetOverlayKWinRun = (bounds, move, done) => {
+    if (move) { placements += 1; pet.frameGeometry = { ...bounds }; }
+    done(null);
+  };
+  controller.codexPetOverlayApplyKWinHints(window);
+  assert.equal(placements, 1);
+  assert.equal(pet.frameGeometry.x, 570);
+  assert.equal(pet.frameGeometry.y, -46);
+  assert.equal(controller.codexPetOverlayKWinPosition.window, window);
+  controller.codexPetOverlayApplyKWinHints(window);
+  assert.equal(placements, 1, "later hints must preserve manual movement");
+});
+
+function clippedNativePetLayout({ anchor, mascotSize, displayBounds, traySize }) {
+  // Native drawing clips an oversized canvas before converting the mascot to local coordinates.
+  const x = Math.max(displayBounds.x, anchor.x - 800);
+  const y = Math.max(displayBounds.y, anchor.y - 1200);
+  const width = Math.min(anchor.x + 800, displayBounds.x + displayBounds.width) - x;
+  const height = Math.min(anchor.y + 1200, displayBounds.y + displayBounds.height) - y;
+  return {
+    anchor: { ...anchor },
+    placement: "top-end",
+    mascot: { left: anchor.x - x, top: anchor.y - y, ...mascotSize },
+    tray: { left: 0, top: 0, ...traySize },
+    windowBounds: { x, y, width, height },
+  };
+}
+
+test("native Plasma keeps the saved mascot anchor through repeated clipped layouts at the screen edges", () => {
+  for (const anchor of [{ x: 1461, y: 310 }, { x: 1790, y: 600 }, { x: 74, y: 800 }]) {
+    const { controller, window, pet } = kwinMascotDragScenario({ nativeLayout: clippedNativePetLayout });
+    delete controller.codexPetOverlayMascotLocalPosition;
+    controller.anchor = { ...anchor, width: 112, height: 87 };
+    controller.traySize = { width: 330, height: 141 };
+    controller.codexPetOverlayKWinRun = (bounds, move, done) => {
+      if (move) pet.frameGeometry = { ...bounds };
+      done(null);
+    };
+    for (let pass = 0; pass < 12; pass += 1) {
+      if (pass === 6) {
+        controller.unregisterNativeWindowDragTarget("hidden");
+        controller.windowVisibilitySequence = 1;
+        pet.frameGeometry = { x: 400, y: 0, width: 1138, height: 1200 };
+      }
+      controller.applyLayout(window);
+      controller.codexPetOverlayApplyKWinHints(window);
+      assert.deepEqual({ x: controller.anchor.x, y: controller.anchor.y }, anchor, `pass ${pass}`);
+      assert.equal(pet.frameGeometry.x + controller.layout.mascot.left, anchor.x);
+      assert.equal(pet.frameGeometry.y + controller.layout.mascot.top, anchor.y);
+    }
+  }
+});
+
+test("native Plasma drains a layout change made while its initial placement is in flight", () => {
+  const { controller, window, pet } = kwinMascotDragScenario({ nativeLayout: clippedNativePetLayout });
+  delete controller.codexPetOverlayMascotLocalPosition;
+  controller.anchor = { x: 1461, y: 310, width: 112, height: 87 };
+  controller.traySize = { width: 0, height: 0 };
+  const pending = [];
+  controller.codexPetOverlayKWinRun = (bounds, move, done) => pending.push(() => {
+    if (move) pet.frameGeometry = { ...bounds };
+    controller.rememberMovedWindow(window);
+    done(null);
+  });
+  controller.applyLayout(window);
+  controller.codexPetOverlayApplyKWinHints(window);
+  controller.mascotSize = { width: 80, height: 87 };
+  controller.traySize = { width: 330, height: 141 };
+  controller.applyLatestElementSizes(window);
+  pending.shift()();
+  controller.codexPetOverlayApplyKWinHints(window);
+  pending.shift()();
+  assert.equal(pet.frameGeometry.x + controller.layout.mascot.left, 1461);
+  assert.equal(pet.frameGeometry.y + controller.layout.mascot.top, 310);
+});
+
+test("an unapplied KWin placement cannot seed the geometry cache", () => {
+  const { controller, window } = kwinMascotDragScenario();
+  controller.anchor = { x: 1474, y: 450, width: 112, height: 87 };
+  controller.applyLayout(window);
+  controller.codexPetOverlayKWinRun = (_bounds, _move, done) => done(null);
+  controller.codexPetOverlayApplyKWinHints(window);
+  assert.equal(controller.codexPetOverlayKWinPosition, undefined);
+});
+
+test("a hint callback from a previous presentation cannot restore its geometry cache", () => {
+  const { controller, window, pet } = kwinMascotDragScenario();
+  controller.applyLayout(window);
+  let complete;
+  controller.codexPetOverlayKWinRun = (bounds, _move, done) => {
+    pet.frameGeometry = { ...bounds };
+    complete = done;
+  };
+  controller.codexPetOverlayApplyKWinHints(window);
+  controller.unregisterNativeWindowDragTarget("hidden");
+  controller.windowVisibilitySequence = 1;
+  complete(null);
+  assert.equal(controller.codexPetOverlayKWinPosition, null);
+});
+
+async function nativeKWinEventScenario() {
+  const display = { id: 64, bounds: { x: 0, y: 0, width: 1920, height: 1200 },
+    workArea: { x: 62, y: 0, width: 1858, height: 1200 } };
+  const scenario = kwinMascotDragScenario({ screen: {
+    getAllDisplays: () => [display], getDisplayNearestPoint: () => display,
+  }, nativeLayout: options => nativeLayout({ ...options, previousPlacement: options.previousPlacement ?? "top-end",
+    nativeDrawMascotSize: { width: 80, height: 87 }, nativeDrawDisplayHeightPx: 1200 }) });
+  const { controller, window, pet, workspace } = scenario;
+  const queue = [], browser = [], frames = [];
+  let hold = false, published, geometry = { ...pet.frameGeometry };
+  scenario.gate((op, data) => hold ? new Promise(resolve => queue.push({ op, data, resolve })) : undefined);
+  const record = stage => {
+    if (!published) return;
+    frames.push({ stage, pet: { x: geometry.x + published.mascot.left, y: geometry.y + published.mascot.top },
+      local: { ...published.mascot }, frame: { ...geometry },
+      tray: published.tray && { x: published.tray.left - published.mascot.left, y: published.tray.top - published.mascot.top } });
+  };
+  Object.defineProperty(pet, "frameGeometry", { get: () => geometry, set: value => {
+    geometry = { ...value }; record("compositor"); pet.frameGeometryChanged.emit();
+    browser.push(() => controller.rememberMovedWindow(window));
+  } });
+  controller.sendLayoutToRenderer = () => { published = JSON.parse(JSON.stringify(controller.layout)); record("renderer"); };
+  window.setContentSize = (width, height) => { pet.frameGeometry = { ...geometry, width, height }; };
+  const next = async () => {
+    await settle();
+    const operation = queue.shift();
+    assert.ok(operation, "a compositor operation must be queued");
+    operation.resolve();
+    await settle();
+  };
+  const drain = async () => { await settle(); let limit = 20; while (queue.length) { assert.ok(limit-- > 0); await next(); } };
+  const events = () => { let limit = 20; while (browser.length) { assert.ok(limit-- > 0); browser.shift()(); } };
+  const flushPosition = () => { const timer = controller.movedWindowPersistTimer; if (timer) timer.callback(); };
+  delete controller.codexPetOverlayMascotLocalPosition;
+  controller.anchor = { x: 800, y: 450, width: 112, height: 121 };
+  controller.mascotSize = { width: 112, height: 121 };
+  controller.traySize = { width: 330, height: 141 };
+  controller.placement = "top-end";
+  controller.layout = null;
+  controller.applyLayout(window);
+  controller.codexPetOverlayApplyKWinHints(window);
+  await drain(); events(); flushPosition();
+  frames.length = 0;
+  hold = true;
+  const grab = async () => {
+    const point = { pointerWindowX: published.mascot.left + 24, pointerWindowY: published.mascot.top + 24 };
+    workspace.cursorPos = { x: geometry.x + point.pointerWindowX, y: geometry.y + point.pointerWindowY };
+    scenario.startAt({ ...point, pointerScreenX: workspace.cursorPos.x, pointerScreenY: workspace.cursorPos.y });
+    await settle();
+    if (queue[0]?.op === "drag") await next();
+    return point;
+  };
+  const move = (x, y) => {
+    workspace.cursorPos = { x, y };
+    scenario.cursorSignal.emit();
+    controller.moveDrag(1, { pointerScreenX: x, pointerScreenY: y });
+  };
+  const end = async () => { const result = scenario.end(); void result.catch(() => {}); await drain(); await result; };
+  const close = async () => {
+    hold = false; await drain(); controller.unregisterNativeWindowDragTarget("hidden");
+    await settle(); events(); controller.clearMovedWindowPersist();
+  };
+  return { ...scenario, queue, browser, frames, next, drain, events, flushPosition, grab, move, end, close };
+}
+
+test("native KWin preserves every published pet position through drag, resize events and settle", async () => {
+  const scenario = await nativeKWinEventScenario();
+  const { controller, window, frames } = scenario;
+  try {
+    await scenario.grab();
+    scenario.move(1100, 520);
+    const count = frames.length;
+    await scenario.end();
+    scenario.events(); scenario.flushPosition();
+    controller.codexPetOverlayApplyKWinHints(window);
+    scenario.events(); await scenario.drain(); scenario.events(); scenario.flushPosition();
+    for (const frame of frames.slice(count - 1)) {
+      assert.equal(frame.pet.x, 1076, frame.stage);
+      assert.equal(frame.pet.y, 496, frame.stage);
+      assert.equal(frame.frame.width, 1858);
+      assert.equal(frame.frame.height, 1200);
+    }
+    assert.equal(new Set(frames.slice(count - 1).map(frame => JSON.stringify(frame.tray))).size, 1,
+      "settle must not alternate centered and above-left notification targets");
+  } finally { await scenario.close(); }
+});
+
+test("native KWin constrains the gesture at the edge without a release correction", async () => {
+  for (const [x, y, expectedX, expectedY] of [
+    [1900, 700, 1808, 676], [2000, 1300, 1808, 1071],
+    [0, -100, 62, 0], [1100, -100, 1076, 0],
+  ]) {
+    const scenario = await nativeKWinEventScenario();
+    try {
+      await scenario.grab(); scenario.move(x, y);
+      const count = scenario.frames.length;
+      await scenario.end();
+      scenario.events(); scenario.flushPosition();
+      scenario.controller.codexPetOverlayApplyKWinHints(scenario.window);
+      scenario.events(); await scenario.drain(); scenario.events(); scenario.flushPosition();
+      const frames = scenario.frames.slice(count - 1);
+      assert.deepEqual([...new Set(frames.map(frame => frame.pet.x))], [expectedX]);
+      assert.deepEqual([...new Set(frames.map(frame => frame.pet.y))], [expectedY]);
+      assert.equal(new Set(frames.map(frame => JSON.stringify(frame.local))).size, 1);
+      assert.equal(new Set(frames.map(frame => `${frame.frame.width}x${frame.frame.height}`)).size, 1);
+      assert.equal(scenario.persisted.at(-1).x, expectedX);
+      assert.equal(scenario.persisted.at(-1).y, expectedY);
+    } finally { await scenario.close(); }
+  }
+});
+
+test("new drag invalidates an old hint and waits for its acknowledgement", async () => {
+  const scenario = await nativeKWinEventScenario();
+  try {
+    scenario.controller.codexPetOverlayDesiredWindowBounds = { ...scenario.pet.frameGeometry, x: 50 };
+    scenario.controller.codexPetOverlayApplyKWinHints(scenario.window);
+    await settle();
+    assert.equal(scenario.queue[0].op, "hints");
+    const point = await scenario.grab();
+    assert.equal(scenario.controller.codexPetOverlayKWinDragState.pending, true);
+    scenario.workspace.cursorPos = { x: 1100, y: 520 };
+    await scenario.next();
+    assert.equal(scenario.queue[0].op, "drag");
+    await scenario.next();
+    assert.equal(scenario.controller.codexPetOverlayKWinDragState.pending, false);
+    assert.equal(scenario.pet.frameGeometry.x + point.pointerWindowX, 1100);
+    scenario.move(1200, 550);
+    assert.equal(scenario.frames.at(-1).pet.x, 1176);
+    assert.equal(scenario.frames.some(frame => frame.frame.x === 50), false, "stale script must never mutate the window");
+    await scenario.end(); scenario.flushPosition();
+  } finally { await scenario.close(); }
+});
+
+test("release before a pending KWin handoff preserves position and cannot start a late drag", async () => {
+  const scenario = await nativeKWinEventScenario();
+  try {
+    scenario.controller.codexPetOverlayApplyKWinHints(scenario.window);
+    await scenario.grab();
+    const anchor = { ...scenario.controller.anchor };
+    await assert.rejects(scenario.end(), /before compositor handoff/);
+    await scenario.drain();
+    assert.equal(scenario.controller.codexPetOverlayKWinDragState, null);
+    assert.equal(scenario.controller.nativeWindowDragActive, false);
+    assert.deepEqual({ ...scenario.controller.anchor }, anchor);
+    assert.equal(scenario.bridgeCalls.includes("drag"), false);
+  } finally { await scenario.close(); }
+});
+
+test("programmatic geometry is guarded before a KWin hint has started", async () => {
+  const scenario = await nativeKWinEventScenario();
+  try {
+    scenario.controller.anchor = { ...scenario.controller.anchor, x: 1000 };
+    scenario.controller.applyLayout(scenario.window);
+    assert.ok(scenario.controller.codexPetOverlayKWinPendingBounds);
+    scenario.controller.rememberMovedWindow(scenario.window);
+    assert.equal(scenario.controller.anchor.x, 1000);
+    scenario.controller.codexPetOverlayApplyKWinHints(scenario.window);
+    await scenario.drain(); scenario.events();
+    assert.equal(scenario.controller.anchor.x, 1000);
+    assert.equal(scenario.controller.codexPetOverlayKWinPendingBounds, null);
+  } finally { await scenario.close(); }
+});
+
+test("KWin hints recheck physical geometry after the compositor moves an existing surface", async () => {
+  const scenario = await nativeKWinEventScenario();
+  try {
+    const desired = { ...scenario.controller.codexPetOverlayDesiredWindowBounds };
+    const anchor = { ...scenario.controller.anchor };
+    scenario.pet.frameGeometry = { ...desired, x: desired.x + 27.35 };
+    scenario.events();
+    assert.equal(scenario.controller.codexPetOverlayKWinPosition.bounds.x, desired.x,
+      "the cached position deliberately still matches the desired bounds");
+    scenario.controller.codexPetOverlayApplyKWinHints(scenario.window);
+    await scenario.drain(); scenario.events(); scenario.flushPosition();
+    assert.deepEqual({ ...scenario.pet.frameGeometry }, desired);
+    assert.equal(scenario.controller.anchor.x, anchor.x);
+    assert.equal(scenario.controller.anchor.y, anchor.y);
+  } finally { await scenario.close(); }
+});
+
+test("KWin script IDs reject failures and malformed replies", () => {
+  const { controller } = kwinMascotDragScenario();
+  for (const value of ["", "-1", "NaN", "ok", "0/other", "2147483648", undefined])
+    assert.equal(controller.codexPetOverlayKWinScriptId(value), null);
+  assert.equal(controller.codexPetOverlayKWinScriptId("0\n"), 0);
+  assert.equal(controller.codexPetOverlayKWinScriptId("123"), 123);
+});
+
+test("native KWin fixed canvas preserves locked gravity in all corners", () => {
+  for (const gravity of ["top-left", "top-right", "bottom-left", "bottom-right"]) {
+    const { controller, window } = kwinMascotDragScenario({ lockPosition: true,
+      nativeLayout: options => nativeLayout({ ...options, previousPlacement: "top-end" }) });
+    controller.codexPetOverlaySettings = () => ({ lockPosition: true, gravity, margin: 24, kwin: true });
+    controller.anchor = { x: 800, y: 400, width: 112, height: 87 };
+    controller.traySize = { width: 330, height: 141 };
+    controller.applyLayout(window);
+    assert.equal(controller.anchor.x, gravity.endsWith("left") ? 24 : 1920 - 24 - 112);
+    assert.equal(controller.anchor.y, gravity.startsWith("top") ? 24 : 1080 - 24 - 87);
+  }
+});
+
+test("native KWin canvas uses logical dimensions of the smallest connected display", () => {
+  const displays = [
+    { id: 1, scaleFactor: 1, bounds: { x: 0, y: 0, width: 1920, height: 1200 },
+      workArea: { x: 62, y: 0, width: 1858, height: 1200 } },
+    { id: 2, scaleFactor: 1.5, bounds: { x: -1280, y: 0, width: 1280, height: 720 },
+      workArea: { x: -1280, y: 0, width: 1280, height: 688 } },
+  ];
+  const { controller } = kwinMascotDragScenario({ screen: { getAllDisplays: () => displays } });
+  for (const display of displays) {
+    const bounds = controller.codexPetOverlayKWinDrawBounds(display, { x: display.workArea.x + 100, y: 100, width: 112, height: 121 });
+    assert.equal(bounds.width, 1280);
+    assert.equal(bounds.height, 688);
+    assert.equal(bounds.x + Math.round((bounds.width - 112) / 2), display.workArea.x + 100);
+  }
+});
+
+for (const origin of [{ x: -400, y: -200 }, { x: 400, y: 200 }])
+  test(`KWin hover and cursor consumers share compositor geometry: ${JSON.stringify(origin)}`, () => {
+    let cursor, tick;
+    const messages = [], input = [];
+    const { controller, context } = controllerFromPatchedSource(applyPatchTwice(currentAvatarOverlayBundleFixture()), {
+      ozonePlatform: "wayland", process: { env: { XDG_CURRENT_DESKTOP: "KDE" } },
+      screen: { getCursorScreenPoint: () => cursor },
+      setInterval: callback => { tick = callback; return { unref() {} }; },
+      childProcess: { execFileSync() { assert.fail("hover must use cached geometry"); } },
+    });
+    const bounds = { ...origin, width: 1920, height: 1200 };
+    const window = { isDestroyed: () => false, isVisible: () => true,
+      getContentBounds: () => ({ ...bounds, x: 0, y: 0 }),
+      webContents: { id: 1, sendInputEvent: event => input.push(event) } };
+    controller.window = window;
+    controller.rendererReady = true;
+    controller.codexPetOverlayKWinPosition = { window, bounds };
+    controller.layout = { anchor: { x: origin.x + 900, y: origin.y + 600 },
+      mascot: { left: 900, top: 600, width: 112, height: 87 } };
+    controller.showsPetControls = true;
+    controller.shouldPresentWindow = () => true;
+    controller.petControlsAppearance = { proximityEnterDistance: 8, proximityExitDistance: 16 };
+    controller.petControlsProximityRects = [{ left: 900, top: 695, width: 140, height: 32 }];
+    controller.setPetPointerProximity = value => { controller.pointerNearPet = value; };
+    controller.logger = () => ({ debug() {}, info() {} });
+    controller.windowManager.sendMessageToWebContents = (_contents, message) => messages.push(message);
+    const localCursor = (x, y) => { cursor = { x: origin.x + x, y: origin.y + y }; };
+    let proximityRequests = 0;
+    controller.codexPetOverlayKWinProximity = () => { proximityRequests += 1; return true; };
+    controller.updateCssPetControlsProximityTracking();
+    assert.equal(proximityRequests, 1);
+    assert.equal(tick, undefined, "native hover must not poll Electron's global pointer");
+    controller.codexPetOverlayKWinDragGeneration = 1;
+    controller.codexPetOverlayKWinDragState = { window, generation: 1 };
+    localCursor(-20, -20);
+    assert.equal(controller.isOverlayWindowPointerDragActive(), true);
+    controller.codexPetOverlayKWinDragState = null;
+    localCursor(956, 710);
+    assert.equal(controller.sendCursorPointToAvatarOverlay(window, cursor, false), true);
+    assert.deepEqual(JSON.parse(JSON.stringify(input.at(-1))),
+      { type: "mouseMove", x: 956, y: 710, movementX: 0, movementY: 0 });
+    controller.computerUseCursorPoint = cursor;
+    controller.sendComputerUseCursorLocationToRenderer(window);
+    assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1).point)), { x: 956, y: 710 });
+    controller.pointerInteractive = true;
+    controller.dragState = {};
+    localCursor(10, 10);
+    assert.equal(controller.isOverlayWindowPointerDragActive(), true);
+    localCursor(-20, -20);
+    assert.equal(controller.isOverlayWindowPointerDragActive(), false);
+    assert.equal(controller.sendCursorPointToAvatarOverlay(window, cursor, false), false);
+    controller.isRemoteHostedPIPEnabled = () => true;
+    controller.remoteHostedPIPContentHostMotionTarget = { x: origin.x + 900, y: origin.y + 600, width: 112, height: 87 };
+    controller.publishRemoteHostedPIPContentHost();
+    assert.deepEqual(JSON.parse(JSON.stringify(context.globalThis.contentHost[2].anchorRect)),
+      { x: 900, y: 600, width: 112, height: 87 });
+    controller.getQuickChatRestingWidth = () => 356;
+    controller.quickChatDrawOffset = { x: 0, y: 0 };
+    controller.animatePresentationTo = () => {};
+    controller.snapQuickChatToPosition({ workArea: bounds },
+      { x: origin.x + (origin.x < 0 ? 40 : 1500), y: origin.y + 100 }, true, true);
+    assert.ok(controller.quickChatResizeDrawAnchor, "the snap target fits inside the physical canvas");
+  });
+
+test("a recovered KWin bridge keeps the grab point after a local fallback move", async () => {
+  const scenario = kwinMascotDragScenario({
+    nativeLayout: options => nativeLayout({ ...options, previousPlacement: "top-end" }),
+  });
+  const { controller, window, pet, workspace, cursorSignal } = scenario;
+  controller.codexPetOverlayKWinGeometryUnavailable = true;
+  controller.applyLayout(window);
+  const before = controller.layout.mascot;
+  scenario.startAt({ pointerWindowX: before.left + 10, pointerWindowY: before.top + 10 });
+  controller.moveDrag(1, { pointerWindowX: 600, pointerWindowY: 300 });
+  await scenario.end();
+  controller.applyLatestElementSizes(window);
+  controller.codexPetOverlayKWinGeometryUnavailable = false;
+  controller.codexPetOverlayKWinRun = (bounds, move, done) => { if (move) pet.frameGeometry = { ...bounds }; done(null); };
+  controller.codexPetOverlayApplyKWinHints(window);
+  const local = { ...controller.layout.mascot };
+  const bounds = { ...pet.frameGeometry };
+  workspace.cursorPos = { x: bounds.x + local.left + 10, y: bounds.y + local.top + 10 };
+  try {
+    scenario.startAt({ pointerWindowX: local.left + 10, pointerWindowY: local.top + 10 });
+    await settle();
+    assert.ok(controller.codexPetOverlayKWinDragState);
+    assert.deepEqual({ ...pet.frameGeometry }, bounds);
+    workspace.cursorPos = { x: 1100, y: 500 }; cursorSignal.emit();
+    await scenario.end();
+    const anchor = { ...controller.anchor };
+    controller.clearMovedWindowPersist();
+    controller.applyLatestElementSizes(window);
+    controller.codexPetOverlayApplyKWinHints(window);
+    assert.equal(pet.frameGeometry.x + controller.layout.mascot.left, anchor.x);
+    assert.equal(pet.frameGeometry.y + controller.layout.mascot.top, anchor.y);
+  } finally { controller.unregisterNativeWindowDragTarget("hidden"); }
+});
+
+for (const name of ["updateCssPetControlsProximityTracking", "sendCursorPointToAvatarOverlay",
+  "sendComputerUseCursorLocationToRenderer", "isOverlayWindowPointerDragActive",
+  "publishRemoteHostedPIPContentHost", "snapQuickChatToPosition"])
+  test(`coordinate consumer hooks fail closed when ${name} drifts`, () => {
+    const source = currentAvatarOverlayBundleFixture().replace(new RegExp(`(?<![\\w$.])${name}\\(`), `${name}Renamed(`) +
+      `class Unrelated{${name}(e){return e.getContentBounds()}}`;
+    const { result } = captureWarnings(() => applyPetOverlayPatch(source));
+    assert.equal(result, source);
+  });
+
+test("native input regions cover controls and editor while transparent space stays click-through", () => {
+  const context = { process: { platform: "linux" } };
+  vm.runInNewContext(`this.Policy=class{${nativeInputPolicy}}`, context);
+  const policy = new context.Policy(), shapes = [];
+  policy.supportsInputShape = true;
+  policy.mousePassthroughMode = "disabled";
+  policy.window = { isDestroyed: () => false, isVisible: () => true,
+    setInputShape: shape => { shapes.push(shape); return true; },
+    webContents: { id: 1 } };
+  const mascot = { left: 900, top: 600, width: 112, height: 87 };
+  const controls = { left: 880, top: 695, width: 160, height: 40 };
+  const editor = { left: 700, top: 400, width: 500, height: 200 };
+  policy.setPointerRegions(1, [mascot, controls], [controls]);
+  const contains = (x, y) => shapes.at(-1).some(r => x >= r.x && y >= r.y && x < r.x + r.width && y < r.y + r.height);
+  assert.equal(contains(950, 650), true);
+  assert.equal(contains(900, 710), true);
+  assert.equal(contains(100, 100), false);
+  policy.setPointerRegions(1, [mascot, controls, editor], [controls]);
+  assert.equal(contains(750, 450), true);
+  policy.setPointerRegions(2, [], []);
+  assert.equal(shapes.length, 2, "another renderer cannot change the input shape");
+});
+
+for (const missing of ["busctl", "qdbus"])
+  test(`native local fallback survives the next layout with missing ${missing}`, () => {
+    const scenario = kwinMascotDragScenario({ nativeLayout: options => nativeLayout({ ...options, previousPlacement: "top-end" }) });
+    const { controller, window } = scenario;
+    delete controller.codexPetOverlayMascotLocalPosition;
+    if (missing === "busctl") controller.codexPetOverlayKWinGeometryUnavailable = true;
+    else controller.codexPetOverlayKWinBridge = { closed: true };
+    controller.applyLayout(window);
+    const before = { ...controller.layout.mascot };
+    controller.startDrag(1, { pointerWindowX: before.left + 10, pointerWindowY: before.top + 10 });
+    controller.moveDrag(1, { pointerWindowX: 600, pointerWindowY: 300 });
+    controller.endDrag(1, {});
+    const moved = { ...controller.layout.mascot };
+    assert.notEqual(moved.left, before.left);
+    for (let i = 0; i < 3; i += 1) {
+      controller.applyLatestElementSizes(window);
+      assert.deepEqual({ ...controller.layout.mascot }, moved);
+    }
+  });
+
+test("native tray fits the visible canvas with a small second display and after hot-unplug", () => {
+  const main = { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1200 },
+    workArea: { x: 0, y: 0, width: 1920, height: 1200 } };
+  const small = { id: 2, scaleFactor: 1.5, bounds: { x: -800, y: 0, width: 800, height: 600 },
+    workArea: { x: -800, y: 0, width: 800, height: 600 } };
+  let displays = [main, small];
+  const { controller, window } = kwinMascotDragScenario({ screen: {
+    getAllDisplays: () => displays, getDisplayNearestPoint: () => main,
+  }, nativeLayout: options => nativeLayout({ ...options, previousPlacement: "top-end" }) });
+  delete controller.codexPetOverlayMascotLocalPosition;
+  controller.mascotSize = { width: 80, height: 87 };
+  controller.traySize = { width: 330, height: 300 };
+  for (const placement of ["top-end", "bottom-end"]) {
+    controller.placement = placement;
+    for (const y of [100, 500, 1000]) {
+      controller.anchor = { x: 800, y, ...controller.mascotSize };
+      const layout = controller.getLayoutForDisplay(main);
+      const { tray, visibleBounds: visible } = layout;
+      assert.ok(tray.top >= visible.top, placement);
+      assert.ok(tray.top + tray.height <= visible.top + visible.height, placement);
+      assert.ok(tray.left >= visible.left, placement);
+      assert.ok(tray.left + tray.width <= visible.left + visible.width, placement);
+      assert.ok(tray.height > 0, placement);
+      const mascot = layout.mascot;
+      assert.ok(tray.top + tray.height + 12 <= mascot.top || tray.top >= mascot.top + mascot.height + 12,
+        "upstream pet/tray spacing must survive canvas fitting");
+    }
+  }
+  displays = [main];
+  const larger = controller.getLayoutForDisplay(main);
+  assert.equal(larger.windowBounds.width, main.workArea.width);
+  assert.equal(larger.windowBounds.height, main.workArea.height);
+  controller.unregisterNativeWindowDragTarget("hidden");
+});
+
+test("local fallback offsets let upstream place notifications on the available canvas side", () => {
+  const scenario = kwinMascotDragScenario({ nativeLayout: options => nativeLayout({ ...options, previousPlacement: options.previousPlacement ?? "top-end" }) });
+  const { controller, window } = scenario;
+  controller.codexPetOverlayKWinUnavailable = true;
+  controller.anchor = { x: 800, y: 900, width: 80, height: 87 };
+  controller.mascotSize = { width: 80, height: 87 };
+  controller.traySize = { width: 330, height: 300 };
+  for (const top of [10, 900]) {
+    controller.codexPetOverlayMascotLocalPosition = { left: 920, top };
+    controller.applyLatestElementSizes(window);
+    const { mascot, tray, visibleBounds: visible } = controller.layout;
+    assert.ok(tray.height > 0);
+    assert.ok(tray.top >= visible.top && tray.top + tray.height <= visible.top + visible.height);
+    assert.ok(tray.top + tray.height + 12 <= mascot.top || tray.top >= mascot.top + mascot.height + 12,
+      JSON.stringify({ mascot, tray, visible, placement: controller.layout.placement }));
+  }
+});
+
+test("canvas tray fitting preserves the anchor through repeated layouts at the local bottom edge", () => {
+  const display = { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1200 },
+    workArea: { x: 0, y: 0, width: 1920, height: 1200 } };
+  const { controller, window, pet } = kwinMascotDragScenario({ screen: {
+    getAllDisplays: () => [display], getDisplayNearestPoint: () => display,
+  }, nativeLayout: options => nativeLayout({ ...options, previousPlacement: options.previousPlacement ?? "top-end" }) });
+  controller.anchor = { x: 800, y: 300, width: 80, height: 87 };
+  controller.mascotSize = { width: 80, height: 87 };
+  controller.traySize = { width: 330, height: 300 };
+  controller.applyLayout(window);
+  pet.frameGeometry = { ...controller.layout.windowBounds };
+  controller.codexPetOverlayKWinPosition = { window, bounds: { ...pet.frameGeometry } };
+  controller.codexPetOverlayKWinUnavailable = true;
+  const mascot = controller.layout.mascot;
+  controller.startDrag(1, { pointerWindowX: mascot.left + 10, pointerWindowY: mascot.top + 10 });
+  controller.moveDrag(1, { pointerWindowX: 930, pointerWindowY: 1123 });
+  controller.endDrag(1, {});
+  const anchor = { ...controller.anchor };
+  for (let i = 0; i < 6; i += 1) {
+    controller.applyLatestElementSizes(window);
+    assert.deepEqual({ ...controller.anchor }, anchor);
+    assert.equal(controller.layout.windowBounds.y, pet.frameGeometry.y);
+    assert.ok(controller.layout.tray.height > 0);
+  }
+});
+
+test("native canvas fitting retains notification space with controls, captions and docked content", () => {
+  const main = { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1200 },
+    workArea: { x: 0, y: 0, width: 1920, height: 1200 } };
+  for (const [width, height] of [[1920, 1200], [800, 600], [600, 800], [400, 400]]) {
+    const small = { id: 2, bounds: { x: -width, y: 0, width, height },
+      workArea: { x: -width, y: 0, width, height } };
+    let extra = {};
+    const { controller, window } = kwinMascotDragScenario({ screen: {
+      getAllDisplays: () => [main, small], getDisplayNearestPoint: () => main,
+    }, nativeLayout: options => nativeLayout({ ...options, ...extra, previousPlacement: options.previousPlacement ?? "top-end" }) });
+    controller.mascotSize = { width: 80, height: 87 };
+    controller.traySize = { width: 330, height: 300 };
+    for (extra of [{}, { showsPetControls: true },
+      { showsPetControls: true, petControlRowHeight: 40, realtimeCaptionAboveMascotPx: 60 },
+      { dockedPIPStackDisplayHeight: 200 }]) {
+      for (const placement of ["top-end", "bottom-end"]) {
+        for (const top of [0, 10, 100, Math.floor((height - 87) / 2), height - 95, height - 87]) {
+          for (const x of [40, 800, 1800]) {
+            for (const y of [0, 50, 300, 600, 1050]) {
+              controller.codexPetOverlayKWinCanvas = null;
+              controller.codexPetOverlayMascotLocalPosition = { left: (width - 80) / 2, top };
+              controller.anchor = { x, y, ...controller.mascotSize };
+              controller.placement = placement;
+              let anchor;
+              for (let pass = 0; pass < 6; pass += 1) {
+                controller.applyLayout(window);
+                const { mascot, tray, visibleBounds: visible } = controller.layout;
+                const context = JSON.stringify({ width, height, extra, placement, top, x, y, pass, mascot, tray, visible });
+                if (anchor) assert.deepEqual({ ...controller.anchor }, anchor, context);
+                anchor = { ...controller.anchor };
+                if (tray.height > 0) {
+                  assert.ok(tray.top >= visible.top && tray.top + tray.height <= visible.top + visible.height, context);
+                  assert.ok(tray.left >= visible.left && tray.left + tray.width <= visible.left + visible.width, context);
+                  assert.ok(tray.top + tray.height + 12 <= mascot.top || tray.top >= mascot.top + mascot.height + 12, context);
+                }
+                if (Math.max(mascot.top - visible.top, visible.top + visible.height - mascot.top - mascot.height) > 250) {
+                  assert.ok(tray.height > 0, context);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    controller.unregisterNativeWindowDragTarget("hidden");
+  }
+});
+
+test("native canvas shifts the tray frame horizontally before limiting its responsive width", () => {
+  const main = { id: 1, bounds: { x: 0, y: 0, width: 1920, height: 1200 },
+    workArea: { x: 0, y: 0, width: 1920, height: 1200 } };
+  const small = { id: 2, bounds: { x: -400, y: 0, width: 400, height: 400 },
+    workArea: { x: -400, y: 0, width: 400, height: 400 } };
+  const { controller } = kwinMascotDragScenario({ screen: {
+    getAllDisplays: () => [main, small], getDisplayNearestPoint: () => main,
+  }, nativeLayout: options => nativeLayout({ ...options, previousPlacement: options.previousPlacement ?? "top-end" }) });
+  controller.mascotSize = { width: 80, height: 87 };
+  controller.traySize = { width: 330, height: 300 };
+  for (const left of [0, 10, 160, 310, 320]) {
+    for (const x of [40, 800, 1800]) {
+      controller.codexPetOverlayMascotLocalPosition = { left, top: 156 };
+      controller.anchor = { x, y: 600, ...controller.mascotSize };
+      const { tray, visibleBounds: visible } = controller.getLayoutForDisplay(main);
+      assert.ok(tray.height > 0);
+      assert.equal(tray.width, Math.min(330, visible.width));
+      assert.ok(tray.left >= visible.left && tray.left + tray.width <= visible.left + visible.width);
+    }
+  }
+});
+
+test("KWin completion preserves the renderer Alt modifier", async () => {
+  const { controller, window, start, end, workspace, cursorSignal } = kwinMascotDragScenario();
+  let snaps = 0;
+  controller.getPetSnapAnchor = (_display, anchor) => anchor;
+  controller.animatePresentationTo = (_anchor, _offset, complete) => { snaps += 1; complete(); };
+  try {
+    start(); await settle();
+    workspace.cursorPos = { x: 1500, y: 500 };
+    cursorSignal.emit();
+    controller.moveDrag(1, {});
+    await end(true);
+    assert.equal(snaps, 1);
+    assert.equal(controller.isFreelyPositioned, false);
+  } finally {
+    controller.unregisterNativeWindowDragTarget("hidden");
+  }
+});
+
+test("KWin final geometry selects a negative-origin secondary display", async () => {
+  const left = { id: 2, scaleFactor: 1.5, bounds: { x: -1920, y: 0, width: 1920, height: 1200 },
+    workArea: { x: -1920, y: 0, width: 1920, height: 1200 } };
+  const right = { id: 1, scaleFactor: 1, bounds: { x: 0, y: 0, width: 1920, height: 1200 },
+    workArea: { x: 62, y: 0, width: 1858, height: 1200 } };
+  const { controller, window, start, end, workspace, cursorSignal, persisted } = kwinMascotDragScenario({ screen: {
+    getAllDisplays: () => [right, left], getDisplayNearestPoint: point => point.x < 0 ? left : right,
+  } });
+  try {
+    start(); await settle();
+    workspace.cursorPos = { x: -1500, y: 500 };
+    cursorSignal.emit();
+    await end();
+    assert.equal(persisted[0].displayId, 2);
+    assert.equal(persisted[0].x, -1526);
+    assert.equal(persisted[0].y, 450);
+    assert.equal(persisted[0].byDisplayId["2"].x, -1526);
+  } finally {
+    controller.unregisterNativeWindowDragTarget("hidden");
+  }
+});
+
+test("a missing final KWin reply keeps the last saved position and releases the drag", async () => {
+  const { controller, window, start, end, persisted } = kwinMascotDragScenario();
+  start(); await settle();
+  const bridge = controller.codexPetOverlayKWinBridge, request = bridge.request.bind(bridge);
+  bridge.request = async (...args) => { const value = await request(...args); return args[0] === "endDrag" ? null : value; };
+  const anchor = { ...controller.anchor };
+  await assert.rejects(end(), /not confirmed/);
+  assert.equal(persisted.length, 0);
+  assert.deepEqual({ ...controller.anchor }, anchor);
+  assert.equal(controller.dragState, null);
+  assert.equal(controller.nativeWindowDragActive, false);
+  assert.equal(controller.codexPetOverlayKWinDragState, null);
+  controller.unregisterNativeWindowDragTarget("hidden");
+});
+
+test("successful D-Bus calls with no matching window retain local mascot dragging", () => {
+  const { controller, start, calls } = kwinMascotDragScenario();
+  controller.codexPetOverlayKWinCall = () => ({ type: "a(sssida{sv})", data: [[]] });
+  start();
+  assert.ok(controller.codexPetOverlayMascotDragState);
+  assert.equal(controller.nativeWindowDragActive, false);
+  assert.equal(calls.length, 0);
+});
+
+test("KWin geometry rejects ambiguous matches, invalid numbers, foreign IDs and PIDs", () => {
+  const { controller, window, pet } = kwinMascotDragScenario();
+  const reply = { type: "a{sv}", data: [{
+    caption: { type: "s", data: pet.caption }, uuid: { type: "s", data: pet.internalId },
+    pid: { type: "u", data: 4242 },
+    ...Object.fromEntries(Object.entries(pet.frameGeometry).map(([key, data]) => [key, { type: "d", data }])),
+  }] };
+  controller.codexPetOverlayKWinCall = () => reply;
+  assert.ok(controller.codexPetOverlayKWinReadWindow(window, pet.internalId));
+  for (const [key, value] of [["pid", 31337], ["uuid", "other"], ["caption", "Other"],
+    ["x", "100"], ["y", null], ["width", -1], ["height", Infinity]]) {
+    const copy = structuredClone(reply);
+    copy.data[0][key].data = value;
+    controller.codexPetOverlayKWinCall = () => copy;
+    assert.equal(controller.codexPetOverlayKWinReadWindow(window, pet.internalId), null, key);
+  }
+  controller.codexPetOverlayKWinCall = () => ({ type: "a(sssuda{sv})", data: [[
+    [`0_${pet.internalId}`, pet.caption], [`0_${pet.internalId}`, pet.caption],
+  ]] });
+  assert.equal(controller.codexPetOverlayKWinFindWindow(window), null);
+});
+
+test("missing busctl is probed once and leaves local mascot dragging available", () => {
+  const { controller, start, calls } = kwinMascotDragScenario({ failNative: true });
+  start();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "busctl");
+  assert.equal(controller.codexPetOverlayKWinGeometryUnavailable, true);
+  controller.endDrag(1, {});
+  start();
+  assert.equal(calls.length, 1);
+  assert.ok(controller.codexPetOverlayMascotDragState);
+});
+
+test("the move-settle callback refreshes a compositor move outside the mascot gesture", async () => {
+  const { controller, window, start, end, pet, timers, persisted } = kwinMascotDragScenario();
+  start(); await settle();
+  await end();
+  pet.frameGeometry = { ...pet.frameGeometry, x: 400, y: -300 };
+  controller.rememberMovedWindow(window);
+  timers.at(-1).callback();
+  assert.equal(controller.anchor.x, 1450);
+  assert.equal(controller.anchor.y, 500);
+  assert.equal(persisted.at(-1).x, 1450);
+  assert.equal(persisted.at(-1).y, 500);
+});
+
+for (const name of ["handleNativeWindowDragMove", "rememberMovedWindow"]) {
+  test(`compositor geometry hooks fail closed when ${name} drifts`, () => {
+    const source = currentAvatarOverlayBundleFixture().replace(`${name}(e,t){`, `other${name}(e,t){`) +
+      `class Unrelated{${name}(e,t){}}`;
+    const { result, warnings } = captureWarnings(() => applyPetOverlayPatch(source));
+    assert.equal(result, source);
+    assert.match(warnings.join("\n"), /Pet overlay patch is incomplete/);
+  });
+}
+
+for (const options of [{ ozonePlatform: "x11" }, { failNative: true }]) {
+  test(`mascot dragging retains the local fallback: ${JSON.stringify(options)}`, () => {
+    const scenario = kwinMascotDragScenario(options);
+    scenario.start();
+    assert.ok(scenario.controller.codexPetOverlayMascotDragState);
+    assert.equal(scenario.controller.nativeWindowDragActive, false);
+    assert.equal(scenario.controller.dragState, undefined);
+    scenario.controller.endDrag(1, {});
+    assert.equal(scenario.controller.codexPetOverlayMascotDragState, null);
+  });
+}
+
+for (const variant of ["locked", "foreign-renderer"]) {
+  test(`Wayland mascot dragging preserves the ${variant} guard`, () => {
+    const scenario = kwinMascotDragScenario({ lockPosition: variant === "locked" });
+    scenario.start(variant === "foreign-renderer" ? 2 : 1);
+    assert.equal(scenario.calls.length, 0);
+    assert.equal(scenario.controller.codexPetOverlayMascotDragState, undefined);
+    assert.equal(scenario.controller.codexPetOverlayKWinDragState, undefined);
+  });
+}
+
+for (const reason of ["hidden", "closed"]) {
+  test(`interrupting a KWin drag stops the session when ${reason}`, async () => {
+    const { controller, window, workspace, pet, cursorSignal, bridgeCalls, start } = kwinMascotDragScenario();
+    start(); await settle();
+    let hintRequests = 0;
+    controller.codexPetOverlayScheduleKWinHints = () => { hintRequests += 1; };
+    try {
+      if (reason === "closed") window.isDestroyed = () => true;
+      else window.isVisible = () => false;
+      window.emit(reason === "closed" ? "closed" : "hide");
+      controller.unregisterNativeWindowDragTarget(reason);
+      await settle();
+      assert.equal(controller.codexPetOverlayKWinDragState, null);
+      assert.equal(controller.codexPetOverlayKWinPosition, null);
+      assert.equal(controller.nativeWindowDragActive, false);
+      assert.equal(bridgeCalls.filter(op => op === "stop").length, 1);
+      const bounds = { ...pet.frameGeometry };
+      workspace.cursorPos.x += 100; cursorSignal.emit();
+      assert.deepEqual({ ...pet.frameGeometry }, bounds);
+      assert.equal(hintRequests, 0, "hidden and closed windows must not schedule compositor hints");
+      controller.unregisterNativeWindowDragTarget(reason);
+      await settle();
+      assert.equal(bridgeCalls.filter(op => op === "stop").length, 1, "interrupt cleanup must run once");
+    } finally {
+      controller.codexPetOverlayEndKWinDrag(window);
+    }
+  });
+}
+
+test("a new mascot drag finishes the previous gesture in the same KWin session", async () => {
+  const scenario = kwinMascotDragScenario();
+  try {
+    scenario.start(); await settle();
+    const bridge = scenario.controller.codexPetOverlayKWinBridge;
+    scenario.start();
+    await settle();
+    assert.equal(scenario.controller.codexPetOverlayKWinBridge, bridge);
+    assert.deepEqual(scenario.bridgeCalls.filter(op => ["drag", "endDrag"].includes(op)), ["drag", "endDrag", "drag"]);
+    await scenario.end();
+  } finally {
+    scenario.controller.unregisterNativeWindowDragTarget("hidden");
+  }
+});
+
+for (const variant of ["missing", "foreign-owner"]) test(`native drag cleanup fails closed: ${variant}`, () => {
+  let source = currentAvatarOverlayBundleFixture().replace("unregisterNativeWindowDragTarget(e){", "otherNativeCleanup(e){");
+  if (variant === "foreign-owner") source += "class Other{unregisterNativeWindowDragTarget(e){try{}finally{}}}";
+  const { result, warnings } = captureWarnings(() => applyPetOverlayPatch(source));
+  assert.equal(result, source);
+  assert.match(warnings.join("\n"), /Pet overlay patch is incomplete/);
 });
 
 test("syncs overlay window hints without requiring Hyprland", () => {
@@ -890,6 +2097,34 @@ test("unlocked drag CSS protects native mascot markup without an overlay hit reg
     insertedCss[0],
     /\[data-avatar-mascot="true"\],\.no-drag,\[data-avatar-overlay-hit-region="notification-tray"\],\[data-avatar-overlay-hit-region="notification-scroll-control"\]\{-webkit-app-region:no-drag!important;app-region:no-drag!important;\}/,
   );
+});
+
+for (const [desktop, ozonePlatform, nativeKWin, kwin = true] of [
+  ["KDE", "wayland", true], ["KDE", "x11", false], ["niri", "wayland", false], ["Hyprland", "wayland", false],
+  ["KDE", "wayland", false, false],
+]) test(`overlay drag regions select one gesture owner: ${desktop} ${ozonePlatform} kwin=${kwin}`, () => {
+  const inserted = [], handlers = {};
+  const { controller } = controllerFromPatchedSource(applyPetOverlayPatch(currentAvatarOverlayBundleFixture(), {
+    feature: { settings: { petOverlay: { kwin } } },
+  }), {
+    ozonePlatform, process: { env: { XDG_CURRENT_DESKTOP: desktop } },
+  });
+  controller.codexPetOverlayInstallTransparentRenderer({ webContents: {
+    insertCSS: css => inserted.push(css), isDestroyed: () => false,
+    on: (event, callback) => { handlers[event] = callback; },
+  } });
+  handlers["did-finish-load"]();
+  assert.equal(inserted.length, 2);
+  for (const css of inserted) {
+    if (nativeKWin) {
+      assert.match(css, /html,body,#root,#root \*\{-webkit-app-region:no-drag!important;app-region:no-drag!important;\}/);
+      assert.doesNotMatch(css, /app-region:drag/,
+        "Chromium drag regions must not start a second native KWin move that bypasses the renderer gesture");
+    } else {
+      assert.match(css, /-webkit-app-region:drag!important/);
+      assert.doesNotMatch(css, /#root \*\{/);
+    }
+  }
 });
 
 test("locked pet overlays omit drag CSS and whole-window input", () => {
@@ -1179,6 +2414,7 @@ function createAsyncNiriDragScenario() {
   });
   const window = {
     getBounds: () => ({ x: 100, y: 100, width: 356, height: 320 }),
+    getContentBounds: () => ({ x: 100, y: 100, width: 356, height: 320 }),
     isDestroyed: () => false,
     webContents: { id: 1 },
   };
@@ -2048,8 +3284,8 @@ test("Niri endDrag drains the final move before persisting and docking", () => {
   assert.equal(completed[0][2], undefined);
   assert.deepEqual(completed[1], ["dock", { centerX: 1, centerY: 2 }, "dock-handler"]);
   assert.deepEqual(
-    JSON.parse(JSON.stringify(controller.rememberedWindowBounds)),
-    { x: 150, y: 100, width: 356, height: 320 },
+    { x: controller.anchor.x, y: controller.anchor.y },
+    { x: 150, y: 100 },
   );
   assert.equal(upstreamMoves, 0);
   assert.equal(controller.codexPetOverlayNiriDragState, null);
@@ -2239,7 +3475,7 @@ test("KWin hints target only the matching Plasma pet and apply its Wayland bound
           assert.equal(command, "qdbus6");
           assert.equal(options.timeout, 1500);
           if (args.includes("org.kde.kwin.Scripting.loadScript")) script = fs.readFileSync(args[3], "utf8");
-          callback(null, "ok");
+          callback(null, args.includes("org.kde.kwin.Scripting.loadScript") ? "0\n" : "ok");
         },
       },
     },
@@ -2274,6 +3510,7 @@ test("KWin drag uses qdbus, cleans up its temporary script, and honors its runti
         calls.push([command, args, options]);
         if (args.includes("org.kde.kwin.Scripting.loadScript")) {
           script = fs.readFileSync(args[3], "utf8");
+          return "0\n";
         }
       },
     },
@@ -2353,7 +3590,7 @@ test("KWin drag falls back without repeatedly probing missing qdbus commands", (
   controller.codexPetOverlayBeginKWinDrag(window);
 
   assert.equal(calls, 2);
-  assert.equal(controller.codexPetOverlayKWinDragState, undefined);
+  assert.equal(controller.codexPetOverlayKWinDragState, null);
   controller.codexPetOverlayBeginKWinDrag(window);
   assert.equal(calls, 2);
 });

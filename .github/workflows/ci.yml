@@ -24,8 +24,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends ripgrep
       - name: Shell syntax
         run: |
-          bash -n install.sh launcher/start.sh.template scripts/lib/*.sh
+          bash -n install.sh install-community launcher/start.sh.template scripts/lib/*.sh
+          bash -n scripts/bootstrap-wizard.sh scripts/install-deps.sh
           bash -n scripts/build-deb.sh scripts/build-rpm.sh scripts/build-pacman.sh scripts/build-appimage.sh
+      - name: Guided installer tests
+        run: python3 scripts/feature-picker.test.py
       - name: Node tests
         run: |
           node --test scripts/ci/*.test.js
@@ -34,6 +37,7 @@ jobs:
           node --check scripts/ci/verify-official-linux-features.js
           node --test scripts/automation/upstream-linux-package-watchdog/test.js
           node --test scripts/patch-linux-window-ui.test.js scripts/patches/descriptor.test.js \
+            scripts/patches/lib/global-shortcuts-portal.test.js \
             scripts/patches/core/*/test.js \
             scripts/lib/linux-features.test.js linux-features/*/test.js
       - name: Smoke tests
@@ -64,6 +68,14 @@ jobs:
             -u XDG_CURRENT_DESKTOP -u XDG_SESSION_TYPE \
             cargo test -p codex-computer-use-linux --all-targets -- --test-threads=1
           cargo clippy -p codex-computer-use-linux --all-targets -- -D warnings
+      - name: Test global shortcuts helper
+        run: |
+          cargo test --manifest-path global-dictation-linux/Cargo.toml
+          cargo clippy --manifest-path global-dictation-linux/Cargo.toml --all-targets -- -D warnings
+      - name: Test Mini KWin helper
+        run: |
+          cargo test --manifest-path linux-features/pet-overlay/kwin-helper/Cargo.toml
+          cargo clippy --manifest-path linux-features/pet-overlay/kwin-helper/Cargo.toml --all-targets -- -D warnings
 
   nix-build:
     strategy:

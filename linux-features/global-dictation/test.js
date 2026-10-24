@@ -3,7 +3,6 @@
 
 const assert = require("node:assert/strict");
 const { execFileSync, spawnSync } = require("node:child_process");
-const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -17,8 +16,7 @@ const {
   normalizePatchDescriptors,
 } = require("../../scripts/patches/engine.js");
 const {
-  applyLinuxGlobalDictationMainProcessPatch,
-  descriptors,
+  descriptors, applyLinuxGlobalDictationMainProcessPatch,
 } = require("./patch.js");
 
 const hostPathEntries = (process.env.PATH ?? "")
@@ -45,78 +43,7 @@ function findHostExecutable(name) {
 
 const hostBash = findHostExecutable("bash");
 
-function applyPatchTwice(source) {
-  const patched = applyLinuxGlobalDictationMainProcessPatch(source);
-  assert.notEqual(patched, source);
-  assert.equal(applyLinuxGlobalDictationMainProcessPatch(patched), patched);
-  assert.doesNotThrow(() => new vm.Script(patched));
-  return patched;
-}
-
-function mainBundleFixture() {
-  return [
-    "var p=require(`node:fs`),u=require(`node:path`),h=require(`node:child_process`),c=require(`electron`),r={r:()=>({warning(){}})};",
-    "function Kk(e,t){let n=``;e.stdout?.on(`data`,e=>{n+=e.toString(`utf8`);let r=n.indexOf(`\\n`);for(;r!==-1;)t(n.slice(0,r).trim()),n=n.slice(r+1),r=n.indexOf(`\\n`)})}",
-    "function eA(e,t,n){let r=n?.ownership,i=t.onReleased,a=t.onCancelled,o=r==null?t:{onPressed:()=>{r.isOwner()&&t.onPressed()},onReleased:i==null?void 0:()=>{r.isOwner()&&i()},onCancelled:a==null?void 0:()=>{r.isOwner()&&a()}};if(process.platform===`win32`&&uV(e))return eBe(e,o);if(Rk(e)||Qk(e))return Lk(e)||Qk(e)?Mk(e,o,n?.bareModifierTrigger):null;let s=oA(e),l=()=>{o.onPressed()},d=c.globalShortcut.register(s,l);return d?process.platform===`darwin`?sA({hotkey:e,onPressed:l,registrationHotkey:s}):{handlesRelease:!1,unregister:()=>{c.globalShortcut.unregister(s)}}:null}",
-    "function fA(e){if(process.platform===`win32`&&uV(e))return null;let t=xV(e,process.platform,{allowUnmodified:!0});if(t!=null)return t;if(Lk(e))return null;return null}",
-    "function pA(e,t){switch(process.platform){case`darwin`:{let n=Ik(mA(e),t);if(n==null)throw Error(`Global dictation hotkey release watching is not supported.`);return n}case`win32`:{let n=gA(e,process.platform);if(n==null)throw Error(`Global dictation hotkey release watching is not supported.`);return BA((0,h.spawn)(`powershell.exe`,[],{stdio:`ignore`}),t)}case`aix`:case`android`:case`cygwin`:case`freebsd`:case`haiku`:case`linux`:case`netbsd`:case`openbsd`:case`sunos`:throw Error(`Global dictation hotkey release watching is not supported.`)}}",
-    "function mA(e){let t=[];for(let n of e.split(`+`)){let e=uA.get(n.trim().toLowerCase());e!=null&&!t.includes(e)&&t.push(e)}return t}",
-    "function _A(){return [`/unrelated/native/path`]}",
-    "function BA(e,t){let n=!1,i=e=>{n||(n=!0,e!=null&&r.r().warning(`Global dictation hotkey release watching failed`,{safe:{},sensitive:{error:e}}),t())};return e.once(`error`,i),e.once(`exit`,()=>i()),{dispose:()=>{n=!0,e.kill()}}}",
-    "function k7(e,t,n){return{x:e.centerX-n.x-t.width/2,y:e.centerY-n.y-t.height/2,...t}}var V7=async(...e)=>globalThis.__upstreamExecFile(...e);async function P7(){switch(process.platform){case`darwin`:await V7(`/usr/bin/osascript`,[]);return;case`win32`:return;case`aix`:case`android`:case`cygwin`:case`freebsd`:case`haiku`:case`linux`:case`netbsd`:case`openbsd`:case`sunos`:throw Error(`Global dictation paste is not supported on this OS.`)}}",
-    "var H7=class{registeredHotkey=null;registeredHotkeyRegistration=null;registeredToggleHotkey=null;registeredToggleHotkeyRegistration=null;registerHotkeyOrThrow(e,t){if(this.registeredHotkey===e)return;let n=this.registeredHotkey,r=eA(e,{onPressed:()=>{this.ensureHotkeyReleaseWatchers(),this.shortcutGestures.press(`primary`,Wl(e)||process.platform===`win32`&&oP(e))},onReleased:()=>this.shortcutGestures.release(`primary`),onCancelled:()=>this.shortcutGestures.cancelPress(`primary`)},{ownership:t,bareModifierTrigger:`cancellablePress`});if(r==null)throw Error(`Unable to register global dictation hotkey: ${e}`);n!=null&&this.registeredHotkeyRegistration?.unregister(),this.registeredHotkey=e,this.registeredHotkeyRegistration=r}unregisterHotkey(){this.registeredHotkey!=null&&(this.registeredHotkeyRegistration?.unregister(),this.registeredHotkey=null,this.registeredHotkeyRegistration=null)}registerToggleHotkeyOrThrow(e,t){if(this.registeredToggleHotkey===e)return;let n=this.registeredToggleHotkey,r=eA(e,{onPressed:()=>{this.ensureHotkeyReleaseWatchers(),this.shortcutGestures.press(`single-tap`,Wl(e)||process.platform===`win32`&&oP(e))},onReleased:()=>this.shortcutGestures.release(`single-tap`),onCancelled:()=>this.shortcutGestures.cancelPress(`single-tap`)},{bareModifierTrigger:`cancellablePress`,ownership:t});if(r==null)throw Error(`Unable to register global dictation toggle hotkey: ${e}`);n!=null&&this.registeredToggleHotkeyRegistration?.unregister(),this.registeredToggleHotkey=e,this.registeredToggleHotkeyRegistration=r}unregisterToggleHotkey(){this.registeredToggleHotkey!=null&&(this.registeredToggleHotkeyRegistration?.unregister(),this.registeredToggleHotkey=null,this.registeredToggleHotkeyRegistration=null)}deactivateLifecycle(){this.unregisterHotkey(),this.unregisterToggleHotkey()}ensureHotkeyReleaseWatchers(){}};",
-    "function W7(){return process.platform===`darwin`||process.platform===`win32`}",
-  ].join("");
-}
-
-function fakeHelperChild() {
-  const child = new EventEmitter();
-  child.stdin = {
-    writes: [],
-    write(value, callback) {
-      this.writes.push(value);
-      callback?.();
-      return true;
-    },
-  };
-  child.stdout = new EventEmitter();
-  child.stderr = new EventEmitter();
-  child.kill = () => {
-    child.killed = true;
-    return true;
-  };
-  return child;
-}
-
-function waylandPatchContext(children) {
-  const context = {
-    Buffer,
-    console: { warn() {} },
-    process: {
-      env: { XDG_SESSION_TYPE: "wayland", WAYLAND_DISPLAY: "wayland-0" },
-      platform: "linux",
-      resourcesPath: "/test/resources",
-    },
-    require(id) {
-      if (id === "node:fs") return { accessSync() {}, constants: { X_OK: 1 } };
-      if (id === "node:path") return path;
-      if (id === "node:child_process") {
-        return {
-          spawn: () => children.shift(),
-          execFile: (...args) => context.__execFile(...args),
-        };
-      }
-      if (id === "electron") return { app: { getAppPath: () => null }, globalShortcut: {} };
-      throw new Error(`unexpected module: ${id}`);
-    },
-    clearTimeout,
-    setTimeout,
-    __execFile: (_file, _args, _options, callback) => callback(),
-    __upstreamExecFile: async () => {},
-  };
-  vm.runInNewContext(applyPatchTwice(mainBundleFixture()), context);
-  return context;
-}
+const {mainBundleFixture,applyPatchTwice,waylandPatchContext,fakeHelperChild}=require("../../scripts/patches/lib/global-shortcuts-portal.test-helpers.js");
 
 function writeExecutable(filePath, body) {
   fs.writeFileSync(filePath, body, { mode: 0o755 });
@@ -198,7 +125,7 @@ test("main patch enables Linux and preserves the other platform gates", () => {
     patched,
     /function W7\(\)\{return process\.platform===`darwin`\|\|process\.platform===`win32`\|\|process\.platform===`linux`\}/,
   );
-  assert.match(patched, /case`linux`:if\(codexLinuxGlobalDictationUsesWayland\(\)\)/);
+  assert.match(patched, /case`linux`:if\(codexLinuxGlobalShortcutsUsesWayland\(\)\)/);
   assert.match(
     patched,
     /await codexLinuxGlobalDictationPasteX11\(\)/,
@@ -210,7 +137,26 @@ test("main patch enables Linux and preserves the other platform gates", () => {
 test("main patch accepts the verified Windows-first registration and validation layout", () => {
   const patched = applyPatchTwice(mainBundleFixture());
   assert.match(patched, /process\.platform===`linux`&&Rk\(e\).*Modifier-only shortcuts/u);
-  assert.match(patched, /codexLinuxGlobalDictationPortalRegistration/u);
+  assert.match(patched, /codexLinuxGlobalShortcutsPortalRegistration/u);
+});
+
+test("modifier validation is scoped to the registration function", () => {
+  const source = "function unrelated(e){if(unrelatedCheck(e)||otherCheck(e))return;}" + mainBundleFixture();
+  const patched = applyPatchTwice(source);
+  assert.match(patched, /process\.platform===`linux`&&Rk\(e\).*Modifier-only shortcuts/u);
+  assert.doesNotMatch(patched, /linux`&&unrelatedCheck\(e\)/);
+});
+
+test("dictation registration failures clean up only their own action", () => {
+  const ctx = waylandPatchContext([]);
+  const controller = vm.runInNewContext("new H7()", ctx);
+  const removed = [];
+  controller.unregisterHotkey = () => removed.push("hold");
+  controller.unregisterToggleHotkey = () => removed.push("toggle");
+  controller.deactivateLifecycle = () => assert.fail("failure must be scoped to one action");
+  controller.handleLinuxHotkeyUnavailable("hold", new Error("denied"));
+  controller.handleLinuxHotkeyUnavailable("toggle", new Error("denied"));
+  assert.deepEqual(removed, ["hold", "toggle"]);
 });
 
 test("main patch rejects retired, partial, duplicate, and ambiguous toggle registrations", () => {
@@ -238,7 +184,7 @@ test("main patch handles dollar signs in minified identifiers", () => {
     .join("L$k");
   const patched = applyPatchTwice(source);
   assert.match(patched, /function e\$A\(e,t,n\)/);
-  assert.match(patched, /e\$A\(e,\{onPressed:/);
+  assert.match(patched, /e\$A\(e,\{linuxCommandId:"globalDictationHold",onPressed:/);
   assert.match(patched, /Rk\(e\)\)return`Modifier-only shortcuts/);
 });
 
@@ -251,69 +197,7 @@ test("main patch fails closed when the ownership release alias drifts", () => {
     );
   assert.notEqual(source, mainBundleFixture());
   assert.equal(applyLinuxGlobalDictationMainProcessPatch(source), source);
-  assert.doesNotMatch(source, /codex-linux-global-dictation-v2/);
-});
-
-test("Wayland registration uses a release-aware portal helper", () => {
-  const patched = applyPatchTwice(mainBundleFixture());
-  assert.match(patched, /function codexLinuxGlobalDictationUsesWayland\(/);
-  assert.match(patched, /function codexLinuxGlobalDictationPortalRegistration\(/);
-  assert.match(patched, /codexLinuxGlobalDictationPortalQueue=Promise\.resolve\(\)/);
-  assert.match(patched, /handlesRelease: true/);
-  assert.match(patched, /line === "down" && isReady && !pressed/);
-  assert.match(patched, /line === "up" && isReady && pressed/);
-  assert.match(patched, /onUnavailable:/);
-});
-
-test("Wayland registration forwards one press and release per helper transition", async () => {
-  const child = fakeHelperChild();
-  const context = waylandPatchContext([child]);
-
-  let pressed = 0;
-  let released = 0;
-  let unavailable = 0;
-  const registration = context.codexLinuxGlobalDictationPortalRegistration("Ctrl+Space", {
-    onPressed: () => pressed++,
-    onReleased: () => released++,
-    onUnavailable: () => unavailable++,
-  });
-  await new Promise(setImmediate);
-  child.stdout.emit("data", Buffer.from("ready\ndown\ndown\nup\nup\n"));
-  await new Promise(setImmediate);
-
-  assert.equal(registration.handlesRelease, true);
-  assert.equal(pressed, 1);
-  assert.equal(released, 1);
-  assert.equal(unavailable, 0);
-  const paste = context.P7();
-  await new Promise(setImmediate);
-  assert.deepEqual(child.stdin.writes, ["paste\n"]);
-  child.stdout.emit("data", Buffer.from("paste-ok\n"));
-  await paste;
-  registration.unregister();
-  assert.equal(child.killed, true);
-});
-
-test("Wayland paste errors reject only the active request", async () => {
-  const child = fakeHelperChild();
-  const context = waylandPatchContext([child]);
-  const registration = context.codexLinuxGlobalDictationPortalRegistration("Ctrl+Space", {});
-  await new Promise(setImmediate);
-  child.stdout.emit("data", Buffer.from("ready\n"));
-  await new Promise(setImmediate);
-
-  const firstPaste = context.P7();
-  await new Promise(setImmediate);
-  await assert.rejects(context.P7(), /already pending/);
-  child.stdout.emit("data", Buffer.from("paste-error:permission denied\n"));
-  await assert.rejects(firstPaste, /permission denied/);
-
-  const retry = context.P7();
-  await new Promise(setImmediate);
-  child.stdout.emit("data", Buffer.from("paste-ok\n"));
-  await retry;
-  assert.deepEqual(child.stdin.writes, ["paste\n", "paste\n"]);
-  registration.unregister();
+  assert.doesNotMatch(source, /codex-linux-global-dictation-v3/);
 });
 
 test("X11 paste uses xdotool with fixed arguments", async () => {
@@ -339,33 +223,6 @@ test("X11 paste propagates xdotool failures", async () => {
   };
 
   await assert.rejects(context.P7(), /xdotool failed/);
-});
-
-test("Wayland helper failure is reported once and releases the registration queue", async () => {
-  const firstChild = fakeHelperChild();
-  const secondChild = fakeHelperChild();
-  const context = waylandPatchContext([firstChild, secondChild]);
-  const failures = [];
-  context.codexLinuxGlobalDictationPortalRegistration("Ctrl+Space", {
-    onPressed() {
-      assert.fail("failed helper must not emit a press");
-    },
-    onUnavailable: (error) => failures.push(error.message),
-  });
-  await new Promise(setImmediate);
-  firstChild.stderr.emit("data", Buffer.from("portal unavailable"));
-  firstChild.emit("exit", 1);
-  await new Promise((resolve) => setTimeout(resolve, 10));
-
-  assert.deepEqual(failures, ["portal unavailable"]);
-  assert.equal(firstChild.killed, true);
-
-  const next = context.codexLinuxGlobalDictationPortalRegistration("Ctrl+Space", {});
-  await new Promise(setImmediate);
-  secondChild.stdout.emit("data", Buffer.from("ready\n"));
-  await new Promise(setImmediate);
-  next.unregister();
-  assert.equal(secondChild.killed, true);
 });
 
 test("X11 hold mode starts the bounded release watcher", () => {
@@ -398,14 +255,6 @@ test("X11 hold watcher exposes a disposable and releases once", async () => {
   await new Promise(setImmediate);
   assert.equal(secondChild.killed, true);
   assert.equal(releases, 1);
-});
-
-test("portal failure tears down the existing lifecycle without dropping other platforms", () => {
-  const patched = applyPatchTwice(mainBundleFixture());
-  assert.match(patched, /handleLinuxHotkeyUnavailable\(e,t\)/);
-  assert.match(patched, /this\.deactivateLifecycle\(\)/);
-  assert.match(patched, /onUnavailable:n=>\{this\.handleLinuxHotkeyUnavailable\(`hold`,n\)\}/);
-  assert.match(patched, /onUnavailable:n=>\{this\.handleLinuxHotkeyUnavailable\(`toggle`,n\)\}/);
 });
 
 test("feature descriptor stays limited to the main bundle", () => {
@@ -655,11 +504,13 @@ test("X11 release watcher fails closed without a display or modifier", () => {
 test("stage hook accepts a verified prebuilt helper", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "global-dictation-stage-"));
   try {
+    const helper = path.join(tempDir, "helper");
+    writeExecutable(helper, "#!/bin/sh\nexit 0\n");
     execFileSync(path.join(__dirname, "stage.sh"), {
       cwd: path.resolve(__dirname, "../.."),
       env: {
         ...process.env,
-        CODEX_GLOBAL_DICTATION_LINUX_SOURCE: process.execPath,
+        CODEX_GLOBAL_DICTATION_LINUX_SOURCE: helper,
         INSTALL_DIR: tempDir,
         SCRIPT_DIR: path.resolve(__dirname, "../.."),
       },
@@ -673,7 +524,7 @@ test("stage hook accepts a verified prebuilt helper", () => {
 });
 
 test("stage hook requires a release artifact and never invokes Cargo", () => {
-  const stage = fs.readFileSync(path.join(__dirname, "stage.sh"), "utf8");
+  const stage = fs.readFileSync(path.join(__dirname, "../../scripts/lib/stage-global-shortcuts.sh"), "utf8");
   assert.doesNotMatch(stage, /cargo\s+(?:build|install)/);
   assert.match(stage, /global-dictation-linux\/target\/release\/codex-global-dictation-linux/);
 
@@ -686,7 +537,7 @@ test("stage hook requires a release artifact and never invokes Cargo", () => {
           ...process.env,
           CODEX_GLOBAL_DICTATION_LINUX_SOURCE: path.join(tempDir, "missing-helper"),
           INSTALL_DIR: path.join(tempDir, "install"),
-          SCRIPT_DIR: tempDir,
+          SCRIPT_DIR: path.resolve(__dirname, "../.."),
         },
         stdio: "pipe",
       }),

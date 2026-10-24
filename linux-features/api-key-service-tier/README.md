@@ -45,12 +45,16 @@ provider explicitly documents such a model alias.
 
 ## Behavior
 
-- API-key-authenticated hosts are allowed to show Fast mode controls once authentication finishes. The current service-tier access cache tracks auth method changes; ChatGPT and personal-access-token hosts keep upstream account requirements.
+- API-key-authenticated hosts are allowed to show Fast service-tier controls.
+  The current upstream access object keeps synthetic Ultrafast access disabled;
+  ChatGPT, personal-access-token, and Amazon Bedrock hosts retain their upstream
+  speed-mode requirements and pending state.
 - If an API-key host's active model has no `serviceTiers` metadata, the UI
   synthesizes one `fast` option so the selector can send
   `serviceTier: "fast"`.
-- ChatGPT-authenticated hosts still use upstream account requirements for
-  official Fast mode and do not receive synthetic service-tier metadata.
+- ChatGPT-, personal-access-token-, and Amazon Bedrock-authenticated hosts still
+  use upstream account requirements for official Fast mode and do not receive
+  synthetic API-key service-tier access or metadata.
 
 ## Risks
 
