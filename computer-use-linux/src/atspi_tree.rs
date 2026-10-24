@@ -3,7 +3,10 @@ use anyhow::{anyhow, Context, Result};
 use atspi::{
     proxy::{
         accessible::{AccessibleProxy, ObjectRefExt},
-        proxy_ext::ProxyExt,
+        action::ActionProxy,
+        editable_text::EditableTextProxy,
+        proxy_ext::{Proxies, ProxyExt},
+        text::TextProxy,
     },
     CoordType, ObjectRef, ObjectRefOwned, StateSet,
 };
@@ -14,11 +17,11 @@ use futures_util::{stream, StreamExt};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::{collections::VecDeque, future::Future, time::Duration};
-use tokio::time::timeout;
+use tokio::time::{sleep_until, timeout, timeout_at, Instant};
 use zbus::{
     fdo::DBusProxy,
     names::{BusName, UniqueName},
-    zvariant::ObjectPath,
+    zvariant::{ObjectPath, OwnedObjectPath},
 };
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -99,10 +102,22 @@ pub struct ActionInvocation {
 #[derive(Debug, Clone)]
 pub enum ValueSetInvocation {
     Numeric { value: f64 },
-    EditableText,
+    EditableText { outcome: EditableTextSetOutcome },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditableTextSetOutcome {
+    Verified,
+    MismatchAfterDeadline,
+    ReadbackFailed,
+    ReadbackTimedOut,
+    PasswordUnverifiable,
 }
 
 const MAX_TEXT_READBACK_CHARS: i32 = 4096;
+const EDITABLE_TEXT_READ_CHUNK_CHARS: i32 = 4096;
+const EDITABLE_TEXT_VERIFY_TIMEOUT: Duration = Duration::from_secs(1);
+const EDITABLE_TEXT_VERIFY_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_TEXT_SELECTIONS: i32 = 8;
 const DEFAULT_SNAPSHOT_MAX_NODES: usize = 1_000;
 const HARD_SNAPSHOT_MAX_NODES: usize = 2_000;
@@ -110,6 +125,8 @@ const DEFAULT_SNAPSHOT_MAX_DEPTH: u32 = 32;
 const HARD_SNAPSHOT_MAX_DEPTH: u32 = 64;
 const CHILD_READ_CONCURRENCY: usize = 16;
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_ACTIONS_PER_OBJECT: i32 = 64;
+const ACTION_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_DISCOVERY_ROOTS: usize = 256;
 const ROOT_MATCH_CHILD_LIMIT: usize = 8;
 const MAX_DISCOVERY_CHILD_READS: usize = MAX_DISCOVERY_ROOTS * ROOT_MATCH_CHILD_LIMIT;
@@ -248,10 +265,30 @@ async fn children_up_to(
     let child_count = proxy.child_count().await?;
     Ok(
         fetch_indexed_up_to(child_count, limit, remaining_attempts, |index| {
-            proxy.get_child_at_index(index)
+            child_at_index(proxy, index)
         })
         .await,
     )
+}
+
+async fn child_at_index(proxy: &AccessibleProxy<'_>, index: i32) -> zbus::Result<ObjectRefOwned> {
+    // WebKit sockets return a well-known bus name. atspi's ObjectRef decoder
+    // only accepts unique names, so resolve the wire reference before using it.
+    let (name, path): (String, OwnedObjectPath) =
+        proxy.inner().call("GetChildAtIndex", &(index,)).await?;
+    if path.as_str() == "/org/a11y/atspi/null" {
+        return Ok(ObjectRef::Null.into());
+    }
+    match BusName::try_from(name)? {
+        BusName::Unique(name) => Ok(ObjectRef::new_owned(name, path)),
+        name => {
+            let owner = DBusProxy::new(proxy.inner().connection())
+                .await?
+                .get_name_owner(name)
+                .await?;
+            Ok(ObjectRef::new_owned(owner, path))
+        }
+    }
 }
 
 pub async fn list_accessible_apps(limit: usize) -> Result<Vec<AccessibleAppSummary>> {
@@ -579,26 +616,32 @@ async fn perform_action_inner(
     requested_action: Option<&str>,
     name_only: bool,
 ) -> Result<ActionInvocation> {
-    let conn = connect().await?;
     let object_ref = object_ref_from_id(object_ref_id)?;
-    let proxy = open_accessible(&conn, &object_ref)
-        .await
-        .with_context(|| format!("failed to open AT-SPI object {object_ref_id}"))?;
-    let action = proxy
-        .proxies()
-        .await?
-        .action()
-        .await
-        .context("element does not expose the AT-SPI Action interface")?;
-    let actions = action.get_actions().await.unwrap_or_default();
-    let action_index = if name_only {
-        select_named_action_index(&actions, requested_action.unwrap_or_default())?
-    } else {
-        select_action_index(&actions, requested_action)?
-    };
-    let action_name = actions
-        .get(action_index as usize)
-        .map(|action| action.name.clone());
+    let (action, action_index, action_name) = timeout(ACTION_QUERY_TIMEOUT, async {
+        let conn = connect().await?;
+        let proxy = open_accessible(&conn, &object_ref)
+            .await
+            .with_context(|| format!("failed to open AT-SPI object {object_ref_id}"))?;
+        let action = proxy
+            .proxies()
+            .await?
+            .action()
+            .await
+            .context("element does not expose the AT-SPI Action interface")?;
+        let actions = read_actions(&action).await?;
+        let action_index = if name_only {
+            select_named_action_index(&actions, requested_action.unwrap_or_default())?
+        } else {
+            select_action_index(&actions, requested_action)?
+        };
+        let action_name = actions
+            .get(action_index as usize)
+            .map(|action| action.name.clone());
+        Ok::<_, anyhow::Error>((action, action_index, action_name))
+    })
+    .await
+    .context("AT-SPI action revalidation exceeded its 5-second deadline")??;
+    // Only time out the reads: once DoAction is sent, it may already have acted.
     let ok = action
         .do_action(action_index)
         .await
@@ -618,7 +661,14 @@ pub async fn set_element_value(object_ref_id: &str, value: &str) -> Result<Value
         .await
         .with_context(|| format!("failed to open AT-SPI object {object_ref_id}"))?;
     let proxies = proxy.proxies().await?;
+    set_element_value_with_proxies(&proxy, &proxies, value).await
+}
 
+async fn set_element_value_with_proxies(
+    proxy: &AccessibleProxy<'_>,
+    proxies: &Proxies<'_>,
+    value: &str,
+) -> Result<ValueSetInvocation> {
     if let Ok(numeric_value) = value.parse::<f64>() {
         if let Ok(value_proxy) = proxies.value().await {
             value_proxy
@@ -634,14 +684,7 @@ pub async fn set_element_value(object_ref_id: &str, value: &str) -> Result<Value
     }
 
     if let Ok(editable_text) = proxies.editable_text().await {
-        let ok = editable_text
-            .set_text_contents(value)
-            .await
-            .context("failed to set AT-SPI editable text contents")?;
-        if ok {
-            return Ok(ValueSetInvocation::EditableText);
-        }
-        return Err(anyhow!("AT-SPI EditableText rejected the new contents"));
+        return set_editable_text_contents(proxy, proxies, &editable_text, value).await;
     }
 
     if value.parse::<f64>().is_err() && proxies.value().await.is_ok() {
@@ -653,6 +696,119 @@ pub async fn set_element_value(object_ref_id: &str, value: &str) -> Result<Value
     Err(anyhow!(
         "element does not expose AT-SPI Value or EditableText interfaces"
     ))
+}
+
+async fn set_editable_text_contents(
+    proxy: &AccessibleProxy<'_>,
+    proxies: &Proxies<'_>,
+    editable_text: &EditableTextProxy<'_>,
+    value: &str,
+) -> Result<ValueSetInvocation> {
+    let ok = editable_text
+        .set_text_contents(value)
+        .await
+        .context("failed to set AT-SPI editable text contents")?;
+    if !ok {
+        return Err(anyhow!("AT-SPI EditableText rejected the new contents"));
+    }
+
+    let outcome = verify_editable_text_contents(proxy, proxies, value).await;
+    Ok(ValueSetInvocation::EditableText { outcome })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditableTextReadbackError {
+    Failed,
+    TimedOut,
+}
+
+async fn readback_within<T, E>(
+    deadline: Instant,
+    read: impl Future<Output = std::result::Result<T, E>>,
+) -> std::result::Result<T, EditableTextReadbackError> {
+    timeout_at(deadline, read)
+        .await
+        .map_err(|_| EditableTextReadbackError::TimedOut)?
+        .map_err(|_| EditableTextReadbackError::Failed)
+}
+
+async fn text_readback_matches(
+    text: &TextProxy<'_>,
+    requested: &str,
+    deadline: Instant,
+) -> std::result::Result<bool, EditableTextReadbackError> {
+    let character_count = readback_within(deadline, text.character_count()).await?;
+    if character_count < 0 {
+        return Err(EditableTextReadbackError::Failed);
+    }
+    if character_count as usize != requested.chars().count() {
+        return Ok(false);
+    }
+
+    let mut requested_chars = requested.chars();
+    let mut offset = 0;
+    while offset < character_count {
+        let end = offset
+            .saturating_add(EDITABLE_TEXT_READ_CHUNK_CHARS)
+            .min(character_count);
+        let chunk = readback_within(deadline, text.get_text(offset, end)).await?;
+        let chunk_len = (end - offset) as usize;
+        if !chunk.chars().eq(requested_chars.by_ref().take(chunk_len)) {
+            return Ok(false);
+        }
+        offset = end;
+    }
+
+    Ok(true)
+}
+
+async fn verify_editable_text_contents(
+    proxy: &AccessibleProxy<'_>,
+    proxies: &Proxies<'_>,
+    requested: &str,
+) -> EditableTextSetOutcome {
+    let deadline = Instant::now() + EDITABLE_TEXT_VERIFY_TIMEOUT;
+    match readback_within(deadline, proxy.get_role()).await {
+        Ok(atspi::Role::PasswordText) => return EditableTextSetOutcome::PasswordUnverifiable,
+        Ok(_) => {}
+        Err(EditableTextReadbackError::Failed) => {
+            return EditableTextSetOutcome::ReadbackFailed;
+        }
+        Err(EditableTextReadbackError::TimedOut) => {
+            return EditableTextSetOutcome::ReadbackTimedOut;
+        }
+    }
+    let text = match readback_within(deadline, proxies.text()).await {
+        Ok(text) => text,
+        Err(EditableTextReadbackError::Failed) => {
+            return EditableTextSetOutcome::ReadbackFailed;
+        }
+        Err(EditableTextReadbackError::TimedOut) => {
+            return EditableTextSetOutcome::ReadbackTimedOut;
+        }
+    };
+
+    loop {
+        match text_readback_matches(&text, requested, deadline).await {
+            Ok(true) => return EditableTextSetOutcome::Verified,
+            Ok(false) => {}
+            Err(EditableTextReadbackError::Failed) => {
+                return EditableTextSetOutcome::ReadbackFailed;
+            }
+            Err(EditableTextReadbackError::TimedOut) => {
+                return EditableTextSetOutcome::ReadbackTimedOut;
+            }
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return EditableTextSetOutcome::MismatchAfterDeadline;
+        }
+        sleep_until((now + EDITABLE_TEXT_VERIFY_INTERVAL).min(deadline)).await;
+        if Instant::now() >= deadline {
+            return EditableTextSetOutcome::MismatchAfterDeadline;
+        }
+    }
 }
 
 async fn connect() -> Result<AccessibilityConnection> {
@@ -951,8 +1107,7 @@ async fn actions_from_proxies(
         return Vec::new();
     };
 
-    action_proxy
-        .get_actions()
+    read_actions(&action_proxy)
         .await
         .unwrap_or_default()
         .into_iter()
@@ -964,6 +1119,45 @@ async fn actions_from_proxies(
             keybinding: action.keybinding,
         })
         .collect()
+}
+
+async fn read_actions(proxy: &ActionProxy<'_>) -> Result<Vec<atspi::Action>> {
+    // WebKit can advertise GetActions without replying to it. The indexed
+    // methods work, and must also be used when revalidating a cached action.
+    // Keep the wire spelling: the current atspi binding asks for "Nactions".
+    timeout(ACTION_QUERY_TIMEOUT, async {
+        let count = proxy
+            .inner()
+            .get_property::<i32>("NActions")
+            .await
+            .context("failed to read AT-SPI action count")?;
+        if count > MAX_ACTIONS_PER_OBJECT {
+            return Err(anyhow!(
+                "AT-SPI action count {count} exceeds the {MAX_ACTIONS_PER_OBJECT}-action read budget"
+            ));
+        }
+        if count < 0 {
+            return Err(anyhow!("invalid negative AT-SPI action count {count}"));
+        }
+        Ok(stream::iter(0..count)
+            .map(|index| async move {
+                let (name, description, keybinding) = tokio::join!(
+                    proxy.get_name(index),
+                    proxy.get_description(index),
+                    proxy.get_key_binding(index),
+                );
+                atspi::Action {
+                    name: name.unwrap_or_default(),
+                    description: description.unwrap_or_default(),
+                    keybinding: keybinding.unwrap_or_default(),
+                }
+            })
+            .buffered(CHILD_READ_CONCURRENCY)
+            .collect()
+            .await)
+    })
+    .await
+    .context("AT-SPI action reads exceeded their 5-second deadline")?
 }
 
 async fn states_from_proxy(proxy: &AccessibleProxy<'_>) -> Vec<String> {
@@ -1121,6 +1315,912 @@ fn object_ref_id(object_ref: &ObjectRefOwned) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Child, Command, Stdio},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+    };
+
+    struct PrivateBus(Child);
+
+    impl PrivateBus {
+        fn start() -> (Self, String) {
+            let mut bus = Self(
+                Command::new("dbus-daemon")
+                    .args(["--session", "--nofork", "--nopidfile", "--print-address=1"])
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
+            let mut address = String::new();
+            BufReader::new(bus.0.stdout.take().unwrap())
+                .read_line(&mut address)
+                .unwrap();
+            (bus, address.trim().to_string())
+        }
+    }
+
+    impl Drop for PrivateBus {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    const EDITABLE_FIXTURE_PATH: &str = "/editable";
+
+    #[derive(Default)]
+    struct FakeEditableState {
+        contents: String,
+        mutations: usize,
+        character_count_reads: usize,
+        get_text_reads: usize,
+        numeric_value: f64,
+        numeric_writes: usize,
+    }
+
+    #[derive(Clone, Copy)]
+    enum FakeMutation {
+        Apply,
+        NoOp,
+        Delayed,
+        Normalize,
+        Mask,
+        Reject,
+        Fail,
+    }
+
+    #[derive(Clone, Copy)]
+    enum FakeTextBehavior {
+        Normal,
+        CharacterCountError,
+        GetTextError,
+        NegativeCount,
+        StallCharacterCount,
+    }
+
+    #[derive(Clone, Copy)]
+    struct FakeEditableConfig {
+        mutation: FakeMutation,
+        text: FakeTextBehavior,
+        role: atspi::Role,
+        has_text: bool,
+        has_value: bool,
+    }
+
+    impl Default for FakeEditableConfig {
+        fn default() -> Self {
+            Self {
+                mutation: FakeMutation::Apply,
+                text: FakeTextBehavior::Normal,
+                role: atspi::Role::Text,
+                has_text: true,
+                has_value: false,
+            }
+        }
+    }
+
+    struct FakeEditableAccessible(FakeEditableConfig);
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl FakeEditableAccessible {
+        #[zbus(property)]
+        fn child_count(&self) -> i32 {
+            0
+        }
+
+        fn get_interfaces(&self) -> Vec<&str> {
+            let mut interfaces = vec!["org.a11y.atspi.Accessible", "org.a11y.atspi.EditableText"];
+            if self.0.has_text {
+                interfaces.push("org.a11y.atspi.Text");
+            }
+            if self.0.has_value {
+                interfaces.push("org.a11y.atspi.Value");
+            }
+            interfaces
+        }
+
+        fn get_role(&self) -> atspi::Role {
+            self.0.role
+        }
+    }
+
+    struct FakeEditableText {
+        state: Arc<Mutex<FakeEditableState>>,
+        mutation: FakeMutation,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.EditableText")]
+    impl FakeEditableText {
+        fn set_text_contents(&self, new_contents: &str) -> zbus::fdo::Result<bool> {
+            self.state.lock().unwrap().mutations += 1;
+            match self.mutation {
+                FakeMutation::Apply => {
+                    self.state.lock().unwrap().contents = new_contents.to_string();
+                }
+                FakeMutation::NoOp => {}
+                FakeMutation::Delayed => {
+                    let state = Arc::clone(&self.state);
+                    let new_contents = new_contents.to_string();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        state.lock().unwrap().contents = new_contents;
+                    });
+                }
+                FakeMutation::Normalize => {
+                    self.state.lock().unwrap().contents = new_contents.replace("\r\n", "\n");
+                }
+                FakeMutation::Mask => {
+                    self.state.lock().unwrap().contents = "•".repeat(new_contents.chars().count());
+                }
+                FakeMutation::Reject => return Ok(false),
+                FakeMutation::Fail => {
+                    return Err(zbus::fdo::Error::Failed(
+                        "injected SetTextContents failure".into(),
+                    ));
+                }
+            }
+            Ok(true)
+        }
+    }
+
+    struct FakeText {
+        state: Arc<Mutex<FakeEditableState>>,
+        behavior: FakeTextBehavior,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Text")]
+    impl FakeText {
+        #[zbus(property)]
+        async fn character_count(&self) -> zbus::fdo::Result<i32> {
+            self.state.lock().unwrap().character_count_reads += 1;
+            match self.behavior {
+                FakeTextBehavior::CharacterCountError => Err(zbus::fdo::Error::Failed(
+                    "injected CharacterCount failure".into(),
+                )),
+                FakeTextBehavior::NegativeCount => Ok(-1),
+                FakeTextBehavior::StallCharacterCount => std::future::pending().await,
+                _ => Ok(self.state.lock().unwrap().contents.chars().count() as i32),
+            }
+        }
+
+        fn get_text(&self, start_offset: i32, end_offset: i32) -> zbus::fdo::Result<String> {
+            self.state.lock().unwrap().get_text_reads += 1;
+            if matches!(self.behavior, FakeTextBehavior::GetTextError) {
+                return Err(zbus::fdo::Error::Failed("injected GetText failure".into()));
+            }
+            if start_offset < 0 || end_offset < start_offset {
+                return Err(zbus::fdo::Error::InvalidArgs("invalid text offsets".into()));
+            }
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .contents
+                .chars()
+                .skip(start_offset as usize)
+                .take((end_offset - start_offset) as usize)
+                .collect())
+        }
+    }
+
+    struct FakeValue(Arc<Mutex<FakeEditableState>>);
+
+    #[zbus::interface(name = "org.a11y.atspi.Value")]
+    impl FakeValue {
+        #[zbus(property)]
+        fn current_value(&self) -> f64 {
+            self.0.lock().unwrap().numeric_value
+        }
+
+        #[zbus(property)]
+        fn set_current_value(&self, value: f64) {
+            let mut state = self.0.lock().unwrap();
+            state.numeric_value = value;
+            state.numeric_writes += 1;
+        }
+    }
+
+    async fn start_editable_fixture(
+        initial_contents: &str,
+        config: FakeEditableConfig,
+    ) -> (
+        PrivateBus,
+        zbus::Connection,
+        zbus::Connection,
+        Arc<Mutex<FakeEditableState>>,
+    ) {
+        let (bus, address) = PrivateBus::start();
+        let state = Arc::new(Mutex::new(FakeEditableState {
+            contents: initial_contents.to_string(),
+            ..Default::default()
+        }));
+        let mut builder = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .serve_at(EDITABLE_FIXTURE_PATH, FakeEditableAccessible(config))
+            .unwrap()
+            .serve_at(
+                EDITABLE_FIXTURE_PATH,
+                FakeEditableText {
+                    state: Arc::clone(&state),
+                    mutation: config.mutation,
+                },
+            )
+            .unwrap();
+        if config.has_text {
+            builder = builder
+                .serve_at(
+                    EDITABLE_FIXTURE_PATH,
+                    FakeText {
+                        state: Arc::clone(&state),
+                        behavior: config.text,
+                    },
+                )
+                .unwrap();
+        }
+        if config.has_value {
+            builder = builder
+                .serve_at(EDITABLE_FIXTURE_PATH, FakeValue(Arc::clone(&state)))
+                .unwrap();
+        }
+        let peer = builder.build().await.unwrap();
+        let client = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        (bus, peer, client, state)
+    }
+
+    async fn dispatch_editable_fixture(
+        client: &zbus::Connection,
+        peer: &zbus::Connection,
+        value: &str,
+    ) -> Result<ValueSetInvocation> {
+        let proxy = AccessibleProxy::builder(client)
+            .destination(peer.unique_name().unwrap().clone())
+            .unwrap()
+            .path(EDITABLE_FIXTURE_PATH)
+            .unwrap()
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .await
+            .unwrap();
+        let proxies = proxy.proxies().await.unwrap();
+        set_element_value_with_proxies(&proxy, &proxies, value).await
+    }
+
+    fn editable_outcome(invocation: ValueSetInvocation) -> EditableTextSetOutcome {
+        match invocation {
+            ValueSetInvocation::EditableText { outcome } => outcome,
+            ValueSetInvocation::Numeric { .. } => panic!("expected editable-text dispatch"),
+        }
+    }
+
+    struct FakeAccessible {
+        name: String,
+        children: Vec<(String, OwnedObjectPath)>,
+        has_action: bool,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl FakeAccessible {
+        #[zbus(property)]
+        fn child_count(&self) -> i32 {
+            self.children.len() as i32
+        }
+
+        #[zbus(property)]
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn get_interfaces(&self) -> Vec<&str> {
+            let mut interfaces = vec!["org.a11y.atspi.Accessible"];
+            if self.has_action {
+                interfaces.push("org.a11y.atspi.Action");
+            }
+            interfaces
+        }
+
+        fn get_child_at_index(
+            &self,
+            index: i32,
+        ) -> zbus::fdo::Result<((String, OwnedObjectPath),)> {
+            self.children
+                .get(index as usize)
+                .cloned()
+                .map(|child| (child,))
+                .ok_or_else(|| zbus::fdo::Error::InvalidArgs("invalid child index".into()))
+        }
+    }
+
+    struct FakeWebKitAction {
+        count: i32,
+        stall_indexed_reads: bool,
+        name_reads: Arc<AtomicUsize>,
+    }
+
+    impl Default for FakeWebKitAction {
+        fn default() -> Self {
+            Self {
+                count: 1,
+                stall_indexed_reads: false,
+                name_reads: Arc::default(),
+            }
+        }
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Action")]
+    impl FakeWebKitAction {
+        async fn get_actions(&self) -> Vec<atspi::Action> {
+            std::future::pending().await
+        }
+
+        #[zbus(property, name = "NActions")]
+        fn nactions(&self) -> i32 {
+            self.count
+        }
+
+        async fn get_name(&self, index: i32) -> &str {
+            assert!((0..self.count).contains(&index));
+            self.name_reads.fetch_add(1, Ordering::SeqCst);
+            if self.stall_indexed_reads {
+                std::future::pending::<()>().await;
+            }
+            "click"
+        }
+
+        async fn get_localized_name(&self, index: i32) -> &str {
+            assert!((0..self.count).contains(&index));
+            "Activate"
+        }
+
+        fn get_description(&self, index: i32) -> &str {
+            assert!((0..self.count).contains(&index));
+            "Activate the control"
+        }
+
+        fn get_key_binding(&self, index: i32) -> &str {
+            assert!((0..self.count).contains(&index));
+            "Return"
+        }
+
+        fn do_action(&self, index: i32) -> bool {
+            index == 0
+        }
+    }
+
+    struct FakeQtAction;
+
+    #[zbus::interface(name = "org.a11y.atspi.Action")]
+    impl FakeQtAction {
+        #[zbus(property, name = "NActions")]
+        fn nactions(&self) -> i32 {
+            2
+        }
+
+        fn get_name(&self, index: i32) -> &str {
+            match index {
+                0 => "Press",
+                1 => "Set Focus",
+                _ => panic!("invalid action index"),
+            }
+        }
+
+        fn get_description(&self, index: i32) -> &str {
+            match index {
+                0 => "Eylemi tetikler",
+                1 => "Odağı ayarlar",
+                _ => panic!("invalid action index"),
+            }
+        }
+
+        fn get_key_binding(&self, _index: i32) -> &str {
+            ""
+        }
+    }
+
+    #[tokio::test]
+    async fn editable_text_true_without_publication_is_mismatch_and_mutates_once() {
+        let (_bus, peer, client, state) = start_editable_fixture(
+            "original",
+            FakeEditableConfig {
+                mutation: FakeMutation::NoOp,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let outcome = editable_outcome(
+            dispatch_editable_fixture(&client, &peer, "modified")
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(outcome, EditableTextSetOutcome::MismatchAfterDeadline);
+        let state = state.lock().unwrap();
+        assert_eq!(state.mutations, 1);
+        assert!(state.character_count_reads > 1);
+        assert!(state.get_text_reads > 1);
+        assert_eq!(state.contents, "original");
+    }
+
+    #[tokio::test]
+    async fn editable_text_exact_readback_accepts_empty_whitespace_and_trailing_newline() {
+        let (_bus, peer, client, state) =
+            start_editable_fixture("initial", FakeEditableConfig::default()).await;
+        let values = [
+            "",
+            " \t\n",
+            "  leading and trailing\t \n",
+            "trailing newline\n",
+            "Case and unicode € 内容",
+        ];
+
+        for value in values {
+            let outcome = editable_outcome(
+                dispatch_editable_fixture(&client, &peer, value)
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(outcome, EditableTextSetOutcome::Verified);
+            assert_eq!(state.lock().unwrap().contents, value);
+        }
+        assert_eq!(state.lock().unwrap().mutations, values.len());
+    }
+
+    #[tokio::test]
+    async fn editable_text_readback_chunks_multibyte_content_beyond_snapshot_cap() {
+        let (_bus, peer, client, state) =
+            start_editable_fixture("", FakeEditableConfig::default()).await;
+        let mut expected = "a".repeat(EDITABLE_TEXT_READ_CHUNK_CHARS as usize - 1);
+        expected.push_str("é🦀");
+        expected.push_str(&"内容\n".repeat(1_200));
+        assert!(expected.chars().count() > MAX_TEXT_READBACK_CHARS as usize);
+
+        let outcome = editable_outcome(
+            dispatch_editable_fixture(&client, &peer, &expected)
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(outcome, EditableTextSetOutcome::Verified);
+        let state = state.lock().unwrap();
+        assert_eq!(state.mutations, 1);
+        assert!(state.get_text_reads >= 2);
+        assert_eq!(state.contents, expected);
+    }
+
+    #[tokio::test]
+    async fn editable_text_readback_waits_for_async_publication() {
+        let (_bus, peer, client, state) = start_editable_fixture(
+            "pending",
+            FakeEditableConfig {
+                mutation: FakeMutation::Delayed,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let outcome = editable_outcome(
+            dispatch_editable_fixture(&client, &peer, "published asynchronously")
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(outcome, EditableTextSetOutcome::Verified);
+        let state = state.lock().unwrap();
+        assert_eq!(state.mutations, 1);
+        assert!(state.character_count_reads > 1);
+        assert_eq!(state.contents, "published asynchronously");
+    }
+
+    #[tokio::test]
+    async fn editable_text_normalization_mismatch_is_not_verified() {
+        let (_bus, peer, client, state) = start_editable_fixture(
+            "",
+            FakeEditableConfig {
+                mutation: FakeMutation::Normalize,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let outcome = editable_outcome(
+            dispatch_editable_fixture(&client, &peer, "first\r\nsecond\n")
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(outcome, EditableTextSetOutcome::MismatchAfterDeadline);
+        let state = state.lock().unwrap();
+        assert_eq!(state.mutations, 1);
+        assert!(state.character_count_reads > 1);
+        assert_eq!(state.contents, "first\nsecond\n");
+    }
+
+    #[tokio::test]
+    async fn password_text_is_unverifiable_even_when_requested_text_is_bullets() {
+        let (_bus, peer, client, state) = start_editable_fixture(
+            "",
+            FakeEditableConfig {
+                mutation: FakeMutation::Mask,
+                role: atspi::Role::PasswordText,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let outcome = editable_outcome(
+            dispatch_editable_fixture(&client, &peer, "••••••••")
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(outcome, EditableTextSetOutcome::PasswordUnverifiable);
+        let state = state.lock().unwrap();
+        assert_eq!(state.mutations, 1);
+        assert_eq!(state.character_count_reads, 0);
+        assert_eq!(state.contents, "••••••••");
+    }
+
+    #[tokio::test]
+    async fn editable_text_missing_text_and_read_errors_are_structured_outcomes() {
+        let configs = [
+            FakeEditableConfig {
+                has_text: false,
+                ..Default::default()
+            },
+            FakeEditableConfig {
+                text: FakeTextBehavior::CharacterCountError,
+                ..Default::default()
+            },
+            FakeEditableConfig {
+                text: FakeTextBehavior::GetTextError,
+                ..Default::default()
+            },
+        ];
+
+        for config in configs {
+            let (_bus, peer, client, state) = start_editable_fixture("before", config).await;
+            let outcome = editable_outcome(
+                dispatch_editable_fixture(&client, &peer, "readback may have changed")
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(outcome, EditableTextSetOutcome::ReadbackFailed);
+            assert_eq!(state.lock().unwrap().mutations, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn editable_text_negative_counts_and_stalled_readback_are_structured_outcomes() {
+        let cases = [
+            (
+                FakeTextBehavior::NegativeCount,
+                EditableTextSetOutcome::ReadbackFailed,
+            ),
+            (
+                FakeTextBehavior::StallCharacterCount,
+                EditableTextSetOutcome::ReadbackTimedOut,
+            ),
+        ];
+
+        for (text, expected) in cases {
+            let (_bus, peer, client, state) = start_editable_fixture(
+                "before",
+                FakeEditableConfig {
+                    text,
+                    ..Default::default()
+                },
+            )
+            .await;
+            let outcome = editable_outcome(
+                dispatch_editable_fixture(&client, &peer, "after")
+                    .await
+                    .unwrap(),
+            );
+            assert_eq!(outcome, expected);
+            let state = state.lock().unwrap();
+            assert_eq!(state.mutations, 1);
+            assert_eq!(state.get_text_reads, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn editable_text_rejection_and_mutation_errors_remain_errors() {
+        let cases = [
+            (FakeMutation::Reject, "rejected"),
+            (FakeMutation::Fail, "failed to set"),
+        ];
+
+        for (mutation, expected_error) in cases {
+            let (_bus, peer, client, state) = start_editable_fixture(
+                "before",
+                FakeEditableConfig {
+                    mutation,
+                    ..Default::default()
+                },
+            )
+            .await;
+            let error = dispatch_editable_fixture(&client, &peer, "after")
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(expected_error));
+            let state = state.lock().unwrap();
+            assert_eq!(state.mutations, 1);
+            assert_eq!(state.character_count_reads, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn numeric_value_dispatch_remains_isolated_from_editable_text() {
+        let (_bus, peer, client, state) = start_editable_fixture(
+            "unchanged",
+            FakeEditableConfig {
+                has_value: true,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let invocation = dispatch_editable_fixture(&client, &peer, "42.5")
+            .await
+            .unwrap();
+
+        match invocation {
+            ValueSetInvocation::Numeric { value } => assert_eq!(value, 42.5),
+            ValueSetInvocation::EditableText { .. } => panic!("expected numeric dispatch"),
+        }
+        let state = state.lock().unwrap();
+        assert_eq!(state.numeric_value, 42.5);
+        assert_eq!(state.numeric_writes, 1);
+        assert_eq!(state.mutations, 0);
+        assert_eq!(state.character_count_reads, 0);
+        assert_eq!(state.contents, "unchanged");
+    }
+
+    #[tokio::test]
+    async fn qt_action_names_do_not_depend_on_localized_names() {
+        let (_bus, address) = PrivateBus::start();
+        let peer = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .serve_at("/actions/qt", FakeQtAction)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let action = ActionProxy::builder(&client)
+            .destination(peer.unique_name().unwrap().clone())
+            .unwrap()
+            .path("/actions/qt")
+            .unwrap()
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .await
+            .unwrap();
+
+        let actions = timeout(Duration::from_secs(1), read_actions(&action))
+            .await
+            .expect("Qt action reads must not require GetLocalizedName")
+            .unwrap();
+
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].name, "Press");
+        assert_eq!(actions[0].description, "Eylemi tetikler");
+        assert_eq!(actions[1].name, "Set Focus");
+        assert_eq!(actions[1].description, "Odağı ayarlar");
+        assert_eq!(select_named_action_index(&actions, "press").unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn indexed_children_resolve_webkit_names_on_the_accessibility_bus() {
+        let (_bus, address) = PrivateBus::start();
+
+        let webkit_name = "org.webkit.MockWebProcess";
+        let child_path = "/org/a11y/webkit/accessible/child";
+        let webkit = zbus::connection::Builder::address(address.trim())
+            .unwrap()
+            .name(webkit_name)
+            .unwrap()
+            .serve_at(
+                child_path,
+                FakeAccessible {
+                    name: "WebKit page".into(),
+                    children: Vec::new(),
+                    has_action: true,
+                },
+            )
+            .unwrap()
+            .serve_at(child_path, FakeWebKitAction::default())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let owner = webkit.unique_name().unwrap().to_string();
+        let gtk = zbus::connection::Builder::address(address.trim())
+            .unwrap()
+            .serve_at(
+                "/org/a11y/atspi/accessible/root",
+                FakeAccessible {
+                    name: "GTK socket".into(),
+                    has_action: false,
+                    children: vec![
+                        (webkit_name.into(), child_path.try_into().unwrap()),
+                        (owner.clone(), child_path.try_into().unwrap()),
+                        (String::new(), "/org/a11y/atspi/null".try_into().unwrap()),
+                        (
+                            "org.webkit.UnownedWebProcess".into(),
+                            child_path.try_into().unwrap(),
+                        ),
+                    ],
+                },
+            )
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client = zbus::connection::Builder::address(address.trim())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let proxy = AccessibleProxy::builder(&client)
+            .destination(gtk.unique_name().unwrap().clone())
+            .unwrap()
+            .path("/org/a11y/atspi/accessible/root")
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let mut remaining = 4;
+        let reply = proxy
+            .inner()
+            .call_method("GetChildAtIndex", &(0_i32,))
+            .await
+            .unwrap();
+        assert_eq!(reply.body().signature().to_string(), "(so)");
+        let batch = children_up_to(&proxy, 4, &mut remaining).await.unwrap();
+
+        assert_eq!(batch.attempted, 4);
+        assert_eq!(remaining, 0);
+        assert!(!batch.incomplete);
+        assert_eq!(batch.items.len(), 3, "only the unowned name should fail");
+        assert_eq!(batch.items[0].name_as_str(), Some(owner.as_str()));
+        assert_eq!(batch.items[0].path_as_str(), child_path);
+        assert_eq!(batch.items[0], batch.items[1]);
+        assert!(batch.items[2].is_null());
+
+        // The canonical reference remains usable by the normal read/action path.
+        let child = batch.items[0].as_accessible_proxy(&client).await.unwrap();
+        assert_eq!(child.name().await.unwrap(), "WebKit page");
+        assert_eq!(
+            object_ref_from_id(&object_ref_id(&batch.items[0])).unwrap(),
+            batch.items[0]
+        );
+        let action = child.proxies().await.unwrap().action().await.unwrap();
+        let actions = timeout(Duration::from_secs(1), read_actions(&action))
+            .await
+            .expect("indexed action reads must not wait for GetActions")
+            .unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "click");
+        assert_eq!(actions[0].description, "Activate the control");
+        assert_eq!(actions[0].keybinding, "Return");
+        assert_eq!(select_named_action_index(&actions, "click").unwrap(), 0);
+        assert!(action.do_action(0).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn indexed_actions_bound_untrusted_counts_before_reading_indices() {
+        let (_bus, address) = PrivateBus::start();
+        let name_reads = Arc::new(AtomicUsize::new(0));
+        let counts = [
+            -1,
+            MAX_ACTIONS_PER_OBJECT + 1,
+            i32::MAX,
+            0,
+            MAX_ACTIONS_PER_OBJECT,
+        ];
+        let mut builder = zbus::connection::Builder::address(address.as_str()).unwrap();
+        for (index, count) in counts.iter().enumerate() {
+            builder = builder
+                .serve_at(
+                    format!("/actions/{index}"),
+                    FakeWebKitAction {
+                        count: *count,
+                        name_reads: Arc::clone(&name_reads),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let peer = builder.build().await.unwrap();
+        let client = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        for (index, count) in counts.iter().enumerate() {
+            let action = ActionProxy::builder(&client)
+                .destination(peer.unique_name().unwrap().clone())
+                .unwrap()
+                .path(format!("/actions/{index}"))
+                .unwrap()
+                .cache_properties(zbus::proxy::CacheProperties::No)
+                .build()
+                .await
+                .unwrap();
+            let result = timeout(Duration::from_secs(1), read_actions(&action))
+                .await
+                .expect("untrusted counts must not cause unbounded work");
+            if (0..=MAX_ACTIONS_PER_OBJECT).contains(count) {
+                assert_eq!(result.unwrap().len(), *count as usize);
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("action count"), "{error}");
+                assert_eq!(name_reads.load(Ordering::SeqCst), 0);
+            }
+        }
+        assert_eq!(
+            name_reads.load(Ordering::SeqCst),
+            MAX_ACTIONS_PER_OBJECT as usize
+        );
+    }
+
+    #[tokio::test]
+    async fn indexed_actions_time_out_the_entire_read() {
+        let (_bus, address) = PrivateBus::start();
+        let name_reads = Arc::new(AtomicUsize::new(0));
+        let peer = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .serve_at(
+                "/actions/stalled",
+                FakeWebKitAction {
+                    stall_indexed_reads: true,
+                    name_reads: Arc::clone(&name_reads),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client = zbus::connection::Builder::address(address.as_str())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let action = ActionProxy::builder(&client)
+            .destination(peer.unique_name().unwrap().clone())
+            .unwrap()
+            .path("/actions/stalled")
+            .unwrap()
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .await
+            .unwrap();
+
+        let error = timeout(
+            ACTION_QUERY_TIMEOUT + Duration::from_secs(1),
+            read_actions(&action),
+        )
+        .await
+        .expect("indexed reads must have an overall deadline")
+        .unwrap_err();
+        assert!(error.to_string().contains("5-second deadline"));
+        assert_eq!(name_reads.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn split_object_ref_id_separates_bus_name_and_path() {

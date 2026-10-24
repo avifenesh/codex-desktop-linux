@@ -2,8 +2,8 @@ use crate::atspi_tree::{
     accessibility_chrome_context, focused_element_summary_in_app, list_accessible_apps,
     object_ref_owner_pid, perform_action as invoke_accessibility_action, perform_named_action,
     probe_focused_element, set_element_value, snapshot_accessibility_tree, AccessibilityAction,
-    AccessibilityNode, AccessibleAppSummary, Bounds, FocusProbe, FocusedElementSummary,
-    ValueSetInvocation,
+    AccessibilityNode, AccessibleAppSummary, Bounds, EditableTextSetOutcome, FocusProbe,
+    FocusedElementSummary, ValueSetInvocation,
 };
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
@@ -85,11 +85,23 @@ const SHELL_MAX_ENV_ENTRIES: usize = 64;
 const SHELL_MAX_ENV_BYTES: usize = 64 * 1024;
 const SHELL_RESPONSE_STREAM_BYTES: usize = 512 * 1024;
 
-/// Nodes and their app ownership must come from the same snapshot.
+/// Nodes, their app ownership, and their recovery scope must come from the
+/// same snapshot.
 #[derive(Default)]
 struct CachedAccessibilitySnapshot {
     nodes: Vec<AccessibilityNode>,
     pid: Option<u32>,
+    recovery_scope: Option<AccessibilityRecoveryScope>,
+}
+
+#[derive(Clone)]
+struct AccessibilityRecoveryScope {
+    params: GetAppStateParams,
+}
+
+struct RefreshedAccessibilitySnapshot {
+    snapshot: crate::atspi_tree::AccessibilitySnapshot,
+    target_pid: Option<u32>,
 }
 
 #[derive(Clone, Default)]
@@ -496,8 +508,13 @@ impl ComputerUseLinux {
             // match that can be another app entirely; recording the pid then
             // would let that app's index pass the target check instead of
             // taking the per-node owner lookup.
-            self.commit_snapshot(&accessibility_tree, tree_root_pid)
-                .await;
+            self.commit_app_state_snapshot(
+                &accessibility_tree,
+                tree_root_pid,
+                &params,
+                tree_scoped,
+            )
+            .await;
         } else {
             self.commit_snapshot(&[], None).await;
         }
@@ -1183,8 +1200,8 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "set_value",
-        output_schema = rmcp::handler::server::tool::schema_for_output::<ActionToolOutput>(),
-        description = "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<SetValueToolOutput>(),
+        description = "Set the value of a settable accessibility element selected by index, identifier, or semantic selector. Editable-text writes are verified by exact readback; password fields are explicitly unverifiable. Pass screenshot_after (true, \"screen\", or \"window\") or include_tree=true to return post-action observation in the same result.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1197,11 +1214,12 @@ impl ComputerUseLinux {
         Parameters(params): Parameters<SetValueParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let capture = params.capture.clone();
-        let Json(output) = self.dispatch_set_value(params).await;
-        self.finish_action_output(output, &capture, None).await
+        let (output, verified) = self.dispatch_set_value(params).await;
+        self.finish_set_value_output(output, verified, &capture)
+            .await
     }
 
-    async fn dispatch_set_value(&self, params: SetValueParams) -> Json<ActionOutput> {
+    async fn dispatch_set_value(&self, params: SetValueParams) -> (ActionOutput, Option<bool>) {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let received = Some(serde_json::json!(params.clone()));
         let object_ref = match self.resolve_object_ref(
@@ -1212,39 +1230,44 @@ impl ComputerUseLinux {
         ) {
             Ok(object_ref) => object_ref,
             Err(message) => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "set_value".to_string(),
-                    message,
-                    received,
-                });
+                return (
+                    ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "set_value".to_string(),
+                        message,
+                        received,
+                    },
+                    None,
+                );
             }
         };
 
         self.indicator.text("set_value", &params.value, false).await;
         match set_element_value(&object_ref, &params.value).await {
-            Ok(ValueSetInvocation::Numeric { value }) => Json(ActionOutput {
-                ok: true,
-                implemented: true,
-                action: "set_value".to_string(),
-                message: format!("AT-SPI numeric value set to {value}."),
-                received,
-            }),
-            Ok(ValueSetInvocation::EditableText) => Json(ActionOutput {
-                ok: true,
-                implemented: true,
-                action: "set_value".to_string(),
-                message: "AT-SPI editable text contents set.".to_string(),
-                received,
-            }),
-            Err(error) => Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "set_value".to_string(),
-                message: error.to_string(),
-                received,
-            }),
+            Ok(ValueSetInvocation::Numeric { value }) => (
+                ActionOutput {
+                    ok: true,
+                    implemented: true,
+                    action: "set_value".to_string(),
+                    message: format!("AT-SPI numeric value set to {value}."),
+                    received,
+                },
+                None,
+            ),
+            Ok(ValueSetInvocation::EditableText { outcome }) => {
+                editable_text_action_result(outcome, received)
+            }
+            Err(error) => (
+                ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "set_value".to_string(),
+                    message: error.to_string(),
+                    received,
+                },
+                None,
+            ),
         }
     }
 
@@ -2281,7 +2304,7 @@ impl ComputerUseLinux {
             let command_timeout = xdotool_type_timeout(&params.text, delay_ms);
             let text = params.text.clone();
             let (input_guard, result) = run_cancellation_safe_input(input_guard, async move {
-                run_xdotool_or_fallback_with_timeout(
+                run_xdotool_type_with_input_check(
                     Path::new("xdotool"),
                     &args,
                     command_timeout,
@@ -2293,15 +2316,22 @@ impl ComputerUseLinux {
             let _input_guard = input_guard;
             let used_xdotool = result
                 .as_ref()
-                .is_ok_and(|result| result.backend == KeyboardCommandBackend::Xdotool);
+                .is_ok_and(|(result, _)| result.backend == KeyboardCommandBackend::Xdotool);
+            let layout_warning = result
+                .as_ref()
+                .ok()
+                .and_then(|(_, warning)| warning.clone());
             let mut output = action_result_with_focus(
                 "type_text",
-                result.map(|result| vec![result.output]),
+                result.map(|(result, _)| vec![result.output]),
                 received,
                 focus.clone(),
             );
             if used_xdotool {
                 output.message = "Action sent through xdotool (X11 XTEST). WARNING: X11 keyboard layout fidelity is unverified. xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state. Re-observe the text before pressing Enter, submitting it, or treating it as delivered; do not retry blindly.".to_string();
+            }
+            if let Some(warning) = layout_warning {
+                output = with_notes(output, vec![warning]);
             }
             if output.ok && focus.is_some() {
                 let notes = self.input_landing_notes(focus.as_ref(), true).await;
@@ -2421,7 +2451,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.7.19",
+    version = "0.7.23",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes and optional include_tree=true to return post-action observation in the same tool call. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype uses a single literal argument after -- to avoid stdin keymap-refresh corruption; text is visible in process arguments, so confirmed password fields are rejected (use set_value). Terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call; split larger input into smaller calls or expose accessibility. Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, or read budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 2000 and 64), not by lowering max_nodes. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -3245,7 +3275,9 @@ fn structured_tool_result<T: Serialize>(
     let value = serde_json::to_value(&output).map_err(|error| {
         ErrorData::internal_error(format!("failed to serialize tool output: {error}"), None)
     })?;
+    let is_error = value.get("ok").and_then(serde_json::Value::as_bool) == Some(false);
     let mut result = CallToolResult::structured(value);
+    result.is_error = Some(is_error);
     if let Some(capture) = screenshot {
         result.content.insert(
             0,
@@ -3609,6 +3641,60 @@ struct ActionToolOutput {
     action: ActionOutput,
     #[serde(flatten)]
     observation: PostActionObservation,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct SetValueToolOutput {
+    #[serde(flatten)]
+    action: ActionOutput,
+    /// Exact editable-text readback result; omitted for numeric values and early failures.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified: Option<bool>,
+    #[serde(flatten)]
+    observation: PostActionObservation,
+}
+
+fn editable_text_action_result(
+    outcome: EditableTextSetOutcome,
+    received: Option<serde_json::Value>,
+) -> (ActionOutput, Option<bool>) {
+    let (ok, verified, message) = match outcome {
+        EditableTextSetOutcome::Verified => (
+            true,
+            Some(true),
+            "AT-SPI editable text contents set and verified.",
+        ),
+        EditableTextSetOutcome::MismatchAfterDeadline => (
+            false,
+            Some(false),
+            "AT-SPI EditableText returned success, but the resulting contents did not match the requested value. The contents may be unchanged, normalized, or partially changed; re-observe the element before retrying.",
+        ),
+        EditableTextSetOutcome::ReadbackFailed => (
+            false,
+            Some(false),
+            "AT-SPI EditableText returned success, but content verification failed. The value may have changed; re-observe the element before retrying.",
+        ),
+        EditableTextSetOutcome::ReadbackTimedOut => (
+            false,
+            Some(false),
+            "AT-SPI EditableText returned success, but content verification timed out. The value may have changed; re-observe the element before retrying.",
+        ),
+        EditableTextSetOutcome::PasswordUnverifiable => (
+            true,
+            Some(false),
+            "AT-SPI editable text contents dispatched to a password field; exact contents cannot be verified.",
+        ),
+    };
+    (
+        ActionOutput {
+            ok,
+            implemented: true,
+            action: "set_value".to_string(),
+            message: message.to_string(),
+            received,
+        },
+        verified,
+    )
 }
 
 impl ComputerUseLinux {
@@ -4202,6 +4288,36 @@ impl ComputerUseLinux {
         )
     }
 
+    async fn finish_set_value_output(
+        &self,
+        mut output: ActionOutput,
+        verified: Option<bool>,
+        capture: &PostActionCaptureParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        if !output.ok {
+            return structured_tool_result(
+                SetValueToolOutput {
+                    action: output,
+                    verified,
+                    observation: PostActionObservation::default(),
+                },
+                None,
+            );
+        }
+        let (observation, screenshot, notes) = self
+            .capture_post_action_observation(capture, None, None)
+            .await;
+        output = with_notes(output, notes);
+        structured_tool_result(
+            SetValueToolOutput {
+                action: output,
+                verified,
+                observation,
+            },
+            screenshot,
+        )
+    }
+
     async fn finish_activate_window_output(
         &self,
         output: ActivateWindowOutput,
@@ -4425,6 +4541,24 @@ impl ComputerUseLinux {
             }
         }
 
+        if let Some(requested) = trimmed_nonempty(params.app_id.as_deref()) {
+            let app_id = window_context
+                .and_then(|window| trimmed_nonempty(window.app_id.as_deref()))
+                .unwrap_or(requested);
+            if !app_id.starts_with("window:") {
+                let leaf = crate::windows::app_id_leaf(app_id);
+                return Some(if leaf.is_empty() {
+                    // D-Bus names cannot contain NUL, so an invalid explicit ID selects no roots.
+                    "\0".to_string()
+                } else {
+                    leaf.to_string()
+                });
+            }
+        }
+
+        if candidates.is_empty() && trimmed_nonempty(params.app_id.as_deref()).is_some() {
+            return Some("\0".to_string());
+        }
         candidates.into_iter().next()
     }
 
@@ -4759,11 +4893,35 @@ impl ComputerUseLinux {
         self.cache_snapshot(nodes, target_pid);
     }
 
+    async fn commit_app_state_snapshot(
+        &self,
+        nodes: &[AccessibilityNode],
+        target_pid: Option<u32>,
+        params: &GetAppStateParams,
+        scoped: bool,
+    ) {
+        let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
+        let recovery_scope = scoped.then(|| AccessibilityRecoveryScope {
+            params: params.clone(),
+        });
+        self.cache_snapshot_with_scope(nodes, target_pid, recovery_scope);
+    }
+
     fn cache_snapshot(&self, nodes: &[AccessibilityNode], target_pid: Option<u32>) {
+        self.cache_snapshot_with_scope(nodes, target_pid, None);
+    }
+
+    fn cache_snapshot_with_scope(
+        &self,
+        nodes: &[AccessibilityNode],
+        target_pid: Option<u32>,
+        recovery_scope: Option<AccessibilityRecoveryScope>,
+    ) {
         if let Ok(mut cached) = self.last_snapshot.lock() {
             *cached = CachedAccessibilitySnapshot {
                 nodes: nodes.to_vec(),
                 pid: target_pid,
+                recovery_scope,
             };
         }
     }
@@ -4944,11 +5102,59 @@ impl ComputerUseLinux {
         resolve_semantic_node(cached.nodes.as_slice(), selector, purpose)
     }
 
+    async fn refresh_action_snapshot(
+        &self,
+        scope: &AccessibilityRecoveryScope,
+    ) -> Result<RefreshedAccessibilitySnapshot> {
+        let params = &scope.params;
+        let (window_context, _, _) = self.resolve_window_context(params).await;
+        let app_filter = self
+            .resolve_accessibility_app_filter(params, window_context.as_ref())
+            .await;
+        let target_pid = window_context
+            .as_ref()
+            .and_then(|window| window.pid)
+            .or(params.pid);
+        let (max_nodes, max_depth) =
+            crate::atspi_tree::snapshot_limits(params.max_nodes, params.max_depth);
+        let snapshot =
+            snapshot_accessibility_tree(app_filter.as_deref(), target_pid, max_nodes, max_depth)
+                .await?;
+        Ok(RefreshedAccessibilitySnapshot {
+            snapshot,
+            target_pid,
+        })
+    }
+
     async fn perform_element_action(
         &self,
         params: &ActionParams,
         requested_action: Option<&str>,
     ) -> Json<ActionOutput> {
+        self.perform_element_action_with(
+            params,
+            requested_action,
+            |object_ref, requested_action| async move {
+                invoke_accessibility_action(&object_ref, requested_action.as_deref()).await
+            },
+            |scope| async move { self.refresh_action_snapshot(&scope).await },
+        )
+        .await
+    }
+
+    async fn perform_element_action_with<I, R, IFut, RFut>(
+        &self,
+        params: &ActionParams,
+        requested_action: Option<&str>,
+        mut invoke: I,
+        refresh: R,
+    ) -> Json<ActionOutput>
+    where
+        I: FnMut(String, Option<String>) -> IFut,
+        IFut: Future<Output = Result<crate::atspi_tree::ActionInvocation>>,
+        R: FnOnce(AccessibilityRecoveryScope) -> RFut,
+        RFut: Future<Output = Result<RefreshedAccessibilitySnapshot>>,
+    {
         let _input_guard = Arc::clone(&self.input_operation_lock).lock_owned().await;
         let received = Some(serde_json::json!(params.clone()));
         let object_ref = match self.resolve_object_ref(
@@ -4958,55 +5164,173 @@ impl ComputerUseLinux {
             ElementResolvePurpose::Action,
         ) {
             Ok(object_ref) => object_ref,
-            Err(message) => {
-                return Json(ActionOutput {
-                    ok: false,
-                    implemented: true,
-                    action: "perform_action".to_string(),
-                    message,
-                    received,
-                });
-            }
+            Err(message) => return action_error_output(message, &received),
         };
 
         self.indicator.action("perform_action").await;
-        match invoke_accessibility_action(&object_ref, requested_action).await {
-            Ok(invocation) => Json(ActionOutput {
-                ok: invocation.ok,
-                implemented: true,
-                action: "perform_action".to_string(),
-                message: if invocation.ok {
+        let error = match invoke(object_ref.clone(), requested_action.map(str::to_string)).await {
+            Ok(invocation) => return action_invocation_output(invocation, &received),
+            Err(error) => error,
+        };
+
+        let semantic_recovery = params.element_index.is_none()
+            && trimmed_nonempty(params.element_identifier.as_deref()).is_none()
+            && !params.selector().is_empty();
+        if !semantic_recovery || !is_recoverable_action_query_error(&error) {
+            return action_error_output(error.to_string(), &received);
+        }
+
+        let original_error = format!("{error:#}");
+        let recovery_scope = self
+            .last_snapshot
+            .lock()
+            .ok()
+            .and_then(|snapshot| snapshot.recovery_scope.clone());
+        let Some(recovery_scope) = recovery_scope else {
+            return action_error_output(
+                format!(
+                    "{original_error}. The cached snapshot has no stable scoped recovery target. Call get_app_state for the target app, then retry perform_action."
+                ),
+                &received,
+            );
+        };
+
+        let refreshed = match refresh(recovery_scope.clone()).await {
+            Ok(refreshed) => refreshed,
+            Err(refresh_error) => {
+                return action_error_output(
                     format!(
-                        "AT-SPI action {} ({}) invoked.",
-                        invocation.action_index,
-                        invocation
-                            .action_name
-                            .as_deref()
-                            .filter(|name| !name.is_empty())
-                            .unwrap_or("unnamed")
-                    )
-                } else {
+                        "{original_error}. Automatic AT-SPI target recovery could not refresh the original scoped snapshot: {refresh_error:#}. Call get_app_state for the target app, then retry perform_action."
+                    ),
+                    &received,
+                );
+            }
+        };
+        let snapshot = refreshed.snapshot;
+        let pid_scope_matches = refreshed
+            .target_pid
+            .is_none_or(|pid| snapshot.root_pid == Some(pid));
+        if !snapshot.scoped || !pid_scope_matches {
+            return action_error_output(
+                format!(
+                    "{original_error}. Automatic AT-SPI target recovery could not prove that the refreshed tree has the original app scope. Call get_app_state for the target app, then retry perform_action."
+                ),
+                &received,
+            );
+        }
+
+        let root_pid = snapshot.root_pid;
+        let (nodes, _) = compact_accessibility_tree_with_note(
+            snapshot.nodes,
+            snapshot.scoped,
+            snapshot.truncated,
+        );
+        self.cache_snapshot_with_scope(&nodes, root_pid, Some(recovery_scope));
+        let recovered = match self.resolve_cached_node(
+            None,
+            &params.selector(),
+            ElementResolvePurpose::Action,
+        ) {
+            Ok(node) => node,
+            Err(message) => {
+                return action_error_output(
                     format!(
-                        "AT-SPI action {} ({}) returned false.",
-                        invocation.action_index,
-                        invocation
-                            .action_name
-                            .as_deref()
-                            .filter(|name| !name.is_empty())
-                            .unwrap_or("unnamed")
-                    )
-                },
-                received,
-            }),
-            Err(error) => Json(ActionOutput {
-                ok: false,
-                implemented: true,
-                action: "perform_action".to_string(),
-                message: error.to_string(),
-                received,
-            }),
+                        "{original_error}. AT-SPI target recovery refreshed the scoped snapshot but could not re-resolve the semantic selector: {message}. Call get_app_state for the target app and choose the element again."
+                    ),
+                    &received,
+                );
+            }
+        };
+        if recovered.object_ref == object_ref {
+            return action_error_output(
+                format!(
+                    "{original_error}. AT-SPI target recovery resolved the same dead object identity. Call get_app_state for the target app, then retry perform_action."
+                ),
+                &received,
+            );
+        }
+
+        match invoke(recovered.object_ref, requested_action.map(str::to_string)).await {
+            Ok(invocation) => action_invocation_output(invocation, &received),
+            Err(error) => action_error_output(error.to_string(), &received),
         }
     }
+}
+
+fn is_recoverable_action_query_error(error: &anyhow::Error) -> bool {
+    if error.chain().any(|cause| {
+        cause
+            .to_string()
+            .starts_with("failed to invoke AT-SPI action ")
+    }) {
+        return false;
+    }
+
+    error.chain().any(|cause| {
+        if let Some(zbus::Error::MethodError(name, _, _)) = cause.downcast_ref::<zbus::Error>() {
+            if matches!(
+                name.as_str(),
+                "org.freedesktop.DBus.Error.ServiceUnknown"
+                    | "org.freedesktop.DBus.Error.NameHasNoOwner"
+            ) {
+                return true;
+            }
+        }
+        if matches!(
+            cause.downcast_ref::<zbus::fdo::Error>(),
+            Some(zbus::fdo::Error::ServiceUnknown(_) | zbus::fdo::Error::NameHasNoOwner(_))
+        ) {
+            return true;
+        }
+        let message = cause.to_string();
+        message.contains("ServiceUnknown") || message.contains("NameHasNoOwner")
+    })
+}
+
+fn action_error_output(
+    message: String,
+    received: &Option<serde_json::Value>,
+) -> Json<ActionOutput> {
+    Json(ActionOutput {
+        ok: false,
+        implemented: true,
+        action: "perform_action".to_string(),
+        message,
+        received: received.clone(),
+    })
+}
+
+fn action_invocation_output(
+    invocation: crate::atspi_tree::ActionInvocation,
+    received: &Option<serde_json::Value>,
+) -> Json<ActionOutput> {
+    Json(ActionOutput {
+        ok: invocation.ok,
+        implemented: true,
+        action: "perform_action".to_string(),
+        message: if invocation.ok {
+            format!(
+                "AT-SPI action {} ({}) invoked.",
+                invocation.action_index,
+                invocation
+                    .action_name
+                    .as_deref()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("unnamed")
+            )
+        } else {
+            format!(
+                "AT-SPI action {} ({}) returned false.",
+                invocation.action_index,
+                invocation
+                    .action_name
+                    .as_deref()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("unnamed")
+            )
+        },
+        received: received.clone(),
+    })
 }
 
 #[derive(Debug)]
@@ -5466,6 +5790,7 @@ fn accessibility_filter_candidates(window_context: Option<&WindowInfo>) -> Vec<S
                 let normalized = app_id.replace(['-', '_', '.'], " ");
                 push_candidate(&mut candidates, Some(normalized.as_str()));
             }
+            push_candidate(&mut candidates, Some(crate::windows::app_id_leaf(app_id)));
         }
     }
 
@@ -6919,6 +7244,38 @@ where
             backend: KeyboardCommandBackend::Xdotool,
         }),
     }
+}
+
+async fn run_xdotool_type_with_input_check<F, Fut>(
+    program: &Path,
+    args: &[String],
+    command_timeout: Duration,
+    fallback: F,
+) -> std::result::Result<(KeyboardCommandResult, Option<String>), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::result::Result<Output, String>>,
+{
+    let guard = tokio::task::spawn_blocking(crate::x11_display::X11TypingGuard::start)
+        .await
+        .map_err(|error| format!("{error}"))
+        .and_then(|result| result.map_err(|error| format!("{error:#}")));
+    let result =
+        run_xdotool_or_fallback_with_timeout(program, args, command_timeout, fallback).await?;
+    if result.backend == KeyboardCommandBackend::Xdotool {
+        let guard = match guard {
+            Ok(guard) => guard,
+            Err(error) => return Ok((result, Some(format!(
+                "WARNING: X11 layout-change detection was unavailable: {error}. Keyboard focus and grab detection was also unavailable. Field contents remain unverified; inspect the target before submitting or retrying."
+            )))),
+        };
+        // Never replay a dispatched command, even if verification fails.
+        tokio::task::spawn_blocking(move || guard.verify())
+            .await
+            .map_err(|error| format!("X11 input monitor failed after typing; inspect the target before retrying: {error}"))?
+            .map_err(|error| format!("X11 input verification failed after typing; text may have been sent. Inspect the target before submitting or retrying: {error:#}"))?;
+    }
+    Ok((result, None))
 }
 
 async fn run_wtype_type_text_or_fallback<F, Fut>(
@@ -8382,6 +8739,7 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
     #[test]
     fn app_state_result_without_screenshot_is_text_only() {
         let result = app_state_result(sample_app_state_output(None), None).unwrap();
+        assert_eq!(result.is_error, Some(false));
         assert_eq!(result.content.len(), 1);
         assert!(result.content[0].as_text().is_some());
         assert_eq!(
@@ -8772,6 +9130,40 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
                 "cu_atspi_gtk_test.py".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn accessibility_filter_candidates_include_reverse_dns_leaf() {
+        let window = window_info(
+            42,
+            Some("Untitled — KWrite"),
+            Some("org.kde.kwrite"),
+            Some("kwrite"),
+            None,
+        );
+
+        let candidates = accessibility_filter_candidates(Some(&window));
+
+        assert!(candidates.contains(&"kwrite".to_string()));
+        assert!(!candidates.contains(&"desktop".to_string()));
+    }
+
+    #[tokio::test]
+    async fn explicit_app_id_retains_a_scoped_filter_without_window_resolution() {
+        let server = ComputerUseLinux::default();
+        for (requested, expected) in [
+            ("kwrite", "kwrite"),
+            ("org.kde.kwrite", "kwrite"),
+            ("window:46", "\0"),
+            (".desktop", "\0"),
+        ] {
+            let params: GetAppStateParams =
+                serde_json::from_value(serde_json::json!({"app_id": requested})).unwrap();
+
+            let filter = server.resolve_accessibility_app_filter(&params, None).await;
+
+            assert_eq!(filter.as_deref(), Some(expected), "app_id={requested}");
+        }
     }
 
     #[test]
@@ -11311,6 +11703,548 @@ mod focus_probe_feedback_tests {
 }
 
 #[cfg(test)]
+mod action_recovery_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const OLD_REF: &str = ":1.10/org/a11y/atspi/accessible/7";
+    const NEW_REF: &str = ":1.20/org/a11y/atspi/accessible/7";
+    const OTHER_REF: &str = ":1.30/org/a11y/atspi/accessible/7";
+    const EXPLICIT_REF: &str = ":1.99/org/a11y/atspi/accessible/9";
+
+    fn action_node(index: u32, object_ref: &str) -> AccessibilityNode {
+        AccessibilityNode {
+            index,
+            parent_index: None,
+            depth: 1,
+            object_ref: object_ref.to_string(),
+            role: "push button".to_string(),
+            name: Some("Save document".to_string()),
+            description: None,
+            child_count: 0,
+            bounds: None,
+            states: vec!["enabled".to_string(), "showing".to_string()],
+            actions: vec![AccessibilityAction {
+                index: 0,
+                name: "click".to_string(),
+                description: String::new(),
+                keybinding: String::new(),
+            }],
+            value: None,
+            text: None,
+            supports_editable_text: false,
+        }
+    }
+
+    fn semantic_params() -> ActionParams {
+        ActionParams {
+            role: Some("push button".to_string()),
+            name: Some("save".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn recovery_scope(params: serde_json::Value) -> AccessibilityRecoveryScope {
+        AccessibilityRecoveryScope {
+            params: serde_json::from_value(params).unwrap(),
+        }
+    }
+
+    fn named_scope() -> AccessibilityRecoveryScope {
+        recovery_scope(serde_json::json!({
+            "app_name_or_bundle_identifier": "org.example.Editor"
+        }))
+    }
+
+    fn refreshed_snapshot(
+        nodes: Vec<AccessibilityNode>,
+        scoped: bool,
+        root_pid: Option<u32>,
+        target_pid: Option<u32>,
+    ) -> RefreshedAccessibilitySnapshot {
+        RefreshedAccessibilitySnapshot {
+            snapshot: crate::atspi_tree::AccessibilitySnapshot {
+                nodes,
+                scoped,
+                root_pid,
+                truncated: false,
+            },
+            target_pid,
+        }
+    }
+
+    fn successful_invocation() -> crate::atspi_tree::ActionInvocation {
+        crate::atspi_tree::ActionInvocation {
+            action_index: 0,
+            action_name: Some("click".to_string()),
+            ok: true,
+        }
+    }
+
+    fn dead_name_error() -> anyhow::Error {
+        anyhow::Error::new(zbus::fdo::Error::ServiceUnknown(
+            "the cached unique name has no owner".to_string(),
+        ))
+        .context("failed to open the cached AT-SPI object")
+    }
+
+    #[test]
+    fn lossy_atspi_dead_name_errors_are_query_phase_recoverable() {
+        let error = anyhow::Error::new(atspi::AtspiError::from(zbus::fdo::Error::ServiceUnknown(
+            "dead name".to_string(),
+        )));
+        assert!(is_recoverable_action_query_error(&error));
+        assert!(!is_recoverable_action_query_error(&anyhow::anyhow!(
+            "org.freedesktop.DBus.Error.UnknownObject"
+        )));
+        assert!(!is_recoverable_action_query_error(
+            &error.context("failed to invoke AT-SPI action 0")
+        ));
+    }
+
+    #[test]
+    fn index_and_semantic_selector_resolve_the_same_object_ref() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_snapshot_with_scope(&[action_node(7, OLD_REF)], None, Some(named_scope()));
+        let params = semantic_params();
+        let selector = params.selector();
+
+        let by_index = backend
+            .resolve_object_ref(Some(7), None, &selector, ElementResolvePurpose::Action)
+            .unwrap();
+        let by_selector = backend
+            .resolve_object_ref(None, None, &selector, ElementResolvePurpose::Action)
+            .unwrap();
+
+        assert_eq!(by_index, OLD_REF);
+        assert_eq!(by_selector, by_index);
+    }
+
+    #[tokio::test]
+    async fn app_state_snapshots_retain_scope_only_when_scoped() {
+        let backend = ComputerUseLinux::default();
+        let params: GetAppStateParams = serde_json::from_value(serde_json::json!({
+            "app_name_or_bundle_identifier": "org.example.Editor",
+            "app_id": "org.example.Editor.desktop",
+            "window_id": 42,
+            "pid": 1234
+        }))
+        .unwrap();
+
+        backend
+            .commit_app_state_snapshot(&[action_node(0, OLD_REF)], Some(1234), &params, true)
+            .await;
+        let scope = backend
+            .last_snapshot
+            .lock()
+            .unwrap()
+            .recovery_scope
+            .clone()
+            .expect("scoped app-state snapshots need recovery scope");
+        assert_eq!(
+            scope.params.app_name_or_bundle_identifier.as_deref(),
+            Some("org.example.Editor")
+        );
+        assert_eq!(
+            scope.params.app_id.as_deref(),
+            Some("org.example.Editor.desktop")
+        );
+        assert_eq!(scope.params.window_id, Some(42));
+        assert_eq!(scope.params.pid, Some(1234));
+
+        backend
+            .commit_app_state_snapshot(&[action_node(0, OLD_REF)], None, &params, false)
+            .await;
+        assert!(backend
+            .last_snapshot
+            .lock()
+            .unwrap()
+            .recovery_scope
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn dead_owner_recovers_new_identity_dispatches_once_and_replaces_snapshot() {
+        let backend = ComputerUseLinux::default();
+        let scope = recovery_scope(serde_json::json!({
+            "app_name_or_bundle_identifier": "org.example.Editor",
+            "app_id": "org.example.Editor.desktop",
+            "window_id": 42,
+            "pid": 1234,
+            "max_nodes": 50,
+            "max_depth": 8
+        }));
+        backend.cache_snapshot_with_scope(&[action_node(0, OLD_REF)], Some(1234), Some(scope));
+        let queries = Arc::new(AtomicUsize::new(0));
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let invoked_refs = Arc::new(Mutex::new(Vec::new()));
+        let params = semantic_params();
+
+        let Json(output) = backend
+            .perform_element_action_with(
+                &params,
+                Some("0"),
+                {
+                    let queries = Arc::clone(&queries);
+                    let dispatches = Arc::clone(&dispatches);
+                    let invoked_refs = Arc::clone(&invoked_refs);
+                    move |object_ref, _action| {
+                        let queries = Arc::clone(&queries);
+                        let dispatches = Arc::clone(&dispatches);
+                        let invoked_refs = Arc::clone(&invoked_refs);
+                        async move {
+                            invoked_refs.lock().unwrap().push(object_ref);
+                            if queries.fetch_add(1, Ordering::SeqCst) == 0 {
+                                Err(dead_name_error())
+                            } else {
+                                dispatches.fetch_add(1, Ordering::SeqCst);
+                                Ok(successful_invocation())
+                            }
+                        }
+                    }
+                },
+                {
+                    let refreshes = Arc::clone(&refreshes);
+                    move |scope| async move {
+                        refreshes.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(
+                            scope.params.app_name_or_bundle_identifier.as_deref(),
+                            Some("org.example.Editor")
+                        );
+                        assert_eq!(
+                            scope.params.app_id.as_deref(),
+                            Some("org.example.Editor.desktop")
+                        );
+                        assert_eq!(scope.params.window_id, Some(42));
+                        assert_eq!(scope.params.pid, Some(1234));
+                        assert_eq!(scope.params.max_nodes, Some(50));
+                        assert_eq!(scope.params.max_depth, Some(8));
+                        let mut filler = action_node(0, ":1.20/org/a11y/atspi/accessible/1");
+                        filler.depth = 2;
+                        filler.role = "filler".to_string();
+                        filler.name = None;
+                        filler.actions.clear();
+                        let mut replacement = action_node(1, NEW_REF);
+                        replacement.depth = 2;
+                        replacement.parent_index = Some(0);
+                        Ok(refreshed_snapshot(
+                            vec![filler, replacement],
+                            true,
+                            Some(1234),
+                            Some(1234),
+                        ))
+                    }
+                },
+            )
+            .await;
+
+        assert!(output.ok, "{}", output.message);
+        assert_eq!(queries.load(Ordering::SeqCst), 2);
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(*invoked_refs.lock().unwrap(), vec![OLD_REF, NEW_REF]);
+        let snapshot = backend.last_snapshot.lock().unwrap();
+        assert_eq!(snapshot.pid, Some(1234));
+        assert_eq!(snapshot.nodes.len(), 1, "recovery must compact the tree");
+        assert_eq!(snapshot.nodes[0].index, 0);
+        assert_eq!(snapshot.nodes[0].object_ref, NEW_REF);
+        let scope = snapshot.recovery_scope.as_ref().unwrap();
+        assert_eq!(scope.params.pid, Some(1234));
+        assert_eq!(scope.params.window_id, Some(42));
+    }
+
+    #[tokio::test]
+    async fn pid_scope_rejects_identical_selector_from_another_app() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_snapshot_with_scope(
+            &[action_node(0, OLD_REF)],
+            Some(1234),
+            Some(recovery_scope(serde_json::json!({
+                "app_name_or_bundle_identifier": "Editor",
+                "pid": 1234
+            }))),
+        );
+        let invoked_refs = Arc::new(Mutex::new(Vec::new()));
+        let params = semantic_params();
+
+        let Json(output) = backend
+            .perform_element_action_with(
+                &params,
+                Some("0"),
+                {
+                    let invoked_refs = Arc::clone(&invoked_refs);
+                    move |object_ref, _action| {
+                        let invoked_refs = Arc::clone(&invoked_refs);
+                        async move {
+                            invoked_refs.lock().unwrap().push(object_ref);
+                            Err(dead_name_error())
+                        }
+                    }
+                },
+                |_scope| async {
+                    Ok(refreshed_snapshot(
+                        vec![action_node(0, OTHER_REF)],
+                        true,
+                        Some(5678),
+                        Some(1234),
+                    ))
+                },
+            )
+            .await;
+
+        assert!(!output.ok);
+        assert!(
+            output.message.contains("original app scope"),
+            "{}",
+            output.message
+        );
+        assert!(output.message.contains("Call get_app_state"));
+        assert_eq!(*invoked_refs.lock().unwrap(), vec![OLD_REF]);
+        let snapshot = backend.last_snapshot.lock().unwrap();
+        assert_eq!(snapshot.pid, Some(1234));
+        assert_eq!(snapshot.nodes[0].object_ref, OLD_REF);
+    }
+
+    #[tokio::test]
+    async fn unscoped_refresh_is_not_cached_or_invoked() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_snapshot_with_scope(&[action_node(0, OLD_REF)], None, Some(named_scope()));
+        let queries = Arc::new(AtomicUsize::new(0));
+        let params = semantic_params();
+
+        let Json(output) = backend
+            .perform_element_action_with(
+                &params,
+                Some("0"),
+                {
+                    let queries = Arc::clone(&queries);
+                    move |_object_ref, _action| {
+                        let queries = Arc::clone(&queries);
+                        async move {
+                            queries.fetch_add(1, Ordering::SeqCst);
+                            Err(dead_name_error())
+                        }
+                    }
+                },
+                |_scope| async {
+                    Ok(refreshed_snapshot(
+                        vec![action_node(0, OTHER_REF)],
+                        false,
+                        None,
+                        None,
+                    ))
+                },
+            )
+            .await;
+
+        assert!(!output.ok);
+        assert!(output.message.contains("could not prove"));
+        assert_eq!(queries.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            backend.last_snapshot.lock().unwrap().nodes[0].object_ref,
+            OLD_REF
+        );
+    }
+
+    #[tokio::test]
+    async fn numeric_and_explicit_identifiers_never_refresh_or_get_rewritten() {
+        let numeric = ActionParams {
+            element_index: Some(7),
+            ..semantic_params()
+        };
+        let explicit = ActionParams {
+            element_identifier: Some(EXPLICIT_REF.to_string()),
+            ..semantic_params()
+        };
+
+        for (params, expected_ref) in [(numeric, OLD_REF), (explicit, EXPLICIT_REF)] {
+            let backend = ComputerUseLinux::default();
+            backend.cache_snapshot_with_scope(
+                &[action_node(7, OLD_REF)],
+                None,
+                Some(named_scope()),
+            );
+            let refreshes = Arc::new(AtomicUsize::new(0));
+            let invoked_refs = Arc::new(Mutex::new(Vec::new()));
+
+            let Json(output) = backend
+                .perform_element_action_with(
+                    &params,
+                    Some("0"),
+                    {
+                        let invoked_refs = Arc::clone(&invoked_refs);
+                        move |object_ref, _action| {
+                            let invoked_refs = Arc::clone(&invoked_refs);
+                            async move {
+                                invoked_refs.lock().unwrap().push(object_ref);
+                                Err(dead_name_error())
+                            }
+                        }
+                    },
+                    {
+                        let refreshes = Arc::clone(&refreshes);
+                        move |_scope| async move {
+                            refreshes.fetch_add(1, Ordering::SeqCst);
+                            Ok(refreshed_snapshot(
+                                vec![action_node(0, NEW_REF)],
+                                true,
+                                None,
+                                None,
+                            ))
+                        }
+                    },
+                )
+                .await;
+
+            assert!(!output.ok);
+            assert_eq!(*invoked_refs.lock().unwrap(), vec![expected_ref]);
+            assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                backend.last_snapshot.lock().unwrap().nodes[0].object_ref,
+                OLD_REF
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invocation_phase_dead_name_error_is_never_retried() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_snapshot_with_scope(&[action_node(0, OLD_REF)], None, Some(named_scope()));
+        let queries = Arc::new(AtomicUsize::new(0));
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let params = semantic_params();
+
+        let Json(output) = backend
+            .perform_element_action_with(
+                &params,
+                Some("0"),
+                {
+                    let queries = Arc::clone(&queries);
+                    move |_object_ref, _action| {
+                        let queries = Arc::clone(&queries);
+                        async move {
+                            queries.fetch_add(1, Ordering::SeqCst);
+                            Err(dead_name_error().context("failed to invoke AT-SPI action 0"))
+                        }
+                    }
+                },
+                {
+                    let refreshes = Arc::clone(&refreshes);
+                    move |_scope| async move {
+                        refreshes.fetch_add(1, Ordering::SeqCst);
+                        Ok(refreshed_snapshot(
+                            vec![action_node(0, NEW_REF)],
+                            true,
+                            None,
+                            None,
+                        ))
+                    }
+                },
+            )
+            .await;
+
+        assert!(!output.ok);
+        assert!(output.message.contains("failed to invoke AT-SPI action 0"));
+        assert_eq!(queries.load(Ordering::SeqCst), 1);
+        assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn recovered_dispatch_failure_is_not_retried() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_snapshot_with_scope(&[action_node(0, OLD_REF)], None, Some(named_scope()));
+        let queries = Arc::new(AtomicUsize::new(0));
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let params = semantic_params();
+
+        let Json(output) = backend
+            .perform_element_action_with(
+                &params,
+                Some("0"),
+                {
+                    let queries = Arc::clone(&queries);
+                    move |_object_ref, _action| {
+                        let queries = Arc::clone(&queries);
+                        async move {
+                            if queries.fetch_add(1, Ordering::SeqCst) == 0 {
+                                Err(dead_name_error())
+                            } else {
+                                Err(dead_name_error().context("failed to invoke AT-SPI action 0"))
+                            }
+                        }
+                    }
+                },
+                {
+                    let refreshes = Arc::clone(&refreshes);
+                    move |_scope| async move {
+                        refreshes.fetch_add(1, Ordering::SeqCst);
+                        Ok(refreshed_snapshot(
+                            vec![action_node(0, NEW_REF)],
+                            true,
+                            None,
+                            None,
+                        ))
+                    }
+                },
+            )
+            .await;
+
+        assert!(!output.ok);
+        assert!(output.message.contains("failed to invoke AT-SPI action 0"));
+        assert_eq!(queries.load(Ordering::SeqCst), 2);
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dead_name_without_stable_scope_requires_fresh_app_state() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_nodes(&[action_node(0, OLD_REF)]);
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let params = semantic_params();
+
+        let Json(output) = backend
+            .perform_element_action_with(
+                &params,
+                Some("0"),
+                |_object_ref, _action| async { Err(dead_name_error()) },
+                {
+                    let refreshes = Arc::clone(&refreshes);
+                    move |_scope| async move {
+                        refreshes.fetch_add(1, Ordering::SeqCst);
+                        Ok(refreshed_snapshot(Vec::new(), true, None, None))
+                    }
+                },
+            )
+            .await;
+
+        assert!(!output.ok);
+        assert!(output.message.contains("no stable scoped recovery target"));
+        assert!(output.message.contains("Call get_app_state"));
+        assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn post_action_snapshot_does_not_retain_stale_recovery_scope() {
+        let backend = ComputerUseLinux::default();
+        backend.cache_snapshot_with_scope(
+            &[action_node(0, OLD_REF)],
+            Some(1234),
+            Some(named_scope()),
+        );
+
+        backend
+            .commit_snapshot(&[action_node(0, NEW_REF)], Some(5678))
+            .await;
+
+        let snapshot = backend.last_snapshot.lock().unwrap();
+        assert_eq!(snapshot.nodes[0].object_ref, NEW_REF);
+        assert_eq!(snapshot.pid, Some(5678));
+        assert!(snapshot.recovery_scope.is_none());
+    }
+}
+
+#[cfg(test)]
 mod node_target_scope_tests {
     use super::*;
 
@@ -11525,6 +12459,71 @@ mod post_action_capture_tests {
             serde_json::json!({"screenshot_after": "invalid"})
         )
         .is_err());
+    }
+
+    #[test]
+    fn editable_text_results_map_ok_verified_and_mcp_error_status() {
+        for (outcome, expected_ok, expected_verified) in [
+            (EditableTextSetOutcome::Verified, true, Some(true)),
+            (
+                EditableTextSetOutcome::MismatchAfterDeadline,
+                false,
+                Some(false),
+            ),
+            (EditableTextSetOutcome::ReadbackFailed, false, Some(false)),
+            (EditableTextSetOutcome::ReadbackTimedOut, false, Some(false)),
+            (
+                EditableTextSetOutcome::PasswordUnverifiable,
+                true,
+                Some(false),
+            ),
+        ] {
+            let (output, verified) = editable_text_action_result(outcome, None);
+            assert_eq!(output.ok, expected_ok);
+            assert_eq!(verified, expected_verified);
+            let result = structured_tool_result(
+                SetValueToolOutput {
+                    action: output,
+                    verified,
+                    observation: PostActionObservation::default(),
+                },
+                None,
+            )
+            .unwrap();
+            assert_eq!(result.is_error, Some(!expected_ok));
+            let structured = result.structured_content.unwrap();
+            assert_eq!(structured["ok"], serde_json::json!(expected_ok));
+            assert_eq!(structured["verified"], serde_json::json!(expected_verified));
+        }
+    }
+
+    #[test]
+    fn set_value_output_omits_verified_for_numeric_and_early_failures() {
+        let output = SetValueToolOutput {
+            action: action_result("set_value", Ok(Vec::new()), None),
+            verified: None,
+            observation: PostActionObservation::default(),
+        };
+
+        let value = serde_json::to_value(output).unwrap();
+
+        assert!(!value.as_object().unwrap().contains_key("verified"));
+    }
+
+    #[test]
+    fn only_set_value_schema_exposes_verified() {
+        let tools = ComputerUseLinux::default().mcp_tool_router().list_all();
+        for tool in tools {
+            let value = serde_json::to_value(&tool).unwrap();
+            let Some(properties) = value["outputSchema"]["properties"].as_object() else {
+                continue;
+            };
+            if tool.name == "set_value" {
+                assert!(properties.contains_key("verified"));
+            } else {
+                assert!(!properties.contains_key("verified"), "tool {}", tool.name);
+            }
+        }
     }
 
     #[test]
@@ -11776,6 +12775,7 @@ exit 1
         }))
         .unwrap();
         let result = server.click(Parameters(bad_click)).await.unwrap();
+        assert_eq!(result.is_error, Some(true));
         let structured = result.structured_content.expect("structured content");
         assert_eq!(structured["ok"], serde_json::json!(false));
         assert!(structured.get("screenshot").is_none());
@@ -11817,7 +12817,9 @@ exit 1
             .contains("Post-action screenshot failed:"));
 
         // XTEST dispatch can succeed while a non-US or changing XKB map
-        // substitutes symbols. The warning must survive post-action capture.
+        // substitutes symbols. The fake display cannot monitor XKB, so both
+        // the warning and unavailable-detection note must survive capture.
+        std::fs::write(&log_path, "").unwrap();
         let params = serde_json::from_value(serde_json::json!({
             "text": "quotes '\"; : / date +%H:%M:%S",
             "screenshot_after": true
@@ -11836,6 +12838,14 @@ exit 1
         ] {
             assert!(message.contains(expected), "missing {expected}: {message}");
         }
+        assert!(
+            message.contains("layout-change detection was unavailable"),
+            "{message}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&log_path).unwrap(),
+            "xdotool\ngnome-screenshot\n"
+        );
 
         // The text-specific risk does not apply to named key dispatch.
         let params = serde_json::from_value(serde_json::json!({"key": "Escape"})).unwrap();
@@ -11848,8 +12858,8 @@ exit 1
 
         // A launched failure stays an error and must not claim dispatch.
         std::env::set_var("CUL_POST_ACTION_FAIL_INPUT", "9");
-        let params = serde_json::from_value(serde_json::json!({"text": "no replay"})).unwrap();
-        let result = server.type_text(Parameters(params)).await.unwrap();
+        let params = serde_json::from_value(serde_json::json!({"key": "Escape"})).unwrap();
+        let result = server.press_key(Parameters(params)).await.unwrap();
         std::env::remove_var("CUL_POST_ACTION_FAIL_INPUT");
         let structured = result.structured_content.unwrap();
         assert_eq!(structured["ok"], false);

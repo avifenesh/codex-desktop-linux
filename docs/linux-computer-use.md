@@ -33,9 +33,11 @@ fresh compact tree, or `compact: false` for complete backend metadata.
 `maxWidth`, `maxHeight`, `maxBytes`, `scale`, `format`, and `quality`. Screenshot
 methods already emit the image and should not be emitted a second time.
 
-X11 xdotool text dispatch warns that non-US XKB layouts (reported with Brazilian `br`/ABNT2) or changing keymap state can silently substitute symbols even with `ok: true`. Inspect the actual text before pressing Enter, submitting it, or treating it as delivered. Use `include_tree: true` when AT-SPI exposes the text, or `screenshot_after: true`; neither automatically compares the field with the request. Do not retry blindly.
+X11 xdotool text dispatch warns that non-US XKB layouts (reported with Brazilian `br`/ABNT2) or changing keymap state can silently substitute symbols even with `ok: true`. The backend monitors XKB layout replacements, persistent mapping/group changes, keyboard grabs, and focus transitions across each dispatch. A detected change returns an error after text may already have been sent; input is never replayed. If monitoring cannot start, dispatch still proceeds with an explicit warning that layout and interception detection are unavailable. These guards do not prove field contents or detect every stable-map loss. Inspect the actual text before pressing Enter, submitting it, or treating it as delivered. Use `include_tree: true` when AT-SPI exposes the text, or `screenshot_after: true`; neither automatically compares the field with the request. Do not retry blindly.
 
-The embedded backend tracks Computer Use v0.7.19. MCP discovery probes are supported before initialization, including metadata-bearing discovery requests. Agent activity appears through the native GNOME indicator or the Wayland overlay helper. Captures hide the indicator before reading the screen. Portal captures clean new Pictures files and preserve existing images. Set `CODEX_COMPUTER_USE_INDICATOR=0` to disable action indicators; capture exclusion remains active. GNOME extension version 3 supports Shell 45 through 51. Existing Shell sessions need a logout and login to load refreshed extension files.
+The embedded backend is a 0.7.23 development sync of Computer Use; this does not imply that a standalone v0.7.23 release tag exists. WebKitGTK AT-SPI socket children are resolved through their well-known bus names, and bounded indexed action reads avoid stalled `GetActions` calls. Native action matching uses stable machine-readable `GetName` values, including for Qt controls. Failed desktop actions and intentional refusals map to MCP `isError: true`; a successful action remains successful when only its post-action observation fails.
+
+MCP discovery probes are supported before initialization, including metadata-bearing discovery requests. Agent activity appears through the native GNOME indicator or the Wayland overlay helper. Captures hide the indicator before reading the screen. Portal captures clean new Pictures files and preserve existing images. Set `CODEX_COMPUTER_USE_INDICATOR=0` to disable action indicators; capture exclusion remains active. GNOME extension version 3 supports Shell 45 through 51. Existing Shell sessions need a logout and login to load refreshed extension files.
 
 ## Runtime Dependencies
 
@@ -100,7 +102,11 @@ still need restarting.
 Scope `get_app_state` with `app_name_or_bundle_identifier` or a window target
 (`window_id`, `pid`, `app_id`, `wm_class`, `title`). Without one it returns the
 whole desktop AT-SPI tree, reports `tree_scoped=false`, and appends a warning to
-`message`, which can exhaust a small context window. `accessibility_tree_truncated=true`
+`message`, which can exhaust a small context window. `app_id` matching is
+case-insensitive and accepts a full reverse-DNS desktop ID or its final
+dot-separated segment. Exact matches take precedence, ambiguous aliases are
+rejected, and an unresolved explicit `app_id` returns an empty scoped tree
+rather than falling back to the desktop. `accessibility_tree_truncated=true`
 means the node, depth, or read budget stopped traversal with unread elements
 left; recover by scoping to a narrower target and raising `max_nodes` or
 `max_depth` (hard caps 2000 and 64), not by lowering `max_nodes`.
@@ -113,6 +119,19 @@ clicks retain pointer semantics. Relative coordinates use the clipped screenshot
 crop origin in coordinate pixels: divide preview pixels by the returned scale.
 Raw GDK surface coordinates and widget-local coordinates are not that origin.
 This does not qualify every GNOME X11 EWMH move/resize or mixed-monitor mapping.
+
+A semantic `perform_action` whose cached AT-SPI owner disappears during query or
+revalidation can refresh the original scoped snapshot once. Recovery must prove
+the same app scope and resolve a new object identity. Numeric indexes, explicit
+identifiers, unscoped snapshots, and actions already dispatched are never
+retried automatically.
+
+For editable text, `set_value` reads the complete contents back within a bounded
+deadline. `verified: true` means an exact match; mismatches and readback errors
+or timeouts return `ok: false` without replaying the mutation. Password fields
+return `verified: false` because masked contents cannot prove the write. Numeric
+writes and failures before editable-text verification omit `verified`. Re-observe
+after any mismatch because the contents may have changed.
 
 Set `CODEX_COMPUTER_USE_NOTIFY_ON_COMPLETE=1` in the MCP server environment
 to expose `complete_interaction`, a parameter-free completion notification.
