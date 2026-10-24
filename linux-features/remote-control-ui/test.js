@@ -183,20 +183,15 @@ test("remote-control UI descriptors match the current app chunks", () => {
 
   assert.equal(
     remoteControlConnectionsPatch.pattern.test("app-primary-40386834d0f6.js"),
-    false,
-  );
-  assert.equal(
-    remoteControlConnectionsPatch.pattern.test(
-      "app-initial-BTphDPeq.js",
-    ),
     true,
   );
   assert.equal(
     remoteControlConnectionsPatch.pattern.test(
-      "remote-control-connections-visibility-a07582a4850b.js",
+      "remote-control-connections-visibility-current.js",
     ),
     true,
   );
+  assert.equal(remoteControlConnectionsPatch.pattern.test("remote-control-connections-visibility.js.map"), false);
 
   assert.ok(experimentalFeaturesPatch.pattern.test("settings-route-state-BwIfDYxh.js"));
   assert.equal(
@@ -259,14 +254,14 @@ test("remote-control UI feature patches matching webview assets and records patc
         fs.writeFileSync(path.join(buildDir, "main.js"), "console.log('main bundle');");
         fs.writeFileSync(path.join(tempApp, "package.json"), JSON.stringify({ name: "codex" }));
 
-        const appInitialAsset = "app-initial-BTphDPeq.js";
-        const connectionsVisibilityAsset = "remote-control-connections-visibility-a07582a4850b.js";
+        const appInitialAsset = "app-initial-current.js";
         fs.writeFileSync(
           path.join(assetsDir, appInitialAsset),
           "function Twt(){let e=(0,kwt.c)(3),{data:t}=Vr(y4,Br(B2)),n=BN(`4114442250`);if(t?.config[`features.remote_connections`]===!0)return!0;let r=t?.config.features;if(typeof r!=`object`||!r||Array.isArray(r))return n;let i;return e[0]!==r||e[1]!==n?(i=Object.getOwnPropertyDescriptor(r,`remote_connections`)?.value===!0||n,e[0]=r,e[1]=n,e[2]=i):i=e[2],i}function D8(e){return e(RN,`4114442250`)?`enabled`:`disabled`}",
         );
+        const visibilityAsset = "remote-control-connections-visibility-current.js";
         fs.writeFileSync(
-          path.join(assetsDir, connectionsVisibilityAsset),
+          path.join(assetsDir, visibilityAsset),
           "function a({remoteControlConnectionsState:e,slingshotEnabled:t}){return t&&(e?.available??!0)&&e?.accessRequired!==!0}",
         );
         fs.writeFileSync(
@@ -283,7 +278,7 @@ test("remote-control UI feature patches matching webview assets and records patc
 
         assert.match(
           fs.readFileSync(
-            path.join(assetsDir, connectionsVisibilityAsset),
+            path.join(assetsDir, visibilityAsset),
             "utf8",
           ),
           /navigator\.userAgent\.includes\(`Linux`\)/,

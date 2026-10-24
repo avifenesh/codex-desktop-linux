@@ -82,7 +82,21 @@ jobs:
             --metadata upstream/${{ matrix.architecture }}.json \
             --key-base64 assets/openai-codex-linux-repository-key.gpg.base64 \
             --arch ${{ matrix.architecture }})"
+          asar_dir="upstream/${{ matrix.architecture }}/signed-app"
+          mkdir -p "$asar_dir"
+          dpkg-deb --fsys-tarfile "$package" | \
+            tar -xf - -C "$asar_dir" --strip-components=4 \
+              ./usr/lib/chatgpt/ChatGPT \
+              ./usr/lib/chatgpt/resources/app.asar \
+              ./usr/lib/chatgpt/resources/app.asar.unpacked
+          asar="$asar_dir/resources/app.asar"
+          test -x "$asar_dir/ChatGPT"
+          test -s "$asar"
+          test -d "$asar.unpacked"
           echo "package=$package" >> "$GITHUB_OUTPUT"
+          echo "asar=$asar" >> "$GITHUB_OUTPUT"
+          echo "app_dir=$asar_dir" >> "$GITHUB_OUTPUT"
+          echo "executable=$asar_dir/ChatGPT" >> "$GITHUB_OUTPUT"
       - name: Require the dispatched signed campaign
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -103,6 +117,49 @@ jobs:
             throw new Error("invalid dispatched release identity");
           }
           NODE
+      - name: Qualify Watchbound against the signed runtime executable
+        run: |
+          set -euo pipefail
+          official_asar="$(realpath -- "${{ steps.upstream.outputs.asar }}")"
+          runtime_metadata="$(mktemp -d)"
+          trap 'rm -rf "$runtime_metadata"' EXIT
+          (
+            cd "$runtime_metadata"
+            npx --yes @electron/asar extract-file \
+              "$official_asar" \
+              package.json
+          )
+          test -s "$runtime_metadata/package.json"
+          node - \
+            "$runtime_metadata" \
+            "${{ steps.upstream.outputs.executable }}" \
+            "${{ matrix.architecture }}" <<'NODE'
+          const fs = require("node:fs");
+          const {
+            validateArtifactManifest,
+            validateTargetRuntime,
+          } = require("./linux-features/directory-only-working-tree-watch/watchbound-package.js");
+          const manifest = JSON.parse(fs.readFileSync(
+            "linux-features/directory-only-working-tree-watch/watchbound-artifacts.json",
+            "utf8",
+          ));
+          validateArtifactManifest(manifest);
+          const runtime = validateTargetRuntime(
+            process.argv[2],
+            manifest,
+            undefined,
+            undefined,
+            process.argv[3],
+          );
+          if (runtime.qualification !== "signed-runtime-executable") {
+            throw new Error(
+              `Watchbound ${process.argv[4]} runtime qualification did not use the signed executable`,
+            );
+          }
+          console.log(
+            `Watchbound ${process.argv[4]} runtime qualified from signed executable: Node.js ${runtime.node}`,
+          );
+          NODE
       - name: Build required default baseline
         env:
           CODEX_TARGET_ARCH: ${{ matrix.architecture }}
@@ -110,9 +167,7 @@ jobs:
           CODEX_INSTALL_DIR: ${{ github.workspace }}/codex-app-${{ matrix.architecture }}
         run: |
           ./install.sh "${{ steps.upstream.outputs.package }}"
-          upstream_root="$(mktemp -d)"
-          dpkg-deb -x "${{ steps.upstream.outputs.package }}" "$upstream_root"
-          node - "$upstream_root/usr/lib/chatgpt/resources/app.asar" \
+          node - "${{ steps.upstream.outputs.asar }}" \
             "$CODEX_INSTALL_DIR/resources/app.asar" \
             "$CODEX_INSTALL_DIR/.codex-linux/patch-report.json" <<'NODE'
           const crypto = require("node:crypto");
@@ -150,11 +205,10 @@ jobs:
       - name: Test required core patches against the signed bundle
         run: |
           set -euo pipefail
-          upstream_root="$(mktemp -d)"
           extracted_asar="$(mktemp -d)"
-          dpkg-deb -x "${{ steps.upstream.outputs.package }}" "$upstream_root"
+          trap 'rm -rf "$extracted_asar"' EXIT
           npx --yes @electron/asar extract \
-            "$upstream_root/usr/lib/chatgpt/resources/app.asar" \
+            "${{ steps.upstream.outputs.asar }}" \
             "$extracted_asar"
           CODEX_SIGNED_EXTRACTED_APP="$extracted_asar" node - <<'NODE'
           const fs = require("node:fs");
@@ -176,6 +230,22 @@ jobs:
             if (result.status !== 0) process.exit(result.status ?? 1);
           }
           NODE
+      - name: Test profile isolation, Computer Use and account menu against the signed bundle
+        run: |
+          set -euo pipefail
+          extracted_asar="$(mktemp -d)"
+          trap 'rm -rf "$extracted_asar"' EXIT
+          npx --yes @electron/asar extract \
+            "${{ steps.upstream.outputs.asar }}" \
+            "$extracted_asar"
+          CODEX_SIGNED_EXTRACTED_APP="$extracted_asar" \
+            node --test linux-features/community-profile-isolation/test.js
+          CODEX_SIGNED_EXTRACTED_APP="$extracted_asar" \
+            node --test linux-features/computer-use-linux/unified.test.js \
+              linux-features/computer-use-linux/resume.test.js \
+              linux-features/computer-use-linux/current-signed.test.js \
+              linux-features/computer-use-linux/native-applications.test.js \
+              linux-features/account-switcher/test.js
       - name: Require signed renderer dependency regression
         env:
           EXPECTED_SIGNED_VERSION: ${{ inputs.version }}
@@ -193,11 +263,10 @@ jobs:
             throw new Error("signed renderer regression is not bound to the expected campaign");
           }
           NODE
-          upstream_root="$(mktemp -d)"
           extracted_asar="$(mktemp -d)"
-          dpkg-deb -x "${{ steps.upstream.outputs.package }}" "$upstream_root"
+          trap 'rm -rf "$extracted_asar"' EXIT
           npx --yes @electron/asar extract \
-            "$upstream_root/usr/lib/chatgpt/resources/app.asar" \
+            "${{ steps.upstream.outputs.asar }}" \
             "$extracted_asar"
           node - "$extracted_asar/webview/assets" <<'NODE'
           const fs = require("node:fs");
@@ -235,6 +304,7 @@ jobs:
             --root "$CODEX_INSTALL_DIR" \
             --arch "${{ matrix.architecture }}"
           fix_root="$(mktemp -d)"
+          trap 'rm -rf "$fix_root"' EXIT
           cp -a "$CODEX_INSTALL_DIR/." "$fix_root/"
           chmod -R u+w "$fix_root"
           if [ "${{ matrix.architecture }}" = amd64 ]; then
@@ -261,13 +331,14 @@ jobs:
         if: matrix.architecture == 'amd64'
         run: |
           set -euo pipefail
-          upstream_root="$(mktemp -d)"
           extracted_asar="$(mktemp -d)"
-          dpkg-deb -x "${{ steps.upstream.outputs.package }}" "$upstream_root"
+          trap 'rm -rf "$extracted_asar"' EXIT
           npx --yes @electron/asar extract \
-            "$upstream_root/usr/lib/chatgpt/resources/app.asar" \
+            "${{ steps.upstream.outputs.asar }}" \
             "$extracted_asar"
-          node scripts/ci/verify-official-linux-features.js "$extracted_asar"
+          node scripts/ci/verify-official-linux-features.js \
+            "$extracted_asar" \
+            "${{ steps.upstream.outputs.app_dir }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: official-linux-${{ matrix.architecture }}-metadata
@@ -332,6 +403,60 @@ jobs:
           PACMAN_STAGE_ONLY=1 ./scripts/build-pacman.sh
           APPIMAGE_STAGE_ONLY=1 ./scripts/build-appimage.sh
 
+  community-profile-isolation-feature-alone:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev gnupg
+      - name: Build Community profile isolation alone from the signed package
+        env:
+          CODEX_LINUX_FEATURES_CONFIG: ${{ github.workspace }}/community-profile-isolation-features.json
+          CODEX_INSTALL_DIR: ${{ github.workspace }}/codex-app-community-profile-isolation
+          CODEX_TARGET_ARCH: amd64
+          EXPECTED_RELEASE_ID: ${{ inputs.release_id }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+          EXPECTED_REPOSITORY_PATH: ${{ inputs.amd64_repository_path }}
+          EXPECTED_SHA256: ${{ inputs.amd64_sha256 }}
+        run: |
+          set -euo pipefail
+          cat > "$CODEX_LINUX_FEATURES_CONFIG" <<'JSON'
+          {
+            "enabled": ["community-profile-isolation"]
+          }
+          JSON
+          mkdir -p upstream
+          package="$(node scripts/lib/upstream-linux-package.js \
+            --output-dir upstream/amd64 \
+            --metadata upstream/amd64.json \
+            --key-base64 assets/openai-codex-linux-repository-key.gpg.base64 \
+            --arch amd64)"
+          node - upstream/amd64.json <<'NODE'
+          const fs = require("node:fs");
+          const metadata = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          if (process.env.GITHUB_EVENT_NAME === "workflow_dispatch"
+              && (metadata.version !== process.env.EXPECTED_VERSION
+                || metadata.repositoryPath !== process.env.EXPECTED_REPOSITORY_PATH
+                || metadata.sha256 !== process.env.EXPECTED_SHA256
+                || !/^[0-9a-f]{64}$/.test(process.env.EXPECTED_RELEASE_ID))) {
+            throw new Error("Community profile isolation package does not match the dispatched campaign");
+          }
+          NODE
+          ./install.sh "$package"
+          node --test linux-features/community-profile-isolation/test.js
+          wrapper="$CODEX_INSTALL_DIR/.codex-linux/features/community-profile-isolation/codex-cli-wrapper.sh"
+          test -x "$wrapper"
+          grep -R -F 'CODEX_HOME="$HOME/.codex-community"' "$CODEX_INSTALL_DIR/.codex-linux/env.d"
+          grep -R -F 'CODEX_ELECTRON_USER_DATA_PATH' "$CODEX_INSTALL_DIR/.codex-linux/launcher.d"
+
   dock-icon-feature-alone:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -352,6 +477,10 @@ jobs:
           CODEX_INSTALL_DIR: ${{ github.workspace }}/codex-app-dock-icon
           CODEX_PATCH_REPORT_JSON: ${{ github.workspace }}/dock-icon-report/patch-report.json
           CODEX_TARGET_ARCH: amd64
+          EXPECTED_RELEASE_ID: ${{ inputs.release_id }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+          EXPECTED_REPOSITORY_PATH: ${{ inputs.amd64_repository_path }}
+          EXPECTED_SHA256: ${{ inputs.amd64_sha256 }}
         run: |
           set -euo pipefail
           cat > "$CODEX_LINUX_FEATURES_CONFIG" <<'JSON'
@@ -374,6 +503,17 @@ jobs:
             --metadata upstream/amd64.json \
             --key-base64 assets/openai-codex-linux-repository-key.gpg.base64 \
             --arch amd64)"
+          node - upstream/amd64.json <<'NODE'
+          const fs = require("node:fs");
+          const metadata = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          if (process.env.GITHUB_EVENT_NAME === "workflow_dispatch"
+              && (metadata.version !== process.env.EXPECTED_VERSION
+                || metadata.repositoryPath !== process.env.EXPECTED_REPOSITORY_PATH
+                || metadata.sha256 !== process.env.EXPECTED_SHA256
+                || !/^[0-9a-f]{64}$/.test(process.env.EXPECTED_RELEASE_ID))) {
+            throw new Error("Dock icon package does not match the dispatched campaign");
+          }
+          NODE
           ./install.sh "$package"
           node scripts/ci/validate-patch-report.js "$CODEX_PATCH_REPORT_JSON" \
             --require-enabled-feature ui-tweaks \
@@ -392,16 +532,12 @@ jobs:
             icon-chatgpt.png \
             icon-codex-dark-color.png \
             icon-codex-light.png \
-            icon-space-dark.png \
-            icon-space-light.png \
             sync-desktop-icon.sh | sort) \
             <(find "$payload" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
           for resource in \
             icon-chatgpt.png \
             icon-codex-dark-color.png \
             icon-codex-light.png \
-            icon-space-dark.png \
-            icon-space-light.png \
             sync-desktop-icon.sh; do
             test -f "$payload/$resource"
             test ! -L "$payload/$resource"
@@ -411,8 +547,6 @@ jobs:
           cmp "$upstream_root/usr/lib/chatgpt/resources/icon-chatgpt.png" "$payload/icon-chatgpt.png"
           cmp assets/codex-linux.png "$payload/icon-codex-dark-color.png"
           cmp assets/codex-linux.png "$payload/icon-codex-light.png"
-          cmp assets/codex-linux.png "$payload/icon-space-dark.png"
-          cmp assets/codex-linux.png "$payload/icon-space-light.png"
           cmp linux-features/ui-tweaks/sync-desktop-icon.sh "$payload/sync-desktop-icon.sh"
           test -x "$payload/sync-desktop-icon.sh"
           hook="$CODEX_INSTALL_DIR/.codex-linux/prelaunch.d/ui-tweaks-dock-icon-cleanup.sh"
@@ -459,6 +593,7 @@ jobs:
     needs:
       - signed-baseline
       - package-matrix
+      - community-profile-isolation-feature-alone
       - dock-icon-feature-alone
       - watchdog
     runs-on: ubuntu-latest
@@ -468,10 +603,12 @@ jobs:
         env:
           SIGNED_BASELINE_RESULT: ${{ needs.signed-baseline.result }}
           PACKAGE_MATRIX_RESULT: ${{ needs.package-matrix.result }}
+          COMMUNITY_PROFILE_ISOLATION_FEATURE_ALONE_RESULT: ${{ needs.community-profile-isolation-feature-alone.result }}
           DOCK_ICON_FEATURE_ALONE_RESULT: ${{ needs.dock-icon-feature-alone.result }}
           WATCHDOG_RESULT: ${{ needs.watchdog.result }}
         run: |
           test "$SIGNED_BASELINE_RESULT" = success
           test "$PACKAGE_MATRIX_RESULT" = success
+          test "$COMMUNITY_PROFILE_ISOLATION_FEATURE_ALONE_RESULT" = success
           test "$DOCK_ICON_FEATURE_ALONE_RESULT" = success
           test "$WATCHDOG_RESULT" = success

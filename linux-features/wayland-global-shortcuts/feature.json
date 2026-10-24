@@ -1,0 +1,10 @@
+{
+  "id": "wayland-global-shortcuts",
+  "title": "Wayland Global Shortcuts",
+  "description": "Use native Wayland portals for built-in popout, Mini/Pet, Appshots, voice and meeting shortcuts.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patchDescriptors": "./patch.js",
+    "stageHook": "./stage.sh"
+  }
+}

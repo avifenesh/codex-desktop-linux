@@ -1,0 +1,9 @@
+{
+  "id": "chatgpt-dots-any-country",
+  "title": "ChatGPT Dots in Any Country",
+  "description": "Keep the ChatGPT Dots entry route visible when the account response is country-gated.",
+  "defaultEnabled": false,
+  "entrypoints": {
+    "patchDescriptors": "./patch.js"
+  }
+}

@@ -22,6 +22,8 @@ bash -n install.sh launcher/start.sh.template scripts/install-deps.sh \
   scripts/rebuild-candidate.sh scripts/select-latest-package.sh \
   tests/install_deps_pacman_rust_matrix.sh
 bash -n scripts/lib/*.sh scripts/build-deb.sh scripts/build-rpm.sh scripts/build-pacman.sh scripts/build-appimage.sh
+bash -n scripts/build-gentoo.sh scripts/install-gentoo.sh
+node --test scripts/gentoo-native.test.js scripts/gentoo-install.test.js scripts/lib/gentoo-feature-support.test.js
 
 assert_contains packaging/linux/codex-desktop.desktop '^Name=ChatGPT Community$'
 assert_contains packaging/linux/codex-desktop.desktop '^Comment=Community Linux distribution based on OpenAI ChatGPT$'
@@ -208,6 +210,7 @@ node --test launcher/start.test.js tests/deb-prerm.test.js scripts/lib/upstream-
   scripts/automation/upstream-linux-package-watchdog/test.js \
   scripts/patch-linux-window-ui.test.js scripts/patches/runner.test.js \
   scripts/patches/lib/asar-layout.test.js \
+  scripts/patches/lib/global-shortcuts-portal.test.js \
   scripts/patches/core/*/test.js \
   scripts/lib/linux-features.test.js
 

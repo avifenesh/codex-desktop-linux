@@ -32,15 +32,99 @@ const GENERAL_SETTINGS_CHILDREN_WITH_ROW =
   `children:[S,C,w,T,${GENERAL_SETTINGS_ROW_CALL},D,O,k,A,j,M,N,P,L]`;
 const GENERAL_SETTINGS_CHILDREN_WITH_OLD_ROW =
   `children:[S,C,w,T,D,O,k,${GENERAL_SETTINGS_ROW_CALL},A,j,M,N,P,L]`;
-const ASSISTANT_RENDER_CANDIDATE_PATTERN =
-  /\.(?:jsx|jsxs)\)\([A-Za-z_$][\w$]*,\{(?=[^{}]{0,2500}\bitem:)(?=[^{}]{0,2500}\bassistantCopyText:)(?=[^{}]{0,2500}\bconversationId:)/u;
+const ASSISTANT_RENDER_SHARED_PROPS = [
+  "item",
+  "alwaysShowActions",
+  "assistantCopyText",
+  "savedContentResponseId",
+  "after",
+  "compactAttachment",
+  "electronAfter",
+  "autoReviewStats",
+  "hookStats",
+  "completedThreadGoal",
+  "conversationId",
+  "cwd",
+  "hostId",
+  "reportEntityType",
+  "markdownMediaCacheKey",
+  "projectlessOutputDirectory",
+  "outputFileLinks",
+  "forceCodeBlockWordWrap",
+  "hasArtifacts",
+  "onAddResponseTextAnnotation",
+  "onNavigateResponseTextAnnotation",
+  "onFileLinkOpen",
+  "onFork",
+  "renderCodeBlocksAsWritingBlocks",
+  "showActionRow",
+  "showTimestampHeader",
+  "showTimestampWithoutActions",
+  "timestampHoverOnly",
+  "trailingActions",
+];
+const ASSISTANT_RENDER_LIVE_PROPS = [
+  "turnId",
+  "showShimmer",
+  "getVisualizeTurnTriggerType",
+  "allowCopyWhileStreaming",
+  "additionalActions",
+  "persistentAdditionalActions",
+];
 
 function warn(message, patchName) {
   console.warn(`WARN: ${message} - skipping ${patchName}`);
 }
 
+const GLOBAL_STATE_GET_HANDLER = '"get-global-state":async';
+const GLOBAL_STATE_SET_HANDLER = '"set-global-state":async';
+const CURRENT_HANDLER_OWNER = '"set-remote-wsl-connections-enabled":';
+const GLOBAL_STATE_ALLOWLIST_MARKER = "/*codex-linux-global-state-allowlist*/";
+const GLOBAL_STATE_ALLOWED_CLAUSE =
+  `${JSON.stringify([SETTINGS_KEY, KOKORO_SPEED_KEY])}.includes(k)||`;
+
+function globalStateHandlers() {
+  const allowed = `${GLOBAL_STATE_ALLOWLIST_MARKER}${GLOBAL_STATE_ALLOWED_CLAUSE}!1`;
+  return (
+    `"get-global-state":async({key,params}={})=>{let k=key??params?.key;if(!(${allowed}))throw Error(\`Unsupported global-state key\`);return{value:this.globalState.get(k)}},` +
+    `"set-global-state":async({key,value,params}={})=>{let k=key??params?.key,v=value??params?.value;if(!(${allowed}))throw Error(\`Unsupported global-state key\`);this.globalState.set(k,v);return{success:!0}},`
+  );
+}
+
+function count(source, needle) {
+  return source.split(needle).length - 1;
+}
+
+function ensureGlobalStateHandlers(source) {
+  const getCount = count(source, GLOBAL_STATE_GET_HANDLER);
+  const setCount = count(source, GLOBAL_STATE_SET_HANDLER);
+  if (getCount === 1 && setCount === 1) {
+    const markerCount = count(source, GLOBAL_STATE_ALLOWLIST_MARKER);
+    const allowedCount = count(source, GLOBAL_STATE_ALLOWED_CLAUSE);
+    if (markerCount !== 2 || (allowedCount !== 0 && allowedCount !== 2)) return null;
+    return allowedCount === 2
+      ? source
+      : source.split(GLOBAL_STATE_ALLOWLIST_MARKER).join(GLOBAL_STATE_ALLOWLIST_MARKER + GLOBAL_STATE_ALLOWED_CLAUSE);
+  }
+  if (getCount !== 0 || setCount !== 0) return null;
+  const currentOwners = count(source, CURRENT_HANDLER_OWNER);
+  if (currentOwners !== 1) return null;
+  return source.replace(CURRENT_HANDLER_OWNER, globalStateHandlers() + CURRENT_HANDLER_OWNER);
+}
+
 function applyMainBundlePatch(source) {
-  if (source.includes(`"${HANDLER_NAME}":async`)) {
+  const originalSource = source;
+  source = ensureGlobalStateHandlers(source);
+  if (source == null) {
+    warn("Could not find unique global-state handler owner", "read aloud main-bundle patch");
+    return originalSource;
+  }
+  const installedHandlerCount = count(source, `"${HANDLER_NAME}":async`);
+  if (installedHandlerCount > 1) {
+    warn("Found duplicate read aloud handlers", "read aloud main-bundle patch");
+    return originalSource;
+  }
+  if (installedHandlerCount === 1) {
     return source;
   }
 
@@ -52,7 +136,8 @@ function applyMainBundlePatch(source) {
 
   const helper = [
     `function codexLinuxReadAloudCleanText(e){return typeof e!==\`string\`?\`\`:e.replace(/\\r\\n/g,\`\\n\`).replace(new RegExp(\`\\\`\\\`\\\`[\\\\s\\\\S]*?\\\`\\\`\\\`\`,\`gu\`),\` code block. \`).replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/gu,\`$1\`).replace(/[*_#>~]/gu,\`\`).replace(/\\n{3,}/gu,\`\\n\\n\`).trim().slice(0,8e3)}`,
-    `function codexLinuxReadAloudHasHebrew(e){return /[\\u0590-\\u05ff]/u.test(e)}`,
+    `function codexLinuxReadAloudLanguage(e){let t=process.env.CODEX_LINUX_READ_ALOUD_LANGUAGE?.trim().toLowerCase();if(t)return t;let n={han:0,kana:0,ko:0,ru:0,he:0},r=0;for(let t of String(e||\`\`).normalize(\`NFC\`)){if(!/\\p{L}/u.test(t))continue;r++;if(/\\p{Script=Han}/u.test(t))n.han++;else if(/[\\p{Script=Hiragana}\\p{Script=Katakana}]/u.test(t))n.kana++;else if(/\\p{Script=Hangul}/u.test(t))n.ko++;else if(/\\p{Script=Cyrillic}/u.test(t))n.ru++;else if(/\\p{Script=Hebrew}/u.test(t))n.he++}let a=n.kana>0&&n.kana*5>=n.han+n.kana,i={zh:a?0:n.han,ja:a?n.han+n.kana:0,ko:n.ko,ru:n.ru,he:n.he};for(let[e,t]of Object.entries(i))if(t*5>r*3)return e;return\`en\`}`,
+    `function codexLinuxReadAloudNativeLanguage(e){return{en:\`en\`,zh:\`cmn\`,ja:\`ja\`,ko:\`ko\`,ru:\`ru\`,es:\`es\`,fr:\`fr\`,de:\`de\`,it:\`it\`,pt:\`pt\`,he:\`he\`,hi:\`hi\`}[e]||\`en\`}`,
     `function codexLinuxReadAloudHome(){return process.env.HOME||process.env.USERPROFILE||${osVar}.homedir?.()||\`\`}`,
     `function codexLinuxReadAloudDataHome(){let e=codexLinuxReadAloudHome(),t=process.env.XDG_DATA_HOME||e&&${pathVar}.join(e,\`.local\`,\`share\`);return t||\`\`}`,
     `function codexLinuxReadAloudSettingsAppId(){let e=process.env.CODEX_LINUX_APP_ID||process.env.CODEX_APP_ID||\`codex-desktop\`;return/^[A-Za-z0-9._-]+$/.test(e)?e:\`codex-desktop\`}`,
@@ -90,21 +175,14 @@ function applyMainBundlePatch(source) {
     `let codexLinuxReadAloudProc=null;function codexLinuxReadAloudStop(){let e=codexLinuxReadAloudProc;codexLinuxReadAloudProc=null;if(!e)return codexLinuxReadAloudReport({stopped:!1,reason:\`idle\`});try{e.pid&&process.kill(-e.pid,\`SIGTERM\`)}catch{try{e.kill?.(\`SIGTERM\`)}catch{}}return codexLinuxReadAloudReport({stopped:!0})}`,
     `function codexLinuxReadAloudSpawn(command,args,options={}){if(!codexLinuxReadAloudCommandExists(command))return!1;try{codexLinuxReadAloudStop();let child=${childProcessVar}.spawn(command,args,{...options,stdio:options.stdio??\`ignore\`,windowsHide:!0,detached:!0,env:{...process.env,...codexLinuxReadAloudAudioEnv(),...(options.env||{})}});codexLinuxReadAloudProc=child,child.on?.(\`exit\`,()=>{codexLinuxReadAloudProc===child&&(codexLinuxReadAloudProc=null)}),child.unref?.();return!0}catch{return!1}}`,
     `function codexLinuxReadAloudSpawnStdin(command,args,text,extraEnv={}){if(!codexLinuxReadAloudCommandExists(command))return!1;try{codexLinuxReadAloudStop();let child=${childProcessVar}.spawn(command,args,{stdio:[\`pipe\`,\`ignore\`,\`ignore\`],windowsHide:!0,detached:!0,env:{...process.env,...codexLinuxReadAloudAudioEnv(),...extraEnv}});codexLinuxReadAloudProc=child,child.on?.(\`exit\`,()=>{codexLinuxReadAloudProc===child&&(codexLinuxReadAloudProc=null)}),child.stdin?.end(text),child.unref?.();return!0}catch{return!1}}`,
-    `function codexLinuxReadAloudKokoro(e){let t=codexLinuxReadAloudKokoroMissing();if(t.length)return{spoken:!1,reason:\`kokoro-unavailable\`,missing:t};let n=codexLinuxReadAloudKokoroSpeed(),r={CODEX_LINUX_READ_ALOUD_KOKORO_PYTHON:codexLinuxReadAloudKokoroPython(),CODEX_LINUX_READ_ALOUD_KOKORO_MODEL:codexLinuxReadAloudKokoroModel(),CODEX_LINUX_READ_ALOUD_KOKORO_VOICES:codexLinuxReadAloudKokoroVoices(),CODEX_LINUX_READ_ALOUD_KOKORO_VOICE:codexLinuxReadAloudKokoroVoice(),CODEX_LINUX_READ_ALOUD_KOKORO_SPEED:String(n)};return codexLinuxReadAloudSpawnStdin(codexLinuxReadAloudKokoroRunner(),[],e,r)?{spoken:!0,engine:\`kokoro\`,voice:codexLinuxReadAloudKokoroVoice(),speed:n}:{spoken:!1,reason:\`kokoro-spawn-failed\`}}`,
+    `function codexLinuxReadAloudKokoro(e){let t=codexLinuxReadAloudKokoroMissing(),n=codexLinuxReadAloudLanguage(e),r={en:[\`bm_george\`,\`en-us\`],zh:[\`zf_xiaobei\`,\`cmn\`],ja:[\`jf_alpha\`,\`ja\`],es:[\`ef_dora\`,\`es\`],fr:[\`ff_siwis\`,\`fr-fr\`],hi:[\`hf_alpha\`,\`hi\`],it:[\`if_sara\`,\`it\`],pt:[\`pf_dora\`,\`pt-br\`]};if(t.length)return{spoken:!1,reason:\`kokoro-unavailable\`,missing:t,language:n};let o=process.env.CODEX_LINUX_READ_ALOUD_KOKORO_LANGUAGE_VOICE?.trim()||process.env.CODEX_LINUX_READ_ALOUD_KOKORO_VOICE?.trim(),s=process.env.CODEX_LINUX_READ_ALOUD_KOKORO_LANG?.trim();if(!r[n]&&!o&&!s)return{spoken:!1,reason:\`native-language\`,language:n};let v=r[n]||r.en,i=o||v[0];s=s||v[1];let a=codexLinuxReadAloudKokoroSpeed(),l={CODEX_LINUX_READ_ALOUD_KOKORO_PYTHON:codexLinuxReadAloudKokoroPython(),CODEX_LINUX_READ_ALOUD_KOKORO_MODEL:codexLinuxReadAloudKokoroModel(),CODEX_LINUX_READ_ALOUD_KOKORO_VOICES:codexLinuxReadAloudKokoroVoices(),CODEX_LINUX_READ_ALOUD_KOKORO_VOICE:i,CODEX_LINUX_READ_ALOUD_KOKORO_LANG:s,CODEX_LINUX_READ_ALOUD_KOKORO_SPEED:String(a)};return codexLinuxReadAloudSpawnStdin(codexLinuxReadAloudKokoroRunner(),[],e,l)?{spoken:!0,engine:\`kokoro\`,voice:i,lang:s,language:n,speed:a}:{spoken:!1,reason:\`kokoro-spawn-failed\`,language:n}}`,
     `function codexLinuxReadAloudPiper(text,modelPath){let piperBin=process.env.CODEX_LINUX_READ_ALOUD_PIPER_BIN?.trim()||\`piper\`;if(!modelPath||!${fsVar}.existsSync(modelPath)||!codexLinuxReadAloudCommandExists(piperBin)||!codexLinuxReadAloudCommandExists(\`aplay\`))return!1;try{codexLinuxReadAloudStop();let piperOptions={stdio:[\`pipe\`,\`pipe\`,\`ignore\`],windowsHide:!0,detached:!0,env:{...process.env,...codexLinuxReadAloudAudioEnv()}},piper=${childProcessVar}.spawn(piperBin,[\`--model\`,modelPath,\`--output-raw\`],piperOptions),aplay=${childProcessVar}.spawn(\`aplay\`,[\`-q\`,\`-r\`,\`22050\`,\`-c\`,\`1\`,\`-f\`,\`S16_LE\`,\`-t\`,\`raw\`],{stdio:[\`pipe\`,\`ignore\`,\`ignore\`],windowsHide:!0,detached:!0,env:{...process.env,...codexLinuxReadAloudAudioEnv()}});codexLinuxReadAloudProc=piper,piper.on?.(\`exit\`,()=>{codexLinuxReadAloudProc===piper&&(codexLinuxReadAloudProc=null)}),piper.stdout?.pipe(aplay.stdin),piper.stdin?.end(text),piper.unref?.(),aplay.unref?.();return!0}catch{return!1}}`,
-    `function codexLinuxReadAloudSpeak(input,options={}){if(process.platform!==\`linux\`)return codexLinuxReadAloudReport({spoken:!1,reason:\`not-linux\`});if(options?.requireEnabled!==!1&&!codexLinuxReadAloudEnabled())return codexLinuxReadAloudReport({spoken:!1,reason:\`disabled\`});let text=codexLinuxReadAloudCleanText(input);if(!text)return codexLinuxReadAloudReport({spoken:!1,reason:\`empty\`});let customCommand=process.env.CODEX_LINUX_READ_ALOUD_COMMAND?.trim();if(customCommand&&codexLinuxReadAloudSpawnStdin(customCommand,[],text))return codexLinuxReadAloudReport({spoken:!0,engine:\`custom\`});let engine=(process.env.CODEX_LINUX_READ_ALOUD_ENGINE?.trim()||\`kokoro\`).toLowerCase(),hasHebrew=codexLinuxReadAloudHasHebrew(text),piperModel=process.env.CODEX_LINUX_READ_ALOUD_PIPER_MODEL?.trim();if(engine===\`piper\`)return codexLinuxReadAloudReport(codexLinuxReadAloudPiper(text,piperModel)?{spoken:!0,engine:\`piper\`}:{spoken:!1,reason:\`piper-unavailable\`});let kokoroResult=codexLinuxReadAloudKokoro(text);if(kokoroResult.spoken)return codexLinuxReadAloudReport(kokoroResult);if(!codexLinuxReadAloudNativeFallbackEnabled())return codexLinuxReadAloudReport(kokoroResult);if(codexLinuxReadAloudPiper(text,piperModel))return codexLinuxReadAloudReport({spoken:!0,engine:\`piper\`});let voice=process.env.CODEX_LINUX_READ_ALOUD_VOICE?.trim(),rate=process.env.CODEX_LINUX_READ_ALOUD_RATE?.trim()||\`-10\`,voiceType=process.env.CODEX_LINUX_READ_ALOUD_VOICE_TYPE?.trim();try{codexLinuxReadAloudCommandExists(\`spd-say\`)&&${childProcessVar}.spawn(\`spd-say\`,[\`-C\`],{stdio:\`ignore\`,windowsHide:!0,env:{...process.env,...codexLinuxReadAloudAudioEnv()}}).unref?.()}catch{}let spdArgs=[\`-r\`,rate,...(voiceType?[\`-t\`,voiceType]:[]),...(voice?[\`-y\`,voice]:[]),\`-l\`,hasHebrew?\`he\`:\`en\`,\`--\`,text];if(codexLinuxReadAloudSpawn(\`spd-say\`,spdArgs))return codexLinuxReadAloudReport({spoken:!0,engine:\`spd-say\`});let espeakVoice=voice||(hasHebrew?\`he\`:\`en-us\`);return codexLinuxReadAloudReport(codexLinuxReadAloudSpawn(\`espeak-ng\`,[\`-v\`,espeakVoice,\`-s\`,process.env.CODEX_LINUX_READ_ALOUD_ESPEAK_RATE?.trim()||\`165\`,\`--\`,text])?{spoken:!0,engine:\`espeak-ng\`}:kokoroResult)}`,
+    `function codexLinuxReadAloudSpeak(input,options={}){if(process.platform!==\`linux\`)return codexLinuxReadAloudReport({spoken:!1,reason:\`not-linux\`});if(options?.requireEnabled!==!1&&!codexLinuxReadAloudEnabled())return codexLinuxReadAloudReport({spoken:!1,reason:\`disabled\`});let text=codexLinuxReadAloudCleanText(input);if(!text)return codexLinuxReadAloudReport({spoken:!1,reason:\`empty\`});let customCommand=process.env.CODEX_LINUX_READ_ALOUD_COMMAND?.trim();if(customCommand&&codexLinuxReadAloudSpawnStdin(customCommand,[],text))return codexLinuxReadAloudReport({spoken:!0,engine:\`custom\`});let engine=(process.env.CODEX_LINUX_READ_ALOUD_ENGINE?.trim()||\`kokoro\`).toLowerCase(),language=codexLinuxReadAloudLanguage(text),piperModel=process.env.CODEX_LINUX_READ_ALOUD_PIPER_MODEL?.trim();if(engine===\`piper\`)return codexLinuxReadAloudReport(codexLinuxReadAloudPiper(text,piperModel)?{spoken:!0,engine:\`piper\`,language}:{spoken:!1,reason:\`piper-unavailable\`,language});let kokoroResult=codexLinuxReadAloudKokoro(text);if(kokoroResult.spoken)return codexLinuxReadAloudReport(kokoroResult);if(!codexLinuxReadAloudNativeFallbackEnabled())return codexLinuxReadAloudReport(kokoroResult);if(codexLinuxReadAloudPiper(text,piperModel))return codexLinuxReadAloudReport({spoken:!0,engine:\`piper\`,language});let voice=process.env.CODEX_LINUX_READ_ALOUD_VOICE?.trim(),rate=process.env.CODEX_LINUX_READ_ALOUD_RATE?.trim()||\`-10\`,voiceType=process.env.CODEX_LINUX_READ_ALOUD_VOICE_TYPE?.trim(),nativeLanguage=codexLinuxReadAloudNativeLanguage(language);try{codexLinuxReadAloudCommandExists(\`spd-say\`)&&${childProcessVar}.spawn(\`spd-say\`,[\`-C\`],{stdio:\`ignore\`,windowsHide:!0,env:{...process.env,...codexLinuxReadAloudAudioEnv()}}).unref?.()}catch{}let spdArgs=[\`-r\`,rate,...(voiceType?[\`-t\`,voiceType]:[]),...(voice?[\`-y\`,voice]:[]),\`-l\`,nativeLanguage,\`--\`,text];if(codexLinuxReadAloudSpawn(\`spd-say\`,spdArgs))return codexLinuxReadAloudReport({spoken:!0,engine:\`spd-say\`,language});let espeakVoice=voice||(language===\`en\`?\`en-us\`:nativeLanguage);return codexLinuxReadAloudReport(codexLinuxReadAloudSpawn(\`espeak-ng\`,[\`-v\`,espeakVoice,\`-s\`,process.env.CODEX_LINUX_READ_ALOUD_ESPEAK_RATE?.trim()||\`165\`,\`--\`,text])?{spoken:!0,engine:\`espeak-ng\`,language}:kokoroResult)}`,
     `function codexLinuxReadAloudHandle(e={}){return e.action===\`config\`?codexLinuxReadAloudConfig():e.action===\`setup\`?codexLinuxReadAloudSetup(e):e.action===\`stop\`?codexLinuxReadAloudStop():e.action===\`speak\`&&e.source===\`button\`?codexLinuxReadAloudSpeak(e.text,{requireEnabled:!1}):codexLinuxReadAloudReport({spoken:!1,reason:\`not-explicit\`})}`,
   ].join("");
 
   const handler = `"${HANDLER_NAME}":async(e)=>codexLinuxReadAloudHandle(e),`;
-  const needle = `"native-desktop-apps":`;
-  const handlerIndex = source.indexOf(needle);
-  if (handlerIndex === -1) {
-    warn("Could not find native-desktop-apps handler", "read aloud main-bundle patch");
-    return source;
-  }
-
-  const withHandler = source.slice(0, handlerIndex) + handler + source.slice(handlerIndex);
+  const withHandler = source.replace(GLOBAL_STATE_GET_HANDLER, handler + GLOBAL_STATE_GET_HANDLER);
   const helperInsertAt = withHandler.startsWith(`"use strict";`)
     ? `"use strict";`.length
     : withHandler.startsWith(`'use strict';`)
@@ -158,34 +236,101 @@ function ensureReadAloudRuntime(source) {
   return `${source}\n${readAloudRuntimeSource()}`;
 }
 
-function applyAssistantRenderPatch(source) {
-  if (source.includes(`globalThis.${HELPER_MARKER}?.(`)) {
-    return source;
+function countOccurrences(source, needle) {
+  let count = 0;
+  let offset = 0;
+  while ((offset = source.indexOf(needle, offset)) !== -1) {
+    count += 1;
+    offset += needle.length;
   }
+  return count;
+}
+
+function inspectAssistantRenderContract(source) {
   const jsxCallPattern =
     /\(0,([A-Za-z_$][\w$]*)\.jsx\)\(([A-Za-z_$][\w$]*),\{(?=[^{}]*\bitem:)(?=[^{}]*\bassistantCopyText:)(?=[^{}]*\bconversationId:)([^{}]*)\}\)/g;
   const readProp = (props, name) =>
     new RegExp(`(?:^|,)${name}:([A-Za-z_$][\\w$]*)`).exec(props)?.[1] ?? null;
-  const patched = source.replace(
-    jsxCallPattern,
-    (match, jsxVar, _component, props) => {
-      const itemVar = readProp(props, "item");
-      const copyVar = readProp(props, "assistantCopyText");
-      const conversationVar = readProp(props, "conversationId");
-      if (itemVar == null || copyVar == null || conversationVar == null) {
-        return match;
+  const candidates = Array.from(source.matchAll(jsxCallPattern), (match) => {
+    const props = match[3];
+    const propNames = new Set(
+      Array.from(props.matchAll(/(?:^|,)([A-Za-z_$][\w$]*):/g), (prop) => prop[1]),
+    );
+    let role = null;
+    if (ASSISTANT_RENDER_SHARED_PROPS.every((name) => propNames.has(name))) {
+      if (propNames.has("sourceTurnId") && !propNames.has("turnId")) {
+        role = "source-turn";
+      } else if (
+        !propNames.has("sourceTurnId") &&
+        ASSISTANT_RENDER_LIVE_PROPS.every((name) => propNames.has(name))
+      ) {
+        role = "live-turn";
       }
-      return `(0,${jsxVar}.jsxs)(${jsxVar}.Fragment,{children:[${match},${readAloudButtonRowSource(jsxVar, itemVar, copyVar, conversationVar, "e")}]})`;
-    },
-  );
-  if (patched !== source) {
-    return patched;
+    }
+    const itemVar = readProp(props, "item");
+    const copyVar = readProp(props, "assistantCopyText");
+    const conversationVar = readProp(props, "conversationId");
+    const replacement =
+      itemVar == null || copyVar == null || conversationVar == null
+        ? null
+        : `(0,${match[1]}.jsxs)(${match[1]}.Fragment,{children:[${match[0]},${readAloudButtonRowSource(match[1], itemVar, copyVar, conversationVar, "e")}]})`;
+    return {
+      component: match[2],
+      end: match.index + match[0].length,
+      jsxVar: match[1],
+      match: match[0],
+      replacement,
+      role,
+      start: match.index,
+    };
+  });
+  const roles = new Map(candidates.map((candidate) => [candidate.role, candidate]));
+  const completeSet =
+    candidates.length === 2 &&
+    roles.size === 2 &&
+    roles.has("source-turn") &&
+    roles.has("live-turn") &&
+    candidates.every(
+      (candidate) =>
+        candidate.replacement != null &&
+        candidate.jsxVar === candidates[0].jsxVar &&
+        candidate.component === candidates[0].component,
+    );
+  if (!completeSet) {
+    return { candidates, state: "invalid" };
   }
 
-  if (ASSISTANT_RENDER_CANDIDATE_PATTERN.test(source)) {
-    warn("Could not find assistant message render call", "read aloud assistant render patch");
+  const wrapped = candidates.map((candidate) => source.includes(candidate.replacement));
+  const helperCount = countOccurrences(source, `globalThis.${HELPER_MARKER}?.(`);
+  if (wrapped.every((value) => !value) && helperCount === 0) {
+    return { candidates, state: "unpatched" };
   }
-  return source;
+  if (wrapped.every(Boolean) && helperCount === candidates.length) {
+    return { candidates, state: "patched" };
+  }
+  return { candidates, state: "invalid" };
+}
+
+function applyAssistantRenderPatch(source) {
+  const contract = inspectAssistantRenderContract(source);
+  if (contract.state === "patched") {
+    return source;
+  }
+  if (contract.state !== "unpatched") {
+    if (
+      contract.candidates.length > 0 ||
+      source.includes(`globalThis.${HELPER_MARKER}?.(`)
+    ) {
+      warn("Could not find complete assistant message render call set", "read aloud assistant render patch");
+    }
+    return source;
+  }
+
+  let patched = source;
+  for (const candidate of [...contract.candidates].reverse()) {
+    patched = `${patched.slice(0, candidate.start)}${candidate.replacement}${patched.slice(candidate.end)}`;
+  }
+  return patched;
 }
 
 function applySettingsPatch(source) {
@@ -796,12 +941,9 @@ function applySettingsAssetPatch(extractedDir) {
 }
 
 function applyWebviewPatch(source) {
+  const contract = inspectAssistantRenderContract(source);
   const assistantPatched = applyAssistantRenderPatch(source);
-  const alreadyHasButton = source.includes(`globalThis.${HELPER_MARKER}?.(`);
-  if (assistantPatched === source && !alreadyHasButton) {
-    if (!ASSISTANT_RENDER_CANDIDATE_PATTERN.test(source)) {
-      warn("Could not find assistant message render call", "read aloud assistant render patch");
-    }
+  if (assistantPatched === source && contract.state !== "patched") {
     return source;
   }
   return applyIndexRuntimePatch(assistantPatched);
@@ -815,11 +957,18 @@ function applyAssistantAssetPatch(source) {
   return patched;
 }
 
+function matchesAssistantRuntimeContract(source) {
+  const primaryThreadPartition =
+    source.includes("collapsibleUnits:") && source.includes("persistentUnits:");
+  return primaryThreadPartition && inspectAssistantRenderContract(source).state !== "invalid";
+}
+
 module.exports = {
   applyAppMainRoutePatch,
   applyGeneralSettingsPatch,
   applyGeneralSettingsWrapperPatch,
   applyAssistantRenderPatch,
+  matchesAssistantRuntimeContract,
   applyIndexRuntimePatch,
   applyMainBundlePatch,
   applySettingsAssetPatch,
@@ -851,10 +1000,8 @@ module.exports = {
       phase: "webview-asset",
       order: 20620,
       ciPolicy: "optional",
-      pattern: /\.js$/,
-      assetMatch: (source) =>
-        ASSISTANT_RENDER_CANDIDATE_PATTERN.test(source) &&
-        source.includes("renderCodeBlocksAsWritingBlocks:"),
+      pattern: /^[A-Za-z0-9_-]+\.js$/,
+      assetMatch: matchesAssistantRuntimeContract,
       missingDescription: "current primary thread assistant bundle",
       skipDescription: "read aloud assistant runtime patch",
       apply: applyAssistantAssetPatch,

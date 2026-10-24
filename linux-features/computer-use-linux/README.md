@@ -32,7 +32,14 @@ Accessibility observations retain `window_context` for geometry inspection.
 Element-index actions, drag, rich-text paste, selection editing, and secondary
 accessibility actions are not exposed by the in-app API.
 
-`getApp()` emits one compact accessibility observation. Later `getAXState()`
+`getApp()` emits one compact accessibility observation. Select a window through
+`getApp({windowId: window.id})` after
+`listWindows()`, or retain the string app ID API. Window IDs exceeding JavaScript's
+safe integer range are returned as decimal strings and must remain strings.
+The adapter combines native inventory with upstream's public browser APIs so
+`getState()` can discover browsers without calling missing native methods.
+
+Later `getAXState()`
 calls omit an unchanged compact projection; pass `disableDiffing: true` for a fresh
 compact tree or `compact: false` for the complete backend node metadata. Bound
 tree traversal with `maxNodes` (1–2000) and `maxDepth` (0–64). The equivalent
@@ -57,6 +64,14 @@ NodeREPL's native-pipe bridge; the agent JavaScript kernel remains sandboxed.
 The separate `computer-use` component stores the Any App setting and exposes no
 MCP tools. Upstream owns browser control. Missing or ambiguous bundle contracts
 abort an enabled build.
+
+The current signed app's `nativeApplications` service supplies the native app
+picker. On Linux this feature uses the running-window backend and desktop-entry
+icons. It returns at most 20 running apps. Default and usage ordering put focused
+apps first; display-name ordering sorts that inventory alphabetically. It does
+not provide an installed-app catalog, usage history, or date-based filtering.
+The service preserves its array, nullable lookup, and icon-size contracts.
+The macOS and Windows implementations remain upstream-owned.
 
 `make install-native` builds `codex-computer-use-linux` and
 `codex-computer-use-cosmic` and `codex-computer-use-indicator` once before staging the package. Direct

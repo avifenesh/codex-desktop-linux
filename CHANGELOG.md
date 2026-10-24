@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Synchronize the embedded Computer Use backend to standalone v0.7.24. Keep scoped semantic recovery, exact Unicode text verification, Qt native actions, KWin fractional-scale and dialog targeting, and single-dispatch X11 monitoring. Preserve Codex identities, Chrome integration and cancellation guards.
+
 - Sync the embedded Computer Use backend to standalone v0.7.7 as
   `0.7.7-linux-alpha1`. Niri window listing and exact focus fall back to direct
   IPC when `niri msg` is unavailable. Socket discovery requires an unambiguous
@@ -154,6 +156,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- The updater no longer leaks a ~2 GB `workspaces/<version>` directory per
+  release under `~/.cache/codex-update-manager`. Cache cleanup only pruned
+  superseded upstream `.deb` files, so every rebuilt candidate's extracted app
+  and package stayed on disk indefinitely (one long-running install reached
+  34 workspaces / 59 GB). Cleanup now also removes workspaces that no persisted
+  path still references, keeping the active build, the rebuilt package, the
+  rollback package, and any in-flight install transaction, and it never follows
+  a symlinked workspace root.
 - The documented `UPSTREAM_DEB=/path/to/chatgpt_<version>_<arch>.deb make build-app`
   invocation (also `make rebuild`, `rebuild-install`, `inspect-upstream`, and
   `rebuild-next`) no longer fails with "Only one upstream .deb path may be
@@ -353,8 +363,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   kill and held the pipe open until the sleep expired, so even a CLI that
   answers `--version` in ~50 ms blocked the launch path for ~1 s. The
   watchdog now runs detached from the caller's stdout/stderr, cutting that
-  launch phase from ~1010 ms to ~74 ms and making the window (and GNOME's
-  startup feedback) appear about a second sooner on every cold start.
+- ASAR repacking no longer drops unpack rules for official packages that mark
+  whole directories as unpacked. The build invoked asar through
+  `npx --yes @electron/asar`, and npx re-parses its arguments through a shell
+  on POSIX; that shell expanded the `{*.node,*.so,*.dylib}` unpack glob and
+  multi-directory `--unpack-dir "{a,b}"` patterns into separate words, so asar
+  silently honored only the first alternative. The signed stable package
+  `26.924.22138` marks `node-hid/hidapi`, `node-hid/node_modules`,
+  `better-sqlite3/lib`, `node-pty/build`, and other directories as unpacked,
+  so repacking it failed the fail-closed layout verification and the candidate
+  was never promoted. The asar CLI is now resolved once and invoked directly,
+  which keeps glob arguments intact; the repacked archive preserves the
+  official pack/unpack layout and the `.unpacked` payload byte-for-byte.
 
 ### Changed
 

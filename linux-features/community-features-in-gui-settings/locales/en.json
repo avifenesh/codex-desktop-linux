@@ -1,0 +1,33 @@
+{
+  "aliases": [],
+  "messages": {
+    "title": "Community features",
+    "show": "Show",
+    "hide": "Hide",
+    "enabled": "Installed",
+    "available": "Not installed",
+    "summary": "{enabled} installed in this build · {total} supported",
+    "note": "Dependency children require their parent; subfeatures belong to their parent. Each subfeature counts once; its grouping parent is not counted again. Installed means included in this build, not runtime health.",
+    "families": "Dependency groups",
+    "independent": "Independent features",
+    "tree": "Community feature tree",
+    "select": "Select a feature to see its description",
+    "requires": "Requires: {names}",
+    "conflicts": "Conflicts with: {names}",
+    "local": "Local feature",
+    "multiple": "Multiple dependencies",
+    "cycle": "Cycle reference",
+    "missing": "Not in catalog",
+    "empty": "No features",
+    "id": "Feature ID",
+    "snapshot": "Feature catalog version: {revision}",
+    "expand": "Expand {name}",
+    "collapse": "Collapse {name}",
+    "featureLabel": "{name}, {status}",
+    "separator": ", ",
+    "list": "Feature catalog",
+    "subfeature": "Subfeature",
+    "owner": "Part of: {name}"
+  },
+  "features": {}
+}

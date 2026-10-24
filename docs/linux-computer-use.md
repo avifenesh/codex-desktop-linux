@@ -33,15 +33,26 @@ fresh compact tree, or `compact: false` for complete backend metadata.
 `maxWidth`, `maxHeight`, `maxBytes`, `scale`, `format`, and `quality`. Screenshot
 methods already emit the image and should not be emitted a second time.
 
-X11 xdotool text dispatch warns that non-US XKB layouts (reported with Brazilian `br`/ABNT2) or changing keymap state can silently substitute symbols even with `ok: true`. Inspect the actual text before pressing Enter, submitting it, or treating it as delivered. Use `include_tree: true` when AT-SPI exposes the text, or `screenshot_after: true`; neither automatically compares the field with the request. Do not retry blindly.
+X11 xdotool text dispatch warns that non-US XKB layouts (reported with Brazilian `br`/ABNT2) or changing keymap state can silently substitute symbols even with `ok: true`. The backend monitors XKB layout replacements, persistent mapping/group changes, keyboard grabs, and focus transitions across each dispatch. A detected change returns an error after text may already have been sent; input is never replayed. If monitoring cannot start, dispatch still proceeds with an explicit warning that layout and interception detection are unavailable. These guards do not prove field contents or detect every stable-map loss. Inspect the actual text before pressing Enter, submitting it, or treating it as delivered. Use `include_tree: true` when AT-SPI exposes the text, or `screenshot_after: true`; neither automatically compares the field with the request. Do not retry blindly.
 
-The embedded backend tracks Computer Use v0.7.19. MCP discovery probes are supported before initialization, including metadata-bearing discovery requests. Agent activity appears through the native GNOME indicator or the Wayland overlay helper. Captures hide the indicator before reading the screen. Portal captures clean new Pictures files and preserve existing images. Set `CODEX_COMPUTER_USE_INDICATOR=0` to disable action indicators; capture exclusion remains active. GNOME extension version 3 supports Shell 45 through 51. Existing Shell sessions need a logout and login to load refreshed extension files.
+PointerRoot focus cannot be monitored because pointer motion can redirect
+keyboard input without a focus event. It follows the same single-dispatch path
+with an explicit monitoring warning. A no-fixed-focus session can still dispatch
+without that PointerRoot warning.
+
+The embedded backend tracks Computer Use 0.7.24. WebKitGTK AT-SPI socket children are resolved through their well-known bus names, and bounded indexed action reads avoid stalled `GetActions` calls. Native action matching uses stable machine-readable `GetName` values, including for Qt controls. Failed desktop actions and intentional refusals map to MCP `isError: true`; a successful action remains successful when only its post-action observation fails.
+
+MCP discovery probes are supported before initialization, including metadata-bearing discovery requests. Agent activity appears through the native GNOME indicator or the Wayland overlay helper. Captures hide the indicator before reading the screen. Portal captures clean new Pictures files and preserve existing images. Set `CODEX_COMPUTER_USE_INDICATOR=0` to disable action indicators; capture exclusion remains active. GNOME extension version 3 supports Shell 45 through 51. Existing Shell sessions need a logout and login to load refreshed extension files.
 
 ## Runtime Dependencies
 
-The embedded backend includes the standalone v0.7.7 accessibility setup,
-guard, native activation, coordinate-contract, completion-notification,
-accessibility-tree scoping, and Niri window-targeting changes. Setup verifies
+After semantic target recovery, cached indices are invalidated. Observe a fresh
+`get_app_state` result before using `element_index` again. Recovery retains the
+original process identity or verifies an observed exact window against its PID;
+name-only matches cannot rebind an app after its owner disappears.
+
+The embedded backend supports scoped AT-SPI trees and native actions, compositor
+window targeting, keyboard and pointer input backends, and bounded screenshots. Setup verifies
 GNOME's saved toolkit-accessibility key even when
 runtime AT-SPI is ready, and warns when the saved key cannot be verified.
 Other accessibility tools can change the key later; setup does not hold it on.
@@ -72,6 +83,12 @@ X11/EWMH window origins come from the X server instead of `wmctrl -lG`, which
 counts the frame offset twice, so window crops and relative clicks line up
 with the client area.
 
+Native X11 connections and replies share a transport deadline; a stalled server
+closes the query connection instead of leaving a blocked worker behind. Unix
+sockets, literal IP addresses, and `localhost` need no resolver helper. A remote
+hostname in `DISPLAY` requires `getent ahosts` for bounded name resolution;
+missing or failed resolution reports the X11 route as unavailable.
+
 Element-targeted `click` and `scroll` refuse an `element_index` from another
 app's `get_app_state` snapshot and ask for a snapshot of the target. On GNOME
 Wayland with a scaled monitor, portal pointer input multiplies the stream point
@@ -100,7 +117,11 @@ still need restarting.
 Scope `get_app_state` with `app_name_or_bundle_identifier` or a window target
 (`window_id`, `pid`, `app_id`, `wm_class`, `title`). Without one it returns the
 whole desktop AT-SPI tree, reports `tree_scoped=false`, and appends a warning to
-`message`, which can exhaust a small context window. `accessibility_tree_truncated=true`
+`message`, which can exhaust a small context window. `app_id` matching is
+case-insensitive and accepts a full reverse-DNS desktop ID or its final
+dot-separated segment. Exact matches take precedence, ambiguous aliases are
+rejected, and an unresolved explicit `app_id` returns an empty scoped tree
+rather than falling back to the desktop. `accessibility_tree_truncated=true`
 means the node, depth, or read budget stopped traversal with unread elements
 left; recover by scoping to a narrower target and raising `max_nodes` or
 `max_depth` (hard caps 2000 and 64), not by lowering `max_nodes`.
@@ -113,6 +134,30 @@ clicks retain pointer semantics. Relative coordinates use the clipped screenshot
 crop origin in coordinate pixels: divide preview pixels by the returned scale.
 Raw GDK surface coordinates and widget-local coordinates are not that origin.
 This does not qualify every GNOME X11 EWMH move/resize or mixed-monitor mapping.
+
+On KDE Wayland, element clicks that need pointer dispatch match their AT-SPI
+frame to a unique same-PID KWin window using frame and client geometry. Input
+uses physical capture pixels for uinput and global logical coordinates for the
+portal. Verified uniform fractional scaling, actual decoration offsets, and
+negative output origins are supported. Ambiguous ownership, unknown desktop
+visibility, overlapping outputs, mixed or unknown output scales, and stale
+pointer dimensions fail before input. Explicit coordinates and relative clicks
+retain their coordinate contract. Real KDE desktop validation remains pending;
+the geometry and failure paths have fixture coverage. Successful dispatch does
+not verify UI activation.
+
+A semantic `perform_action` whose cached AT-SPI owner disappears during query or
+revalidation can refresh the original scoped snapshot once. Recovery must prove
+the same app scope and resolve a new object identity. Numeric indexes, explicit
+identifiers, unscoped snapshots, and actions already dispatched are never
+retried automatically.
+
+For editable text, `set_value` reads the complete contents back within a bounded
+deadline. `verified: true` means an exact match; mismatches and readback errors
+or timeouts return `ok: false` without replaying the mutation. Password fields
+return `verified: false` because masked contents cannot prove the write. Numeric
+writes and failures before editable-text verification omit `verified`. Re-observe
+after any mismatch because the contents may have changed.
 
 Set `CODEX_COMPUTER_USE_NOTIFY_ON_COMPLETE=1` in the MCP server environment
 to expose `complete_interaction`, a parameter-free completion notification.
@@ -233,6 +278,17 @@ You can also run the backend directly:
 ./codex-app/resources/plugins/openai-bundled/plugins/unified-computer-use/bin/codex-computer-use-linux screenshot
 ```
 
+The direct MCP server also exposes `run_shell` only when explicitly started
+with `CODEX_COMPUTER_USE_ENABLE_SHELL=1`. The standalone
+`COMPUTER_USE_LINUX_ENABLE_SHELL=1` alias is used only when the Codex variable
+is unset; an explicit Codex value of `0` keeps it disabled. The in-app native
+adapter does not expose this tool. It runs `/bin/sh -c` with the current user's
+host permissions, without a sandbox or login profiles. The host must approve
+the requested command. Ambient credentials and agent sockets are removed from
+the environment; additional variables must be supplied explicitly. Execution
+defaults to 30 seconds (maximum 120), and returned output is bounded. An audit
+digest is written to backend stderr without logging command text.
+
 ## Enable The In-App UI
 
 Use the optional-feature wizard and enable `computer-use-linux`:
@@ -251,7 +307,7 @@ make install-native
 ```
 
 `make install-native` builds the required `codex-computer-use-linux` and
-`codex-computer-use-cosmic` release helpers once before staging the app.
+`codex-computer-use-cosmic` and `codex-computer-use-indicator` release helpers once before staging the app.
 Updater rebuilds consume those retained prebuilt helpers rather than compiling
 Rust for every OpenAI package update. To opt out, remove the feature ID and
 rebuild/reinstall.
@@ -271,3 +327,18 @@ nix run github:ilysenko/codex-desktop-linux#codex-desktop-computer-use-ui-remote
 COSMIC window queries wait for compositor focus state and verify activation.
 Native X11 text input sends LF and CRLF as Return. Focused terminals are valid
 keyboard targets without an EditableText interface.
+
+## Manual isolated X11 regression
+
+The opt-in typing guard regression runs in its own Xvfb display and private
+D-Bus session. It requires Python 3, Xvfb, xterm, xdotool, xkbcomp, setxkbmap,
+libX11 and dbus-run-session. It checks stable text delivery, restored layout
+and focus changes, keyboard grabs, no fixed focus and PointerRoot monitoring.
+
+```bash
+cargo build --locked -p codex-computer-use-linux
+python3 computer-use-linux/scripts/x11_type_guard_test.py \
+  target/debug/codex-computer-use-linux
+```
+
+This is a manual check; the script is not run by the default CI jobs.

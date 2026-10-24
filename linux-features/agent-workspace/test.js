@@ -83,8 +83,7 @@ function syntheticMainBundle() {
   return [
     "let c=require(`node:child_process`),o=require(`node:fs`),i=require(`node:path`);",
     "class Host{handlers(){return {",
-    '"get-global-state":async({key:t})=>({value:this.globalState.get(t)}),',
-    '"set-global-state":async({key:t,value:n})=>(this.globalState.set(t,n),{success:!0})',
+    '"set-remote-wsl-connections-enabled":async()=>({})',
     "}}}",
   ].join("");
 }
@@ -157,8 +156,8 @@ function syntheticCurrentSettingsMetadata() {
 function syntheticCurrentAppInitialBundle() {
   return [
     "function render(e){return currentRouteMap[e.slug]}",
-    'var GeneralPage=BN(async()=>(await Y(async()=>{let{GeneralSettings:e}=await import(`./general-settings-TbWU8D8b.js`);return{GeneralSettings:e}},__vite__mapDeps([1,2]),import.meta.url)).GeneralSettings);var currentRouteMap={"general-settings":GeneralPage,',
-    'import:BN(async()=>(await Y(async()=>{let{ImportSettings:e}=await import(`./import-settings-DmsueF_s.js`);return{ImportSettings:e}},__vite__mapDeps([3]),import.meta.url)).ImportSettings)};',
+    'var generalRoute=BN(async()=>(await Y(async()=>{let{GeneralSettings:e}=await import(`./general-settings-TbWU8D8b.js`);return{GeneralSettings:e}},__vite__mapDeps([1,2]),import.meta.url)).GeneralSettings),',
+    'currentRouteMap={billing:BN(Billing),"general-settings":generalRoute,notifications:BN(async()=>(await Y(async()=>{let{NotificationsSettingsPage:e}=await import(`./notifications-settings-DmsueF_s.js`);return{NotificationsSettingsPage:e}},__vite__mapDeps([3]),import.meta.url)).NotificationsSettingsPage)};',
     syntheticCurrentSettingsMetadata(),
     syntheticCurrentSettingsCatalog(),
   ].join("");
@@ -180,8 +179,9 @@ function syntheticCurrentSettingsVisibility() {
     'var it={"linux-desktop":{component:H},"general-settings":{component:H},"local-environments":{component:H,commandAsset:F,navigation:{assets:{16:F,20:H},ariaHidden:!1}},worktrees:{component:F,commandAsset:H,navigation:{assets:{16:H,20:F},ariaHidden:!1}},environments:{component:H},"mcp-settings":{component:H},connections:{component:H}};',
     "function visible(S){switch(S.slug){case`computer-use`:return!0;case`browser-use`:return!0;case`appearance`:return!0;case`pets`:case`git-settings`:case`worktrees`:case`local-environments`:case`environments`:return!0;case`data-controls`:return!0;case`linux-desktop`:case`general-settings`:case`agent`:case`personalization`:return!0;}}",
     "function loading(r){switch(r){case`browser-use`:return!1;case`hooks-settings`:case`mcp-settings`:return!1}}",
-    "var preload=[`hooks-settings`,`local-environments`,`worktrees`,`archived-chats`,`voice`];",
     'var policy={"local-environments":`codexLocal`,"mcp-settings":`codexOrWorkLocal`,worktrees:`codexLocal`};',
+    "var remoteHostPreloadSlugs=[`profile`,`agent`,`personalization`,`mcp-settings`,`plugins-settings`,`file-type-handlers`,`hooks-settings`,`gateways`,`local-environments`,`worktrees`,`storage`,`archived-chats`,`voice`];",
+    "function selectedHostVisibility(isLocal,section){if(!(isLocal||remoteHostPreloadSlugs.includes(section.slug)))return{section,visible:!1,pending:!1,error:!0};return{section,visible:!0,pending:!1,error:!1}}",
   ].join("");
 }
 
@@ -499,8 +499,7 @@ test("main bridge patch captures explicit Node modules despite nearby require ca
     "function distractors(){let __codexChild=require(`node:child_process`).spawn(`true`);let t=require('node:path').join(`a`,`b`);let n=require(\"node:fs\").existsSync(`a`)}",
     "let c=require(\"node:child_process\"),o=require('node:fs'),i=require(`node:path`);",
     "class Host{handlers(){return {",
-    '"get-global-state":async({key:t})=>({value:this.globalState.get(t)}),',
-    '"set-global-state":async({key:t,value:n})=>(this.globalState.set(t,n),{success:!0})',
+    '"set-remote-wsl-connections-enabled":async()=>({})',
     "}}}",
   ].join("");
   const patched = applyAgentWorkspaceMainBridgePatch(quotedBundle);
@@ -587,6 +586,38 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   assert.match(warnings.join("\n"), /Could not find global-state handler insertion point/);
 });
 
+test("main bridge limits global-state access to agent workspace settings", async () => {
+  const values = new Map([[SETTINGS_COMMAND_KEY, "/opt/agent-workspace-linux"]]);
+  let reads = 0;
+  let writes = 0;
+  const globalState = {
+    get(key) {
+      reads += 1;
+      return values.get(key);
+    },
+    set(key, value) {
+      writes += 1;
+      values.set(key, value);
+    },
+  };
+  const { handlers } = buildBridgeHarness({ globalState });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(await handlers["get-global-state"]({ params: { key: SETTINGS_COMMAND_KEY } }))),
+    { value: "/opt/agent-workspace-linux" },
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(await handlers["set-global-state"]({ params: { key: SETTINGS_PERMISSIONS_KEY, value: "/permissions.json" } }))),
+    { success: true },
+  );
+  assert.equal(reads, 1);
+  assert.equal(writes, 1);
+  await assert.rejects(handlers["get-global-state"]({ params: { key: "setting" } }), /Unsupported global-state key/);
+  await assert.rejects(handlers["set-global-state"]({ params: { key: "setting", value: true } }), /Unsupported global-state key/);
+  assert.equal(reads, 1);
+  assert.equal(writes, 1);
+  assert.equal(values.has("setting"), false);
+});
+
 test("main bridge generator does not carry removed conversation monitor observe code", () => {
   const patchSource = fs.readFileSync(path.join(__dirname, "patch.js"), "utf8");
   assert.doesNotMatch(patchSource, /case\\`workspaceObserve\\`/);
@@ -605,7 +636,10 @@ test("main bridge patch upgrades stale installed agent workspace handlers", () =
     'default:throw Error(`unsupported agent workspace action`)}}',
     'catch(e){return{ok:false,action:__codexActionName,message:e instanceof Error?e.message:String(e)}}},',
   ].join("");
-  const legacy = syntheticMainBundle().replace('"get-global-state":async({key:t})=>', `${legacyHandler}"get-global-state":async({key:t})=>`);
+  const legacy = syntheticMainBundle().replace(
+    '"set-remote-wsl-connections-enabled":',
+    `${legacyHandler}"set-remote-wsl-connections-enabled":`,
+  );
 
   const upgraded = applyAgentWorkspaceMainBridgePatch(legacy);
   assert.match(upgraded, /"linux-agent-workspace-pick-app":async/);
@@ -1623,6 +1657,16 @@ test("settings asset patches add navigation, route, visibility, and title", () =
     /"agent-workspaces":BN\(async\(\)=>\(await Y\(async\(\)=>\{let\{default:e\}=await import\(`\.\/agent-workspaces-linux\.js`\);return\{default:e\}\},\[\],import\.meta\.url\)\)\.default\),"general-settings":/,
   );
   assert.equal(applyAgentWorkspaceSettingsIndexPatch(currentAppMain), currentAppMain);
+  assert.throws(
+    () => applyAgentWorkspaceSettingsIndexPatch(
+      shared.replace("general-settings-TbWU8D8b.js", "general-preferences-TbWU8D8b.js"),
+    ),
+    /could not add agent workspace settings route/,
+  );
+  assert.throws(
+    () => applyAgentWorkspaceSettingsIndexPatch(shared + shared),
+    /could not add agent workspace settings route/,
+  );
 
   const catalog = applyAgentWorkspaceSettingsCatalogPatch(currentAppMain);
   assert.match(catalog, /local-environments\.agent-workspaces\.worktrees/);
@@ -1650,9 +1694,60 @@ test("settings asset patches add navigation, route, visibility, and title", () =
     settingsVisibility,
     /case`worktrees`:case`local-environments`:case`agent-workspaces`:case`environments`:return!0/,
   );
-  assert.match(settingsVisibility, /`local-environments`,`agent-workspaces`,`worktrees`,`archived-chats`,`voice`/);
   assert.match(settingsVisibility, /"local-environments":`codexLocal`,"agent-workspaces":`codexLocal`,"mcp-settings":/);
+  assert.match(
+    settingsVisibility,
+    /`hooks-settings`,`gateways`,`local-environments`,`agent-workspaces`,`worktrees`,`storage`/,
+  );
+
+  const currentVisibilityContext = {};
+  vm.runInNewContext(
+    `${syntheticCurrentSettingsVisibility()};this.selectedHostVisibility=selectedHostVisibility;`,
+    currentVisibilityContext,
+  );
+  assert.equal(
+    currentVisibilityContext.selectedHostVisibility(false, { slug: SETTINGS_SLUG }).visible,
+    false,
+  );
+
+  const patchedVisibilityContext = {};
+  vm.runInNewContext(
+    `${settingsVisibility};this.selectedHostVisibility=selectedHostVisibility;`,
+    patchedVisibilityContext,
+  );
+  assert.equal(
+    patchedVisibilityContext.selectedHostVisibility(true, { slug: SETTINGS_SLUG }).visible,
+    true,
+  );
+  assert.equal(
+    patchedVisibilityContext.selectedHostVisibility(false, { slug: SETTINGS_SLUG }).visible,
+    true,
+  );
+  assert.equal(
+    patchedVisibilityContext.selectedHostVisibility(false, { slug: "not-preloaded" }).visible,
+    false,
+  );
   assert.equal(applyAgentWorkspaceSettingsPagePatch(settingsVisibility), settingsVisibility);
+});
+
+test("settings visibility patch rejects missing and duplicate preload allowlist contracts", () => {
+  const currentAllowlist =
+    "`hooks-settings`,`gateways`,`local-environments`,`worktrees`,`storage`";
+  assert.throws(
+    () => applyAgentWorkspaceSettingsPagePatch(
+      syntheticCurrentSettingsVisibility().replace(currentAllowlist, "`hooks-settings`,`gateways`,`storage`"),
+    ),
+    /could not add agent workspace to current settings visibility contracts/,
+  );
+  assert.throws(
+    () => applyAgentWorkspaceSettingsPagePatch(
+      syntheticCurrentSettingsVisibility().replace(
+        currentAllowlist,
+        `${currentAllowlist},${currentAllowlist}`,
+      ),
+    ),
+    /could not uniquely resolve current settings preload allowlist/,
+  );
 });
 
 test("settings title patch rejects unresolved renderer aliases", () => {
@@ -1737,7 +1832,6 @@ test("agent-workspace settings infer runtime dependencies from the current setti
 
     assert.equal(fs.existsSync(path.join(assetsDir, "runtime-test.js")), true);
     assert.equal(fs.existsSync(path.join(assetsDir, "settings-page-test.js")), true);
-
     const { value: result, warnings } = captureWarns(() => patchAgentWorkspaceSettingsAssets(tempApp));
 
     assert.equal(result.matched, true);
@@ -1753,6 +1847,34 @@ test("agent-workspace settings infer runtime dependencies from the current setti
     assert.match(settingsSource, /AgentWorkspacesSettings/);
     assert.match(fs.readFileSync(path.join(assetsDir, "settings-page-test.js"), "utf8"), /agent-workspaces/);
     assert.match(fs.readFileSync(path.join(assetsDir, "app-initial-test.js"), "utf8"), new RegExp(SETTINGS_ASSET));
+  } finally {
+    fs.rmSync(tempApp, { recursive: true, force: true });
+  }
+});
+
+test("agent-workspace settings reject duplicate semantic owners atomically", () => {
+  const tempApp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-agent-workspace-duplicate-owner-"));
+  try {
+    const { assetsDir } = writeSyntheticExtractedApp(tempApp);
+    fs.writeFileSync(
+      path.join(assetsDir, "settings-page-lazy-test.js"),
+      syntheticCurrentSettingsNavigation(),
+    );
+    const before = new Map(
+      fs.readdirSync(assetsDir).map((name) => [name, fs.readFileSync(path.join(assetsDir, name))]),
+    );
+
+    const { value: result, warnings } = captureWarns(() => patchAgentWorkspaceSettingsAssets(tempApp));
+
+    assert.equal(result.matched, false);
+    assert.equal(result.changed, 0);
+    assert.match(result.reason, /uniquely resolve webview settings semantic owners/);
+    assert.match(result.reason, /navigation=2/);
+    assert.ok(warnings.some((warning) => warning.includes("navigation=2")));
+    assert.equal(fs.existsSync(path.join(assetsDir, SETTINGS_ASSET)), false);
+    for (const [name, source] of before) {
+      assert.deepEqual(fs.readFileSync(path.join(assetsDir, name)), source, name);
+    }
   } finally {
     fs.rmSync(tempApp, { recursive: true, force: true });
   }

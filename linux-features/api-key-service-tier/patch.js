@@ -3,17 +3,40 @@
 const JS_IDENT = "[A-Za-z_$][\\w$]*";
 const PATCH_MARKER = "codexLinuxApiKeyFastTier";
 const MODEL_MARKER = "codexLinuxApiKeyServiceTierModel";
-const ACCESS_PREFIX = String.raw`(?<isChat>${JS_IDENT})=(?<host>${JS_IDENT})\?\.authMethod===\x60chatgpt\x60\|\|\k<host>\?\.authMethod===\x60personalAccessToken\x60,(?<auth>${JS_IDENT})=\k<host>\?\.authMethod\?\?null(?<middle>[\s\S]{0,700}?)`;
-const ACCESS_MEMO = String.raw`(?<cache>${JS_IDENT})\[3\]!==(?<data>${JS_IDENT})\|\|\k<cache>\[4\]!==(?<loading>${JS_IDENT})\|\|\k<cache>\[5\]!==`;
-const ACCESS_SUFFIX = String.raw`,\k<cache>\[3\]=\k<data>,\k<cache>\[4\]=\k<loading>,\k<cache>\[5\]=`;
-const CURRENT_SERVICE_TIER_GATE = new RegExp(
-  ACCESS_PREFIX + ACCESS_MEMO + String.raw`\k<isChat>\?\((?<value>${JS_IDENT})=\k<isChat>&&!\k<loading>&&\k<data>!=null\?(?<policy>${JS_IDENT})\(\k<data>\):null` +
-    ACCESS_SUFFIX + String.raw`\k<isChat>,\k<cache>\[6\]=\k<value>\)(?=[\s\S]{0,250}serviceTierAccess:)`, "g",
+const ACCOUNT_AUTH_METHODS =
+  `${JS_IDENT}\\?\\.authMethod===\\\`chatgpt\\\`\\|\\|${JS_IDENT}\\?\\.authMethod===\\\`personalAccessToken\\\`` +
+  `\\|\\|${JS_IDENT}\\?\\.authMethod===\\\`amazonBedrock\\\``;
+const SERVICE_TIER_GATE_SHAPE = new RegExp(
+  ACCOUNT_AUTH_METHODS +
+    `[\\s\\S]{0,1800}?serviceTierAccess:${JS_IDENT},isLoading:${JS_IDENT}`,
 );
-const PATCHED_SERVICE_TIER_GATE = new RegExp(
-  ACCESS_PREFIX + ACCESS_MEMO + String.raw`\k<auth>\?\((?<value>${JS_IDENT})=!\k<loading>\?\(\k<isChat>&&\k<data>!=null\?(?<policy>${JS_IDENT})\(\k<data>\):\k<auth>===\x60apikey\x60\?\{fast:!0,ultrafast:!1\}:null\):null` +
-    ACCESS_SUFFIX + String.raw`\k<auth>,\k<cache>\[6\]=\k<value>\)(?=[\s\S]{0,250}serviceTierAccess:)`, "g",
-);
+const API_KEY_ACCESS = "{fast:!0,ultrafast:!1}";
+
+function serviceTierGatePattern(patched = false) {
+  const access = patched
+    ? `\\k<auth>===\\\`apikey\\\`&&!\\k<loading>\\?\\{fast:!0,ultrafast:!1\\}:null`
+    : "null";
+  const cacheAuth = patched ? "\\k<auth>" : "\\k<account>";
+  return new RegExp(
+    `(?<account>${JS_IDENT})=(?<host>${JS_IDENT})\\?\\.authMethod===\\\`chatgpt\\\`\\|\\|\\k<host>\\?\\.authMethod===\\\`personalAccessToken\\\`` +
+      `\\|\\|\\k<host>\\?\\.authMethod===\\\`amazonBedrock\\\`,` +
+    `(?<auth>${JS_IDENT})=\\k<host>\\?\\.authMethod\\?\\?null[\\s\\S]{0,500}?` +
+    `(?<loading>${JS_IDENT})=!!\\k<host>\\?\\.isLoading\\|\\|\\k<account>&&${JS_IDENT},(?<result>${JS_IDENT});` +
+    `(?<cache>${JS_IDENT})\\[3\\]!==(?<requirements>${JS_IDENT})\\|\\|\\k<cache>\\[4\\]!==\\k<loading>\\|\\|\\k<cache>\\[5\\]!==${cacheAuth}\\?` +
+    `\\(\\k<result>=\\k<account>&&!\\k<loading>&&\\k<requirements>!=null\\?(?<resolver>${JS_IDENT})\\(\\k<requirements>\\):${access},` +
+    `\\k<cache>\\[3\\]=\\k<requirements>,\\k<cache>\\[4\\]=\\k<loading>,\\k<cache>\\[5\\]=${cacheAuth},\\k<cache>\\[6\\]=\\k<result>\\):\\k<result>=\\k<cache>\\[6\\];` +
+    `let (?<output>${JS_IDENT})=\\k<result>,${JS_IDENT};return[\\s\\S]{0,160}?serviceTierAccess:\\k<output>,isLoading:\\k<loading>`,
+    "g",
+  );
+}
+
+function serviceTierGateState(source) {
+  const current = [...source.matchAll(serviceTierGatePattern())];
+  const patched = [...source.matchAll(serviceTierGatePattern(true))];
+  if (current.length === 1 && patched.length === 0) return { kind: "current", match: current[0] };
+  if (current.length === 0 && patched.length === 1) return { kind: "patched", match: patched[0] };
+  return { kind: "invalid" };
+}
 const PATCHED_MODEL_MARKER = new RegExp(`${MODEL_MARKER}:${JS_IDENT}===\\\`apikey\\\``);
 const PATCHED_SERVICE_TIER_RESOLVER = new RegExp(
   `function ${JS_IDENT}\\((${JS_IDENT}),(${JS_IDENT})\\)\\{return \\2==null\\?null:` +
@@ -21,7 +44,7 @@ const PATCHED_SERVICE_TIER_RESOLVER = new RegExp(
     `\\1\\?\\.serviceTiers\\?\\.find\\((${JS_IDENT})=>\\3\\.id===\\2\\)\\?\\?null\\}`,
 );
 const MODEL_LIST_MAPPING_SHAPE = new RegExp(
-  `function ${JS_IDENT}\\(\\{additionalAvailableModels:${JS_IDENT},(?:apiKeyDaybreakSupported:${JS_IDENT}=!1,)?authMethod:${JS_IDENT},availableModels:${JS_IDENT},` +
+  `function ${JS_IDENT}\\(\\{additionalAvailableModels:${JS_IDENT},apiKeyDaybreakSupported:${JS_IDENT}=!1,authMethod:${JS_IDENT},availableModels:${JS_IDENT},` +
     `defaultModel:${JS_IDENT},enabledReasoningEfforts:${JS_IDENT},` +
     `hasConfiguredModelCatalog:${JS_IDENT},` +
     `includeUltraReasoningEffort:${JS_IDENT},isCustomModelProvider:${JS_IDENT}=!1,` +
@@ -34,25 +57,30 @@ function warn(message, patchName) {
 }
 
 function applyApiKeyServiceTierGatePatch(source) {
-  const current = [...source.matchAll(CURRENT_SERVICE_TIER_GATE)];
-  const patched = [...source.matchAll(PATCHED_SERVICE_TIER_GATE)];
-  if (current.length === 0 && patched.length === 1) return source;
-  if (current.length !== 1 || patched.length !== 0) {
-    if (source.includes("serviceTierAccess:")) warn("Could not find unique service tier access gate", "API key service tier gate patch");
+  const state = serviceTierGateState(source);
+  if (state.kind === "patched") return source;
+  if (state.kind !== "current") {
+    if (hasApiKeyServiceTierGateShape(source)) {
+      warn("Could not find service tier auth gate", "API key service tier gate patch");
+    }
     return source;
   }
-  const match = current[0];
-  const { isChat, host, auth, middle, cache, data, loading, value, policy } = match.groups;
-  // Auth method replaces the derived boolean as the memo key. API-key and
-  // other non-ChatGPT hosts otherwise share false and reuse stale access.
-  const replacement = `${isChat}=${host}?.authMethod===\`chatgpt\`||${host}?.authMethod===\`personalAccessToken\`,${auth}=${host}?.authMethod??null${middle}` +
-    `${cache}[3]!==${data}||${cache}[4]!==${loading}||${cache}[5]!==${auth}?(${value}=!${loading}?(${isChat}&&${data}!=null?${policy}(${data}):${auth}===\`apikey\`?{fast:!0,ultrafast:!1}:null):null,` +
-    `${cache}[3]=${data},${cache}[4]=${loading},${cache}[5]=${auth},${cache}[6]=${value})`;
-  return source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
+  const { account, auth, loading, result, cache, requirements, resolver } = state.match.groups;
+  // The access object now comes from the upstream speed-mode resolver. Keep
+  // account entitlements intact and key its memo by auth method: API-key and
+  // other non-account hosts share the same false account-auth boolean.
+  const replacement = state.match[0]
+    .replace(`${result}=${account}&&!${loading}&&${requirements}!=null?${resolver}(${requirements}):null`,
+      `${result}=${account}&&!${loading}&&${requirements}!=null?${resolver}(${requirements}):${auth}===\`apikey\`&&!${loading}?${API_KEY_ACCESS}:null`)
+    .replace(`${cache}[5]!==${account}`, `${cache}[5]!==${auth}`)
+    .replace(`${cache}[5]=${account}`, `${cache}[5]=${auth}`);
+  const patched = source.slice(0, state.match.index) + replacement +
+    source.slice(state.match.index + state.match[0].length);
+  return serviceTierGateState(patched).kind === "patched" ? patched : source;
 }
 
 function hasApiKeyServiceTierGateShape(source) {
-  return [...source.matchAll(CURRENT_SERVICE_TIER_GATE)].length > 0;
+  return SERVICE_TIER_GATE_SHAPE.test(source);
 }
 
 function applyApiKeyModelMarkerPatch(source) {
@@ -61,7 +89,7 @@ function applyApiKeyModelMarkerPatch(source) {
   }
 
   const modelListPattern = new RegExp(
-    `(function ${JS_IDENT}\\(\\{additionalAvailableModels:${JS_IDENT},(?:apiKeyDaybreakSupported:${JS_IDENT}=!1,)?authMethod:(${JS_IDENT}),availableModels:${JS_IDENT},` +
+    `(function ${JS_IDENT}\\(\\{additionalAvailableModels:${JS_IDENT},apiKeyDaybreakSupported:${JS_IDENT}=!1,authMethod:(${JS_IDENT}),availableModels:${JS_IDENT},` +
       `defaultModel:${JS_IDENT},enabledReasoningEfforts:${JS_IDENT},` +
       `hasConfiguredModelCatalog:${JS_IDENT},` +
       `includeUltraReasoningEffort:${JS_IDENT},isCustomModelProvider:${JS_IDENT}=!1,` +
@@ -90,7 +118,7 @@ function hasApiKeyModelListMappingShape(source) {
 }
 
 function matchesApiKeyServiceTierGateContract(source) {
-  return [...source.matchAll(PATCHED_SERVICE_TIER_GATE)].length > 0 || hasApiKeyServiceTierGateShape(source);
+  return serviceTierGateState(source).kind !== "invalid";
 }
 
 function matchesApiKeyServiceTierModelContract(source) {
@@ -253,12 +281,14 @@ function applyApiKeyServiceTierPatch(source) {
 }
 
 function applyCurrentGatePatch(source) {
-  const current = [...source.matchAll(CURRENT_SERVICE_TIER_GATE)];
-  const patched = [...source.matchAll(PATCHED_SERVICE_TIER_GATE)];
-  if (current.length === 1 && patched.length === 0) return applyApiKeyServiceTierGatePatch(source);
-  if (current.length === 0 && patched.length === 1) return source;
-  warn("Could not identify current service tier auth gate", "API key service tier gate patch");
-  return source;
+  const gateAlreadyPatched = serviceTierGateState(source).kind === "patched";
+  const gateCandidate = gateAlreadyPatched ? source : applyApiKeyServiceTierGatePatch(source);
+  const gateReady = gateAlreadyPatched || gateCandidate !== source;
+
+  if (!gateReady && !hasApiKeyServiceTierGateShape(source)) {
+    warn("Could not identify current service tier auth gate", "API key service tier gate patch");
+  }
+  return gateCandidate;
 }
 
 function applyCurrentModelPatch(source) {

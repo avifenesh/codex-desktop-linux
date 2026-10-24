@@ -571,9 +571,9 @@ mod tests {
     struct TestDirectory(PathBuf);
 
     impl TestDirectory {
-        fn new(label: &str) -> Self {
+        fn new(_label: &str) -> Self {
             let path = env::temp_dir().join(format!(
-                "cx-yd-{label}-{}-{}",
+                "cy-{}-{}",
                 process::id(),
                 random_hex(8).expect("test nonce")
             ));

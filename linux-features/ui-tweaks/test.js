@@ -9,6 +9,10 @@ const test = require("node:test");
 
 require("./suggested-prompts.test.js");
 require("./dock-icon.test.js");
+require("./gentoo-support.test.js");
+require("./custom-font-input.test.js");
+require("./selected-text-more-details.test.js");
+require("./selected-text-annotation-submit.test.js");
 
 const {
   discoverLinuxFeatureManifests,
@@ -192,7 +196,7 @@ function createUiFontSizeExtractedApp() {
     path.join(buildDir, "src-fixture.js"),
     path.join(buildDir, "worker.js"),
     path.join(webviewDir, "app-shared-fixture.js"),
-    path.join(webviewDir, "settings-fixture.js"),
+    path.join(webviewDir, "display-worker-fixture.js"),
   ];
   for (const target of targets) {
     fs.writeFileSync(target, uiFontSizeBundleFixture());
@@ -269,6 +273,9 @@ test("ui-tweaks is discoverable and disabled until listed in features.json", () 
         ["feature:ui-tweaks:home-suggested-prompts-work-page", "webview-asset", "optional"],
         ["feature:ui-tweaks:home-suggested-prompts-settings-row", "webview-asset", "optional"],
         ["feature:ui-tweaks:home-suggested-prompts-content", "webview-asset", "optional"],
+        ["feature:ui-tweaks:appearance-custom-font-input", "webview-asset", "optional"],
+        ["feature:ui-tweaks:selected-text-more-details", "extracted-app:post-webview", "optional"],
+        ["feature:ui-tweaks:selected-text-annotation-submit", "extracted-app:post-webview", "optional"],
       ],
     );
     const modelPickerDescriptors = descriptors.filter((descriptor) =>
@@ -325,7 +332,7 @@ test("UI font size tweak raises the shared input and schema maximum", () => {
   assert.equal(applyUiFontSizePatch(patched, uiFontSizeContext()), patched);
 });
 
-test("UI font size tweak atomically patches all four runtime registries", () => {
+test("UI font size tweak atomically patches all four current runtime registries", () => {
   const { extractedDir, targets } = createUiFontSizeExtractedApp();
   try {
     const discovery = findUiFontSizeBundles(extractedDir);
@@ -351,6 +358,7 @@ test("UI font size tweak atomically patches all four runtime registries", () => 
 test("UI font size app patch rejects missing, duplicate, and mixed registries byte-identically", () => {
   for (const mutate of [
     ({ targets }) => fs.rmSync(targets[1]),
+    ({ targets }) => fs.rmSync(targets[3]),
     ({ extractedDir }) =>
       fs.writeFileSync(
         path.join(extractedDir, ".vite", "build", "duplicate.js"),

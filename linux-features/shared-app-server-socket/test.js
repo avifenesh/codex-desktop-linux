@@ -1735,6 +1735,32 @@ test("patch selects the bridge only for the local host and is idempotent", () =>
   assert.match(patched, /new n\.kn\(qae,/);
   assert.match(patched, /new n\.On\(/);
   assert.match(patched, /supportsReconnect\(\)\{return!0\}/);
+
+  const negotiated = source.replace(
+    "let i=new n.On(r,void 0,8);return n.Dn(r,{onPongTimeout:",
+    "let i=new n.On(r,void 0,8,compression);r.off(`error`,onError);logger.info(`app_server_connection.compression_negotiated`);return n.Dn(r,{onPongTimeout:",
+  );
+  assert.notEqual(applySharedAppServerSocketPatch(negotiated), negotiated);
+});
+
+test("durable hosts retain their upstream transport even when kind is local", () => {
+  const patched = applySharedAppServerSocketPatch(syntheticBundle());
+  const factory = patched.slice(patched.indexOf("function b5(e)"), patched.indexOf("function afterFactory"));
+  class Bridge {}
+  class Cloud {}
+  class Local {}
+  const context = {
+    process: { env: { CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET: "/test/socket" } },
+    CodexLinuxSharedAppServerSocketTransport: Bridge,
+    _C: () => null,
+    n: { no: () => false, Tn: Cloud, Cn: Local },
+    x5: config => config.id === "durable" ? "wss://example.test" : null,
+    vbe: () => null,
+  };
+  vm.runInNewContext(`${factory};globalThis.create=b5`, context);
+  assert.ok(context.create({ hostConfig: { kind: "local", id: "local" } }) instanceof Bridge);
+  assert.ok(context.create({ hostConfig: { kind: "local", id: "durable" } }) instanceof Cloud);
+  assert.ok(context.create({ hostConfig: { kind: "local", id: "other" } }) instanceof Local);
 });
 
 test("patch rejects retired, duplicate, and mixed transport layouts", () => {
