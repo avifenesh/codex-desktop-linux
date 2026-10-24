@@ -433,5 +433,6 @@ module.exports = {
   applyLinuxNativeDesktopAppsHandlerPatch,
   isComputerUseUiEnabled,
   linuxComputerUseCursorBridgeRuntimeSource,
+  linuxNativeDesktopAppsHelper,
   matchesLinuxComputerUseHostPlatformContract,
 };
