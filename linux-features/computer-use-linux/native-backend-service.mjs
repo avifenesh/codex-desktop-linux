@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { lstat, readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { nativeTarget, validateNativeRequest } from './native-protocol.mjs';
@@ -9,13 +10,26 @@ function parseBackendJson(text) {
       ? context.source : value);
 }
 
+// A large tree comes back as its leading nodes plus a private spill file holding
+// all of them. The agent's sandbox cannot read that file, so the host returns the
+// whole tree. The file is checked against what the backend reported, and is read
+// before any other call can replace it (calls are serialized).
+async function readSpilledTree(spill) {
+  if (!spill || typeof spill.path !== 'string') throw new Error('Linux Computer Use backend returned an invalid tree spill');
+  const info = await lstat(spill.path);
+  if (!info.isFile() || info.isSymbolicLink() || info.size !== spill.bytes) throw new Error('Linux Computer Use tree spill file does not match its description');
+  const nodes = parseBackendJson(await readFile(spill.path, 'utf8'));
+  if (!Array.isArray(nodes) || nodes.length !== spill.node_count) throw new Error('Linux Computer Use tree spill file does not match its description');
+  return nodes;
+}
+
 // This host-side process owns the Rust backend. Failed or interrupted requests
 // are never retried because input may already have reached the desktop.
 export function createNativeBackendService({
   command = fileURLToPath(new URL('../bin/codex-computer-use-linux', import.meta.url)),
   args = ['mcp'], timeoutMs = 120_000,
 } = {}) {
-  let child, ready, failure, sequence = 0;
+  let child, ready, failure, sequence = 0, queue = Promise.resolve();
   const pending = new Map();
   function stop(error) {
     failure ??= error;
@@ -66,7 +80,13 @@ export function createNativeBackendService({
     })();
     await ready;
   }
-  async function handleRpc(input) {
+  // One call at a time: a later snapshot replaces the spill file an earlier one names.
+  function handleRpc(input) {
+    const run = queue.then(() => handleOne(input));
+    queue = run.catch(() => {});
+    return run;
+  }
+  async function handleOne(input) {
     const { method, app, params } = validateNativeRequest(input);
     const target = nativeTarget(app);
     await start();
@@ -79,6 +99,10 @@ export function createNativeBackendService({
       catch { throw new Error('Linux Computer Use backend returned no structured result'); }
     }
     if (method === 'get_app_state' && data.window_error) throw new Error(data.window_error);
+    if (method === 'get_app_state' && data.accessibility_tree_spill) {
+      data = { ...data, accessibility_tree: await readSpilledTree(data.accessibility_tree_spill) };
+      delete data.accessibility_tree_spill;
+    }
     if (data.ok === false) throw new Error(data.message || 'Linux Computer Use action failed');
     if (method === 'screenshot') {
       const images = result?.content?.filter(item => item.type === 'image') ?? [];

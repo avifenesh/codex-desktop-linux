@@ -82,7 +82,7 @@ test('trusted service validates requests before backend launch', async () => {
   await assert.rejects(handleRpc({ method: 'drag', app: 'editor', params: {} }), /not supported/);
   await assert.rejects(handleRpc({ method: 'click', app: 'editor', params: { window_id: 22 } }), /parameter/);
   for (const params of [
-    {max_nodes:0}, {max_nodes:2001}, {max_depth:-1}, {max_depth:65},
+    {max_nodes:0}, {max_nodes:10001}, {max_depth:-1}, {max_depth:65},
     {max_width:0}, {max_height:4097}, {max_bytes:1023}, {max_bytes:4194305},
     {scale:0}, {scale:1.1}, {format:'webp'}, {quality:0}, {quality:96},
   ]) {
@@ -451,3 +451,62 @@ for (const captureMalformed of ['missing-image', 'uncropped']) {
     await assert.rejects(service.handleRpc({method:'screenshot',app:'editor'}), /targeted screenshot/);
   });
 }
+
+// The backend spills a large tree to a private file and deletes the previous file on
+// every snapshot, like the real one. The host must hand the agent the whole tree.
+async function spillFixture(t, { mismatch = false } = {}) {
+  const { mkdtemp, writeFile: write, rm: remove } = await import('node:fs/promises');
+  const { tmpdir: tmp } = await import('node:os');
+  const { join: joinPath } = await import('node:path');
+  const dir = await mkdtemp(joinPath(tmp(), 'cul-spill-native-'));
+  const script = joinPath(dir, 'backend.cjs');
+  await write(script, `
+const fs = require('node:fs'), path = require('node:path');
+let previous, sequence = 0;
+require('node:readline').createInterface({input:process.stdin}).on('line', line => {
+  const r = JSON.parse(line);
+  const reply = result => process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,result})+'\\n');
+  if (r.method === 'initialize') return reply({protocolVersion:'2024-11-05',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}});
+  if (r.method === 'notifications/initialized') return;
+  const nodes = Array.from({length:500}, (_, index) => ({index, role:'push button', name:'Node '+index+' of call '+sequence}));
+  const file = path.join(${JSON.stringify(dir)}, 'tree-'+(sequence++)+'.json');
+  if (previous) fs.rmSync(previous, {force:true});
+  fs.writeFileSync(file, JSON.stringify(nodes));
+  previous = file;
+  const bytes = fs.statSync(file).size + (${mismatch} ? 1 : 0);
+  reply({structuredContent:{accessibility_tree:nodes.slice(0, 3), accessibility_tree_truncated:false,
+    accessibility_tree_spill:{path:file, node_count:500, bytes, inline_node_count:3}}, content:[]});
+});
+`);
+  const { createNativeBackendService } = await import('./native-backend-service.mjs');
+  const service = createNativeBackendService({ command: process.execPath, args: [script], timeoutMs: 5000 });
+  t.after(async () => { service.shutdown(); await remove(dir, {recursive:true, force:true}); });
+  return service;
+}
+
+test('a spilled tree reaches the agent whole, and concurrent snapshots each get their own', async t => {
+  const service = await spillFixture(t);
+  const state = await service.handleRpc({method:'get_app_state', app:'editor', params:{max_nodes:10000}});
+  assert.equal(state.accessibility_tree.length, 500);
+  assert.equal(state.accessibility_tree.at(-1).name, 'Node 499 of call 0');
+  assert.equal(state.accessibility_tree_spill, undefined);
+  // The second snapshot deletes the first file; calls are serialized, so each reads its own.
+  const [a, b] = await Promise.all([
+    service.handleRpc({method:'get_app_state', app:'editor', params:{}}),
+    service.handleRpc({method:'get_app_state', app:'editor', params:{}}),
+  ]);
+  assert.equal(a.accessibility_tree.length, 500);
+  assert.equal(b.accessibility_tree.length, 500);
+  assert.notEqual(a.accessibility_tree[0].name, b.accessibility_tree[0].name);
+});
+
+test('a spill file that does not match its description is refused', async t => {
+  const service = await spillFixture(t, {mismatch:true});
+  await assert.rejects(service.handleRpc({method:'get_app_state', app:'editor', params:{}}), /does not match its description/);
+});
+
+test('native max_nodes accepts the backend cap of 10000', async () => {
+  const { validateNativeRequest } = await import('./native-protocol.mjs');
+  assert.doesNotThrow(() => validateNativeRequest({method:'get_app_state', params:{max_nodes:10000}}));
+  assert.throws(() => validateNativeRequest({method:'get_app_state', params:{max_nodes:10001}}), /Invalid native max_nodes/);
+});
