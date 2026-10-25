@@ -42,8 +42,11 @@ The adapter combines native inventory with upstream's public browser APIs so
 Later `getAXState()`
 calls omit an unchanged compact projection; pass `disableDiffing: true` for a fresh
 compact tree or `compact: false` for the complete backend node metadata. Bound
-tree traversal with `maxNodes` (1–2000) and `maxDepth` (0–64). The equivalent
+tree traversal with `maxNodes` (1–10000) and `maxDepth` (0–64). The equivalent
 `max_nodes` and `max_depth` spellings are accepted for direct backend parity.
+When the backend spills a large tree to its private file, the host service reads
+the file and returns the whole tree, so `getAXState()` never sees a partial one.
+`accessibility_tree_truncated` is passed through when traversal itself stopped early.
 
 Screenshot methods emit their image, so do not emit the returned bytes again.
 They accept `maxWidth`, `maxHeight`, `maxBytes`, `scale`, `format`, and `quality`;
