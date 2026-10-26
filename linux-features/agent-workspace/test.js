@@ -283,7 +283,17 @@ function buildSettingsVmSource() {
     );
 }
 
-function createSettingsRenderHarness(post) {
+// The page checks `agent-workspace-linux --version` on load. By default the harness answers
+// that check with a passing version; pass `version: null` to let `post` answer it.
+function createSettingsRenderHarness(post, { window: windowOverrides = {}, version = "0.6.0" } = {}) {
+  const pagePost = version == null
+    ? post
+    : async (method, request = {}) => {
+        if (method === "linux-agent-workspace" && request.params?.action === "version") {
+          return { ok: true, action: "version", json: { version } };
+        }
+        return post(method, request);
+      };
   const state = [];
   let hookIndex = 0;
   let effects = [];
@@ -312,7 +322,7 @@ function createSettingsRenderHarness(post) {
     },
   };
   const context = vm.createContext({
-    __post: post,
+    __post: pagePost,
     __reactFactory: () => react,
     __toESM: (value) => value,
     console,
@@ -324,6 +334,7 @@ function createSettingsRenderHarness(post) {
       confirm() {
         return true;
       },
+      ...windowOverrides,
     },
   });
   context.globalThis = context;
@@ -518,10 +529,17 @@ test("main bridge patch adds an allowlisted linux-agent-workspace handler", () =
   const patched = applyAgentWorkspaceMainBridgePatch(syntheticMainBundle());
   assert.match(patched, /"linux-agent-workspace":async/);
   assert.match(patched, /"linux-agent-workspace-pick-app":async/);
-  assert.match(patched, /"linux-agent-workspace-pick-mount":async/);
+  assert.match(patched, /"linux-agent-workspace-pick-project":async/);
+  assert.doesNotMatch(patched, /linux-agent-workspace-pick-mount/);
+  assert.doesNotMatch(patched, /Choose file or folder to mount/);
   assert.match(patched, /"linux-agent-workspace-pick-browser-data":async/);
   assert.match(patched, /"linux-agent-workspace-copy-browser-data":async/);
   assert.match(patched, /showOpenDialog/);
+  // agent-workspace-linux 0.6.0 removed the sandbox: no unenforced-policy ack, network or mount ceilings.
+  assert.doesNotMatch(patched, /ack-unenforced-policy/);
+  assert.doesNotMatch(patched, /AckUnenforcedPolicy/);
+  assert.doesNotMatch(patched, /inherit_host|local_only|allow_hosts/);
+  assert.doesNotMatch(patched, /\.mounts|host_path|workspace_path/);
   assert.match(patched, /Desktop Entry/);
   assert.match(patched, /startup_app/);
   assert.match(patched, /desktop_file/);
@@ -628,8 +646,11 @@ test("main bridge generator does not carry removed conversation monitor observe 
 });
 
 test("main bridge patch upgrades stale installed agent workspace handlers", () => {
+  const retiredMountPicker =
+    '"linux-agent-workspace-pick-mount":async()=>{let __codexElectron;try{__codexElectron=require(`electron`)}catch(e){return{ok:!1,action:`pickMount`,message:`file picker unavailable`}}try{let e=await __codexElectron.dialog.showOpenDialog({title:`Choose file or folder to mount`,properties:[`openFile`,`openDirectory`,`multiSelections`]});let t=Array.isArray(e.filePaths)?e.filePaths:[];return{ok:!e.canceled&&t.length>0,action:`pickMount`,json:{canceled:!!e.canceled,path:t[0]||null,paths:t}}}catch(e){return{ok:!1,action:`pickMount`,message:e instanceof Error?e.message:String(e)}}},';
   const legacyHandler = [
     '"linux-agent-workspace-copy-browser-data":async()=>({ok:true,action:`copyBrowserData`}),',
+    retiredMountPicker,
     '"linux-agent-workspace":async({action:__codexAction}={})=>{let __codexActionName=__codexAction;',
     'try{switch(__codexActionName){case`profileList`:return{ok:true,json:{profiles:[]}};',
     'case`workspaceList`:return{ok:true,json:{workspaces:[]}};',
@@ -641,9 +662,13 @@ test("main bridge patch upgrades stale installed agent workspace handlers", () =
     `${legacyHandler}"set-remote-wsl-connections-enabled":`,
   );
 
+  assert.match(legacy, /"linux-agent-workspace-pick-mount":async/);
+
   const upgraded = applyAgentWorkspaceMainBridgePatch(legacy);
+  assert.doesNotMatch(upgraded, /linux-agent-workspace-pick-mount|pickMount|Choose file or folder to mount/);
+  assert.doesNotThrow(() => new vm.Script(upgraded), "upgraded bundle must stay valid JavaScript");
   assert.match(upgraded, /"linux-agent-workspace-pick-app":async/);
-  assert.match(upgraded, /"linux-agent-workspace-pick-mount":async/);
+  assert.match(upgraded, /"linux-agent-workspace-pick-project":async/);
   assert.match(upgraded, /"linux-agent-workspace-pick-browser-data":async/);
   assert.match(upgraded, /"linux-agent-workspace-copy-browser-data":async/);
   assert.match(upgraded, /case`permissionConfig`/);
@@ -656,6 +681,15 @@ test("main bridge patch upgrades stale installed agent workspace handlers", () =
   assert.match(upgraded, /case`profileTemplate`/);
   assert.doesNotMatch(upgraded, /case`profileList`:return\{ok:true,json:\{profiles:\[\]\}\}/);
   assert.equal(applyAgentWorkspaceMainBridgePatch(upgraded), upgraded);
+
+  const retiredLast = syntheticMainBundle().replace(
+    '"set-remote-wsl-connections-enabled":async()=>({})',
+    `"set-remote-wsl-connections-enabled":async()=>({}),${legacyHandler.replace(retiredMountPicker, "")}${retiredMountPicker.slice(0, -1)}`,
+  );
+  const upgradedLast = applyAgentWorkspaceMainBridgePatch(retiredLast);
+  assert.doesNotMatch(upgradedLast, /linux-agent-workspace-pick-mount/);
+  assert.doesNotThrow(() => new vm.Script(upgradedLast), "removing a trailing retired entry must keep valid JavaScript");
+  assert.equal(applyAgentWorkspaceMainBridgePatch(upgradedLast), upgradedLast);
 });
 
 test("app picker converts desktop launchers into startup app commands", async () => {
@@ -767,7 +801,7 @@ test("main bridge install action uses fixed npm package command", async () => {
     assert.equal(path.basename(execCalls[0].command), "npm");
     assert.deepEqual(
       JSON.parse(JSON.stringify(execCalls[0].args)),
-      ["install", "-g", "--prefix", path.join(tempDir, "home", ".local"), "@agent-sh/agent-workspace-linux"],
+      ["install", "-g", "--prefix", path.join(tempDir, "home", ".local"), "@agent-sh/agent-workspace-linux@>=0.6.0"],
     );
     assert.equal(execCalls[0].options.timeout, 300000);
     assert.equal(execCalls.length, 1);
@@ -795,7 +829,7 @@ test("main bridge install action expands tilde npm prefix", async () => {
     assert.equal(npm.ok, true);
     assert.deepEqual(
       JSON.parse(JSON.stringify(execCalls[0].args)),
-      ["install", "-g", "--prefix", path.join(home, "npm-prefix"), "@agent-sh/agent-workspace-linux"],
+      ["install", "-g", "--prefix", path.join(home, "npm-prefix"), "@agent-sh/agent-workspace-linux@>=0.6.0"],
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -806,10 +840,7 @@ test("main bridge reads page-owned permission file and applies it to CLI calls",
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-agent-workspace-page-permissions-"));
   try {
     const permissionsPath = path.join(tempDir, "permissions.json");
-    fs.writeFileSync(
-      permissionsPath,
-      JSON.stringify({ network: { mode: "disabled" }, apps: { allow: ["sh"] } }, null, 2),
-    );
+    fs.writeFileSync(permissionsPath, JSON.stringify({ apps: { allow: ["sh"] } }, null, 2));
 
     const { handlers, execCalls, spawnCalls } = buildBridgeHarness({
       env: {
@@ -823,7 +854,7 @@ test("main bridge reads page-owned permission file and applies it to CLI calls",
     assert.equal(config.json.configured, true);
     assert.equal(config.json.restricted, true);
     assert.equal(config.json.permissions_path, permissionsPath);
-    assert.equal(config.json.ceiling.network.mode, "disabled");
+    assert.deepEqual(JSON.parse(JSON.stringify(config.json.ceiling)), { apps: { allow: ["sh"] } });
 
     const response = await handlers["linux-agent-workspace"]({ action: "profileList" });
     assert.equal(response.ok, true);
@@ -902,7 +933,34 @@ test("main bridge reports page-owned permission file failures before spawning", 
   }
 });
 
-test("main bridge saves page-authored permission rules as the active ceiling", async () => {
+test("main bridge treats a legacy network or mount ceiling as open", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-agent-workspace-legacy-permissions-"));
+  try {
+    const permissionsPath = path.join(tempDir, "permissions.json");
+    fs.writeFileSync(
+      permissionsPath,
+      JSON.stringify({
+        network: { mode: "disabled" },
+        mounts: [{ host_path: tempDir, workspace_path: "/workspace/legacy", mode: "read_only" }],
+        apps: { allow: [] },
+      }),
+    );
+    const { handlers } = buildBridgeHarness({
+      env: { CODEX_AGENT_WORKSPACE_BIN: "/tmp/agent-workspace-linux" },
+      globalState: new Map([[SETTINGS_PERMISSIONS_KEY, permissionsPath]]),
+    });
+
+    const config = await handlers["linux-agent-workspace"]({ action: "permissionConfig" });
+    assert.equal(config.ok, true);
+    assert.equal(config.json.configured, true);
+    assert.equal(config.json.restricted, false);
+    assert.match(config.json.message, /configured but open/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("main bridge saves page-authored permission rules as an apps-only ceiling", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-agent-workspace-save-permissions-"));
   try {
     const dataHome = path.join(tempDir, "data");
@@ -924,22 +982,56 @@ test("main bridge saves page-authored permission rules as the active ceiling", a
     assert.equal(saved.ok, true);
     assert.equal(saved.json.configured, true);
     assert.equal(saved.json.restricted, true);
-    assert.equal(saved.json.ceiling.network.mode, "local_only");
-    assert.deepEqual(JSON.parse(JSON.stringify(saved.json.ceiling.network.allow_hosts)), ["localhost:3000"]);
-    assert.deepEqual(JSON.parse(JSON.stringify(saved.json.ceiling.apps.allow)), ["/usr/bin/google-chrome"]);
-    assert.equal(saved.json.ceiling.mounts[0].host_path, tempDir);
+    assert.deepEqual(JSON.parse(JSON.stringify(saved.json.ceiling)), { apps: { allow: ["/usr/bin/google-chrome"] } });
 
     const savedPath = globalState.get(SETTINGS_PERMISSIONS_KEY);
     assert.equal(saved.json.permissions_path, savedPath);
     assert.match(savedPath, /agent-workspace-linux\/permissions\/codex-agent-workspace-permissions\.json$/);
-    assert.deepEqual(JSON.parse(fs.readFileSync(savedPath, "utf8")), permissions);
+    assert.deepEqual(JSON.parse(fs.readFileSync(savedPath, "utf8")), { apps: { allow: ["/usr/bin/google-chrome"] } });
 
     const profiles = await handlers["linux-agent-workspace"]({ action: "profileList" });
     assert.equal(profiles.ok, true);
     assert.deepEqual(Array.from(execCalls[0].args.slice(0, 4)), ["--permissions", savedPath, "profile", "list"]);
+
+    const open = await handlers["linux-agent-workspace"]({ action: "permissionSave", permissions: {} });
+    assert.equal(open.ok, true);
+    assert.equal(open.json.restricted, false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(savedPath, "utf8")), { apps: { allow: [] } });
+
+    for (const [bad, message] of [
+      [{ apps: [] }, /permission apps must be an object/],
+      [{ apps: { allow: "/usr/bin/xterm" } }, /permission app allow must be a list/],
+      [{ apps: { allow: [""] } }, /non-empty strings/],
+      [{ apps: { allow: ["bin/xterm"] } }, /absolute paths or bare command names/],
+    ]) {
+      const rejected = await handlers["linux-agent-workspace"]({ action: "permissionSave", permissions: bad });
+      assert.equal(rejected.ok, false);
+      assert.match(rejected.message, message);
+    }
+    assert.deepEqual(JSON.parse(fs.readFileSync(savedPath, "utf8")), { apps: { allow: [] } });
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("main bridge start and open-profile never pass the removed unenforced-policy flag", async () => {
+  const { handlers, execCalls } = buildBridgeHarness({
+    env: { CODEX_AGENT_WORKSPACE_BIN: "/tmp/agent-workspace-linux" },
+  });
+  const legacyAck = { ackHiddenWorkspace: true, ackUnenforcedPolicy: true, acknowledgeUnenforcedPolicy: true };
+
+  await handlers["linux-agent-workspace"]({ action: "workspaceStart", dryRun: true, profileId: "qa", workspaceId: "qa-live" });
+  await handlers["linux-agent-workspace"]({ action: "workspaceStart", profileId: "qa", workspaceId: "qa-live", ...legacyAck });
+  await handlers["linux-agent-workspace"]({ action: "workspaceOpenProfile", dryRun: true, profileId: "qa", runSetup: true });
+  await handlers["linux-agent-workspace"]({ action: "workspaceOpenProfile", profileId: "qa", runSetup: true, ...legacyAck });
+
+  const args = execCalls.map((call) => Array.from(call.args));
+  assert.deepEqual(args, [
+    ["workspace", "start", "--dry-run", "--profile", "qa", "--id", "qa-live"],
+    ["workspace", "start", "--ack-hidden-workspace", "--profile", "qa", "--id", "qa-live"],
+    ["workspace", "open-profile", "--dry-run", "--profile", "qa", "--setup"],
+    ["workspace", "open-profile", "--ack-hidden-workspace", "--profile", "qa", "--setup"],
+  ]);
 });
 
 test("main bridge opens viewer in clean default mode without adding a ceiling or topmost state", async () => {
@@ -1075,16 +1167,18 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /function smokeResultFromResponses/);
   assert.match(source, /function approvalPreviewView/);
   assert.match(source, /function approvalBundleFromResponse/);
-  assert.match(source, /function approvalAckParams/);
-  assert.match(source, /approve_cli_flags/);
-  assert.match(source, /--ack-unenforced-policy/);
-  assert.match(source, /--ack-hidden-workspace/);
+  assert.doesNotMatch(source, /function approvalAckParams/);
+  assert.doesNotMatch(source, /unenforced/i);
+  assert.match(source, /ackHiddenWorkspace:true/);
   assert.match(source, /Workspace permissions/);
   assert.match(source, /Permission file/);
   assert.match(source, /Permission rules/);
-  assert.match(source, /Network ceiling/);
-  assert.match(source, /Allowed file access/);
+  assert.doesNotMatch(source, /Network ceiling/);
+  assert.doesNotMatch(source, /Allowed file access/);
   assert.match(source, /Allowed apps/);
+  assert.match(source, /Apps in a workspace run as you, with your files, network, keyring and SSH agent\./);
+  assert.match(source, /The app allowlist limits what agents may launch\./);
+  assert.doesNotMatch(source, /sandbox|isolat|enforc/i);
   assert.match(source, /Save permissions/);
   assert.match(source, /Apply/);
   assert.match(source, /Remove/);
@@ -1115,23 +1209,27 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /function workspacePrimary/);
   assert.match(source, /function workspaceSecondary/);
   assert.match(source, /function statusDot/);
-  assert.match(source, /function profileMountMode/);
-  assert.match(source, /function profileMounts/);
-  assert.match(source, /function addMountsFromPaths/);
-  assert.match(source, /function pickMount/);
   assert.match(source, /startup_app/);
-  assert.match(source, /function profileAllowHosts/);
-  assert.match(source, /function addNetworkHost/);
-  assert.match(source, /function removeNetworkHost/);
-  assert.match(source, /allow_hosts/);
-  assert.match(source, /NETWORK_MODE_OPTIONS/);
-  assert.match(source, /Closed/);
-  assert.match(source, /Local/);
-  assert.match(source, /Open/);
-  assert.match(source, /Local hosts/);
-  assert.doesNotMatch(source, /\["inherit_host","local_only","disabled","allowlist"\]/);
-  assert.doesNotMatch(source, /Allowed hosts/);
-  assert.match(source, /Add host/);
+  for (const removed of [
+    /function profileMountMode/,
+    /function profileMounts/,
+    /function addMountsFromPaths/,
+    /function pickMount/,
+    /function pickPermissionMount/,
+    /function profileAllowHosts/,
+    /function addNetworkHost/,
+    /function addPermissionHost/,
+    /function setNetworkMode/,
+    /function setPermissionNetworkMode/,
+    /NETWORK_MODE_OPTIONS/,
+    /inherit_host|local_only|allow_hosts|require_enforced_policy/,
+    /mounts|host_path|workspace_path|\/workspace\//,
+    /linux-agent-workspace-pick-mount/,
+    /Local hosts|Add host|Add file\/folder|File access|Read write/,
+  ]) {
+    assert.doesNotMatch(source, removed);
+  }
+  assert.match(source, /linux-agent-workspace-pick-project/);
   assert.match(source, /DEFAULT_COMMAND_LABEL="Auto-discovered agent-workspace-linux"/);
   assert.match(source, /Custom command/);
   assert.match(source, /function installRuntime\(\)/);
@@ -1155,18 +1253,22 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /Copy profile/);
   assert.match(source, /Use folder directly/);
   assert.match(source, /profile locks/);
+  assert.match(source, /Runs Chrome directly on the selected folder\. Close the host browser first/);
+  assert.doesNotMatch(source, /Mounts the selected folder/);
   assert.match(source, /Create from copy/);
   assert.match(source, /Create direct/);
   assert.match(source, /function createProjectProfile/);
   assert.match(source, /templateKind:"project-dev"/);
-  assert.match(source, /function createRestrictedChromeProfile/);
+  assert.match(source, /function createChromeProfile/);
+  assert.doesNotMatch(source, /createRestrictedChromeProfile/);
   assert.match(source, /function createBrowserSessionProfile/);
   assert.match(source, /function finishBrowserSessionProfile/);
   assert.match(source, /linux-agent-workspace-pick-browser-data/);
   assert.match(source, /linux-agent-workspace-copy-browser-data/);
   assert.match(source, /profileFromResponse\(response\)/);
   assert.match(source, /profileTemplate/);
-  assert.match(source, /restricted-chrome/);
+  assert.match(source, /templateKind:"chrome"/);
+  assert.doesNotMatch(source, /restricted-chrome|no-sandbox/);
   assert.match(source, /browser-session/);
   assert.match(source, /userDataDir/);
   assert.match(source, /Edit saved/);
@@ -1184,8 +1286,6 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.doesNotMatch(source, /Create profile/);
   assert.match(source, /Advanced settings/);
   assert.match(source, /Pick app/);
-  assert.match(source, /Add file\/folder/);
-  assert.match(source, /Add a file or folder before choosing read-only or read-write access/);
   assert.match(source, /Workspace status/);
   assert.match(source, /Hide status/);
   assert.match(source, /function openWorkspaceViewer/);
@@ -1194,7 +1294,6 @@ test("generated agent workspace settings module is valid ESM syntax", () => {
   assert.match(source, /workspaceIdFromStartResponse/);
   assert.match(source, /viewer "\+\(viewerResponse\?\.ok===false\?"failed":"opened"\)/);
   assert.match(source, /Open Viewer/);
-  assert.match(source, /File access/);
   assert.match(source, /aria-pressed/);
   assert.match(source, /Stopped workspaces \(/);
   assert.match(source, /var stoppedWorkspaces=workspaces\.filter/);
@@ -1445,27 +1544,27 @@ test("generated settings UI controls the page-owned permission file", async () =
   assert.doesNotMatch(nodeText(rendered.tree), new RegExp(permissionPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
-test("generated settings UI saves structured permission rules from page controls", async () => {
+test("generated settings UI saves an apps-only permission file from page controls", async () => {
   const calls = [];
-  const permissionMount = path.join(os.tmpdir(), "permission-surface-project");
   const clone = (value) => JSON.parse(JSON.stringify(value ?? {}));
   const post = async (method, request = {}) => {
     const params = request.params || {};
     calls.push({ method, params: clone(params) });
     if (method === "get-global-state") return { value: "" };
-    if (method === "linux-agent-workspace-pick-mount") {
-      return { ok: true, action: "pickMount", json: { path: permissionMount, paths: [permissionMount] } };
-    }
     if (method !== "linux-agent-workspace") return { ok: true };
     if (params.action === "permissionConfig") {
       return {
         ok: true,
         action: "permissionConfig",
         json: {
-          configured: false,
+          configured: true,
           restricted: false,
-          permissions_path: null,
-          ceiling: { network: { mode: "inherit_host" }, mounts: [], apps: { allow: [] } },
+          permissions_path: "/tmp/legacy-permissions.json",
+          ceiling: {
+            network: { mode: "local_only", allow_hosts: ["localhost:3000"] },
+            mounts: [{ host_path: "/srv/project", workspace_path: "/workspace/project", mode: "read_only" }],
+            apps: { allow: ["/usr/bin/xterm"] },
+          },
         },
       };
     }
@@ -1494,38 +1593,16 @@ test("generated settings UI saves structured permission rules from page controls
   await flushPromises();
 
   let rendered = harness.render();
-  const networkLabel = findNode(
-    rendered.tree,
-    (node) => node.type === "label" && nodeText(node).startsWith("Network ceiling"),
-  );
-  assert.ok(networkLabel, "Permission network selector should render");
-  const networkSelect = findNode(networkLabel, (node) => node.type === "select");
-  assert.ok(networkSelect, "Permission network selector should be a select control");
-  networkSelect.props.onChange({ target: { value: "local_only" } });
+  const text = nodeText(rendered.tree);
+  assert.match(text, /Apps in a workspace run as you, with your files, network, keyring and SSH agent\./);
+  assert.match(text, /The app allowlist limits what agents may launch\./);
+  assert.doesNotMatch(text, /Network ceiling|Local host|Allowed file access|No file access|Read write/);
+  assert.equal(findNode(rendered.tree, (node) => node.type === "select"), null, "no network selector");
+  assert.equal(findButton(rendered.tree, "Add file/folder"), null, "no mount picker");
+  assert.equal(findButton(rendered.tree, "Add host"), null, "no host entry");
+  assert.match(text, /\/usr\/bin\/xterm/);
+  assert.doesNotMatch(text, /\/srv\/project|localhost:3000/);
 
-  rendered = harness.render();
-  const hostInput = findInput(rendered.tree, (node) => node.props.placeholder === "localhost:3000");
-  assert.ok(hostInput, "Local host input should render after choosing local-only permissions");
-  hostInput.props.onChange({ target: { value: "localhost:3000" } });
-
-  rendered = harness.render();
-  const addHostButton = findButton(rendered.tree, "Add host");
-  assert.ok(addHostButton, "Add host button should render");
-  assert.equal(addHostButton.props.disabled, false);
-  addHostButton.props.onClick();
-
-  rendered = harness.render();
-  const addMountButton = findNode(
-    rendered.tree,
-    (node) => node.type === "button" && nodeText(node) === "Add file/folder" && node.props.disabled === false,
-  );
-  assert.ok(addMountButton, "Permission mount picker button should render");
-  addMountButton.props.onClick();
-  await flushPromises();
-  await flushPromises();
-
-  rendered = harness.render();
-  assert.match(nodeText(rendered.tree), new RegExp(permissionMount.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   const appInput = findInput(rendered.tree, (node) => node.props.placeholder === "/usr/bin/google-chrome");
   assert.ok(appInput, "Permission app input should render");
   appInput.props.onChange({ target: { value: "/usr/bin/google-chrome" } });
@@ -1549,13 +1626,381 @@ test("generated settings UI saves structured permission rules from page controls
 
   const saveCall = calls.find((call) => call.method === "linux-agent-workspace" && call.params.action === "permissionSave");
   assert.ok(saveCall, "Save should call the bridge permissionSave action");
-  assert.deepEqual(saveCall.params.permissions.network, { mode: "local_only", allow_hosts: ["localhost:3000"] });
-  assert.equal(saveCall.params.permissions.mounts.length, 1);
-  assert.equal(saveCall.params.permissions.mounts[0].host_path, permissionMount);
-  assert.match(saveCall.params.permissions.mounts[0].workspace_path, /^\/workspace\//);
-  assert.equal(saveCall.params.permissions.mounts[0].mode, "read_only");
-  assert.deepEqual(saveCall.params.permissions.apps.allow, ["/usr/bin/google-chrome"]);
+  assert.deepEqual(saveCall.params.permissions, { apps: { allow: ["/usr/bin/xterm", "/usr/bin/google-chrome"] } });
   assert.ok(calls.some((call) => call.method === "linux-agent-workspace" && call.params.action === "doctor"));
+});
+
+test("generated settings UI writes profiles without network, mounts, or enforced-policy fields", async () => {
+  const calls = [];
+  const post = async (method, request = {}) => {
+    const params = request.params || {};
+    calls.push({ method, params: JSON.parse(JSON.stringify(params)) });
+    if (method === "get-global-state") return { value: "" };
+    if (method !== "linux-agent-workspace") return { ok: true };
+    if (params.action === "permissionConfig") return { ok: true, json: { configured: false, restricted: false } };
+    if (params.action === "profileList") return { ok: true, json: { profiles: [] } };
+    if (params.action === "workspaceList") return { ok: true, json: { workspaces: [] } };
+    return { ok: true, action: params.action, json: { ok: true } };
+  };
+
+  const harness = createSettingsRenderHarness(post);
+  const firstRender = harness.render();
+  for (const effect of firstRender.effects) effect();
+  await flushPromises();
+  await flushPromises();
+
+  let rendered = harness.render();
+  findButton(rendered.tree, "Create new").props.onClick();
+  rendered = harness.render();
+  const editorText = nodeText(rendered.tree);
+  assert.doesNotMatch(editorText, /Network|File access|Add file\/folder|Local hosts|Read only/);
+  assert.equal(findNode(rendered.tree, (node) => node.type === "select"), null, "profile editor has no network selector");
+  const cwdInput = findInput(rendered.tree, (node) => node.props.placeholder === "/path/to/project");
+  assert.ok(cwdInput, "Working folder takes a host path");
+  assert.equal(cwdInput.props.value, "");
+
+  findButton(rendered.tree, "Validate").props.onClick();
+  findButton(rendered.tree, "Create").props.onClick();
+  await flushPromises();
+
+  for (const action of ["profileValidate", "profileSave"]) {
+    const call = calls.find((entry) => entry.params.action === action);
+    assert.ok(call, `${action} should be called`);
+    const profile = call.params.profile;
+    assert.equal(profile.id, "desktop-qa");
+    for (const removed of ["network", "mounts", "require_enforced_policy", "cwd"]) {
+      assert.equal(Object.prototype.hasOwnProperty.call(profile, removed), false, `${action} profile carries ${removed}`);
+    }
+  }
+});
+
+test("generated settings UI Chrome starter uses the chrome template", async () => {
+  const calls = [];
+  const post = async (method, request = {}) => {
+    const params = request.params || {};
+    calls.push({ method, params: { ...params } });
+    if (method === "get-global-state") return { value: "" };
+    if (method !== "linux-agent-workspace") return { ok: true };
+    if (params.action === "permissionConfig") return { ok: true, json: { configured: false, restricted: false } };
+    if (params.action === "profileList") return { ok: true, json: { profiles: [{ id: "chrome" }] } };
+    if (params.action === "workspaceList") return { ok: true, json: { workspaces: [] } };
+    if (params.action === "profileTemplate") {
+      return { ok: true, json: { id: params.profileId, startup_apps: [{ name: "chrome", command: ["google-chrome"] }] } };
+    }
+    return { ok: true, action: params.action, json: { ok: true } };
+  };
+
+  const harness = createSettingsRenderHarness(post);
+  const firstRender = harness.render();
+  for (const effect of firstRender.effects) effect();
+  await flushPromises();
+  await flushPromises();
+
+  const rendered = harness.render();
+  const chromeButton = findButton(rendered.tree, "Chrome template");
+  assert.ok(chromeButton, "Chrome template button should render");
+  await chromeButton.props.onClick();
+  await flushPromises();
+
+  const templateCalls = calls.filter((call) => call.params.action === "profileTemplate");
+  assert.deepEqual(templateCalls.map((call) => call.params), [
+    { action: "profileTemplate", templateKind: "chrome", profileId: "chrome-2" },
+  ]);
+  const editor = harness.render().tree;
+  const nameInput = findInput(editor, (node) => node.props.placeholder === "desktop-qa");
+  assert.ok(nameInput, "the profile editor should open with the chrome template");
+  assert.equal(nameInput.props.value, "chrome-2");
+  assert.ok(findButton(editor, "Validate"), "the open editor shows its Validate action");
+});
+
+test("generated settings UI project starter picks a host folder for the project-dev template", async () => {
+  const calls = [];
+  const projectDir = "/home/me/src/My Project";
+  const post = async (method, request = {}) => {
+    const params = request.params || {};
+    calls.push({ method, params: { ...params } });
+    if (method === "get-global-state") return { value: "" };
+    if (method === "linux-agent-workspace-pick-project") {
+      return { ok: true, action: "pickProject", json: { canceled: false, path: projectDir, paths: [projectDir] } };
+    }
+    if (method !== "linux-agent-workspace") return { ok: true };
+    if (params.action === "permissionConfig") return { ok: true, json: { configured: false, restricted: false } };
+    if (params.action === "profileList") return { ok: true, json: { profiles: [] } };
+    if (params.action === "workspaceList") return { ok: true, json: { workspaces: [] } };
+    if (params.action === "profileTemplate") return { ok: true, json: { id: params.profileId, cwd: params.hostPath } };
+    return { ok: true, action: params.action, json: { ok: true } };
+  };
+
+  const harness = createSettingsRenderHarness(post);
+  const firstRender = harness.render();
+  for (const effect of firstRender.effects) effect();
+  await flushPromises();
+  await flushPromises();
+
+  await findButton(harness.render().tree, "Project template").props.onClick();
+  await flushPromises();
+
+  assert.ok(calls.some((call) => call.method === "linux-agent-workspace-pick-project"));
+  assert.equal(calls.some((call) => call.method === "linux-agent-workspace-pick-mount"), false);
+  const templateCall = calls.find((call) => call.params.action === "profileTemplate");
+  assert.deepEqual(templateCall.params, {
+    action: "profileTemplate",
+    templateKind: "project-dev",
+    profileId: "my-project",
+    hostPath: projectDir,
+  });
+});
+
+test("generated settings UI browser session direct use runs Chrome on the chosen folder", async () => {
+  const calls = [];
+  const confirms = [];
+  const dataDir = "/home/me/.config/google-chrome-agent";
+  const post = async (method, request = {}) => {
+    const params = request.params || {};
+    calls.push({ method, params: { ...params } });
+    if (method === "get-global-state") return { value: "" };
+    if (method === "linux-agent-workspace-pick-browser-data") {
+      return { ok: true, action: "pickBrowserData", json: { canceled: false, path: dataDir, paths: [dataDir] } };
+    }
+    if (method !== "linux-agent-workspace") return { ok: true };
+    if (params.action === "permissionConfig") return { ok: true, json: { configured: false, restricted: false } };
+    if (params.action === "profileList") return { ok: true, json: { profiles: [] } };
+    if (params.action === "workspaceList") return { ok: true, json: { workspaces: [] } };
+    if (params.action === "profileTemplate") return { ok: true, json: { id: params.profileId } };
+    return { ok: true, action: params.action, json: { ok: true } };
+  };
+
+  const harness = createSettingsRenderHarness(post, {
+    window: {
+      confirm(message) {
+        confirms.push(message);
+        return true;
+      },
+    },
+  });
+  const firstRender = harness.render();
+  for (const effect of firstRender.effects) effect();
+  await flushPromises();
+  await flushPromises();
+
+  await findButton(harness.render().tree, "Browser session").props.onClick();
+  let rendered = harness.render();
+  const dialogText = nodeText(rendered.tree);
+  assert.match(dialogText, /Runs Chrome directly on the selected folder\. Close the host browser first/);
+  assert.doesNotMatch(dialogText, /[Mm]ount/);
+  const direct = findNode(rendered.tree, (node) => node.type === "button" && nodeText(node).startsWith("Use folder directly"));
+  direct.props.onClick();
+  rendered = harness.render();
+  await findButton(rendered.tree, "Create direct").props.onClick();
+  await flushPromises();
+
+  assert.equal(calls.some((call) => call.method === "linux-agent-workspace-copy-browser-data"), false);
+  assert.equal(confirms.length, 1);
+  assert.match(confirms[0], /Close the host browser first/);
+  assert.match(confirms[0], /refuses a profile a desktop browser holds/);
+  const templateCall = calls.find((call) => call.params.action === "profileTemplate");
+  assert.deepEqual(templateCall.params, {
+    action: "profileTemplate",
+    templateKind: "browser-session",
+    profileId: "browser-session",
+    userDataDir: dataDir,
+  });
+});
+
+test("main bridge version action runs --version without the permissions prefix", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-agent-workspace-version-"));
+  try {
+    const permissionsPath = path.join(tempDir, "permissions.json");
+    fs.writeFileSync(permissionsPath, JSON.stringify({ apps: { allow: ["sh"] } }));
+    const outputs = [
+      [null, "agent-workspace-linux 0.6.0\n", ""],
+      [Object.assign(new Error("Command failed"), { code: 1 }), "", "Error: unknown command '--version'. Expected one of: doctor\n"],
+      [null, "something else\n", ""],
+    ];
+    for (const globalState of [
+      new Map([[SETTINGS_PERMISSIONS_KEY, permissionsPath]]),
+      new Map([[SETTINGS_PERMISSIONS_KEY, path.join(tempDir, "missing.json")]]),
+    ]) {
+      const calls = [];
+      const queue = [...outputs];
+      const { handlers } = buildBridgeHarness({
+        env: { CODEX_AGENT_WORKSPACE_BIN: "/tmp/agent-workspace-linux" },
+        globalState,
+        execFile(command, args, options, callback) {
+          calls.push(Array.from(args));
+          callback(...queue.shift());
+        },
+      });
+      const current = await handlers["linux-agent-workspace"]({ action: "version" });
+      assert.equal(current.ok, true);
+      assert.equal(current.json.version, "0.6.0");
+      const old = await handlers["linux-agent-workspace"]({ action: "version" });
+      assert.equal(old.ok, false);
+      assert.equal(old.json.version, null);
+      assert.match(old.stderr, /unknown command '--version'/);
+      const garbled = await handlers["linux-agent-workspace"]({ action: "version" });
+      assert.equal(garbled.ok, false);
+      assert.equal(garbled.json.version, null);
+      assert.deepEqual(calls, [["--version"], ["--version"], ["--version"]]);
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+function versionGateBridge(versionOutput) {
+  const output = { current: versionOutput };
+  const savedProfile = { id: "qa-profile", description: "QA profile", startup_apps: [] };
+  const { handlers, execCalls } = buildBridgeHarness({
+    env: { CODEX_AGENT_WORKSPACE_BIN: "/tmp/agent-workspace-linux" },
+    execFile(command, args, options, callback) {
+      const argv = Array.from(args);
+      execCalls.push(argv);
+      if (argv[0] === "--version") {
+        const [error, stdout] = output.current;
+        return callback(error ? Object.assign(new Error("Command failed"), { code: 1 }) : null, stdout, error || "");
+      }
+      if (argv[0] === "profile" && argv[1] === "list") return callback(null, JSON.stringify({ profiles: [savedProfile] }), "");
+      if (argv[0] === "workspace" && argv[1] === "list") return callback(null, JSON.stringify({ workspaces: [] }), "");
+      return callback(null, JSON.stringify({ ok: true }), "");
+    },
+  });
+  const post = async (method, request = {}) => {
+    if (method === "get-global-state") return { value: "" };
+    if (method === "set-global-state") return { success: true };
+    return handlers[method](request.params || {});
+  };
+  return { post, output, execCalls };
+}
+
+async function settle() {
+  for (let index = 0; index < 6; index += 1) await flushPromises();
+}
+
+const GATED_BUTTONS = ["Save permissions", "Project template", "Chrome template", "Browser session", "Start"];
+
+function gatedButtonStates(tree) {
+  return Object.fromEntries(GATED_BUTTONS.map((label) => [label, findButton(tree, label)?.props.disabled]));
+}
+
+test("settings page blocks writes and starts until agent-workspace-linux reports 0.6.0 or newer", async () => {
+  for (const [output, expected] of [
+    [["Error: unknown command '--version'.", ""], "installed: too old to report a version"],
+    [[null, "agent-workspace-linux 0.5.1\n"], "installed: 0.5.1"],
+    [[null, "agent-workspace-linux 0.5.10\n"], "installed: 0.5.10"],
+  ]) {
+    const { post } = versionGateBridge(output);
+    const harness = createSettingsRenderHarness(post, { version: null });
+    for (const effect of harness.render().effects) effect();
+    await settle();
+
+    const tree = harness.render().tree;
+    const alert = findNode(tree, (node) => node.props?.role === "alert");
+    assert.ok(alert, `version banner should render for ${expected}`);
+    assert.equal(
+      nodeText(alert),
+      `This page needs agent-workspace-linux 0.6.0 or newer; ${expected}. Update with Install from npm.`,
+    );
+    assert.deepEqual(gatedButtonStates(tree), Object.fromEntries(GATED_BUTTONS.map((label) => [label, true])));
+    assert.equal(findButton(tree, "Install from npm").props.disabled, false);
+    findButton(tree, "Create new").props.onClick();
+    assert.equal(findButton(harness.render().tree, "Create").props.disabled, true, "profile saves stay blocked");
+  }
+
+  for (const version of ["0.6.0", "0.10.0", "1.0.0"]) {
+    const { post } = versionGateBridge([null, `agent-workspace-linux ${version}\n`]);
+    const harness = createSettingsRenderHarness(post, { version: null });
+    for (const effect of harness.render().effects) effect();
+    await settle();
+    const tree = harness.render().tree;
+    assert.equal(findNode(tree, (node) => node.props?.role === "alert"), null, `${version} passes the gate`);
+    assert.deepEqual(gatedButtonStates(tree), Object.fromEntries(GATED_BUTTONS.map((label) => [label, false])));
+  }
+});
+
+test("settings page Reconnect and Smoke test rerun the version gate", async () => {
+  const { post, output, execCalls } = versionGateBridge([null, "agent-workspace-linux 0.5.1\n"]);
+  const harness = createSettingsRenderHarness(post, { version: null });
+  for (const effect of harness.render().effects) effect();
+  await settle();
+  assert.equal(findButton(harness.render().tree, "Start").props.disabled, true);
+
+  findButton(harness.render().tree, "Smoke test").props.onClick();
+  await settle();
+  let tree = harness.render().tree;
+  const smoke = findNode(tree, (node) => node.type === "details" && nodeText(node).startsWith("Error"));
+  assert.ok(smoke, "smoke test should report the failed version check");
+  assert.match(nodeText(findNode(tree, (node) => node.props?.role === "alert")), /installed: 0\.5\.1/);
+
+  output.current = [null, "agent-workspace-linux 0.6.0\n"];
+  findButton(tree, "Reconnect").props.onClick();
+  await settle();
+  tree = harness.render().tree;
+  assert.equal(findNode(tree, (node) => node.props?.role === "alert"), null);
+  assert.equal(findButton(tree, "Start").props.disabled, false);
+  assert.equal(execCalls.filter((argv) => argv[0] === "--version").length, 3, "load, Smoke test and Reconnect each check");
+  assert.ok(execCalls.every((argv) => argv[0] !== "--permissions" || argv[2] !== "--version"));
+});
+
+test("approved start from the settings page reaches the CLI without the removed unenforced-policy flag", async () => {
+  const savedProfile = { id: "qa-profile", description: "QA profile", startup_apps: [] };
+  const { handlers, execCalls } = buildBridgeHarness({
+    env: { CODEX_AGENT_WORKSPACE_BIN: "/tmp/agent-workspace-linux" },
+    execFile(command, args, options, callback) {
+      execCalls.push({ command, args: Array.from(args), options });
+      const argv = Array.from(args);
+      if (argv[0] === "--version") return callback(null, "agent-workspace-linux 0.6.0\n", "");
+      if (argv[0] === "profile" && argv[1] === "list") return callback(null, JSON.stringify({ profiles: [savedProfile] }), "");
+      if (argv[0] === "workspace" && argv[1] === "list") return callback(null, JSON.stringify({ workspaces: [] }), "");
+      if (argv.includes("--dry-run")) {
+        return callback(
+          null,
+          JSON.stringify({
+            ok: true,
+            approval_bundle: {
+              required_acknowledgements: [
+                { id: "hidden_workspace", label: "Hidden workspace", cli_flag: "--ack-hidden-workspace" },
+                { id: "unenforced_policy", label: "Legacy policy", cli_flag: "--ack-unenforced-policy" },
+              ],
+              approve_cli_flags: ["--ack-hidden-workspace", "--ack-unenforced-policy"],
+            },
+          }),
+          "",
+        );
+      }
+      return callback(null, JSON.stringify({ ok: true, workspace_id: "qa-live" }), "");
+    },
+  });
+  const post = async (method, request = {}) => {
+    if (method === "get-global-state") return { value: "" };
+    return handlers[method](request.params || {});
+  };
+
+  const harness = createSettingsRenderHarness(post, { version: null });
+  const firstRender = harness.render();
+  for (const effect of firstRender.effects) effect();
+  for (let index = 0; index < 4; index += 1) await flushPromises();
+
+  const startButton = findNode(
+    harness.render().tree,
+    (node) => node.type === "button" && nodeText(node) === "Start" && node.props.disabled === false,
+  );
+  assert.ok(startButton, "Start button should render for the saved profile");
+  startButton.props.onClick();
+  for (let index = 0; index < 4; index += 1) await flushPromises();
+
+  const approveButton = findButton(harness.render().tree, "Approve and start");
+  assert.ok(approveButton, "approval card should render");
+  approveButton.props.onClick();
+  for (let index = 0; index < 4; index += 1) await flushPromises();
+
+  const openCalls = execCalls.filter((call) => call.args[0] === "workspace" && call.args[1] === "open-profile");
+  assert.equal(openCalls.length, 2);
+  assert.ok(openCalls[0].args.includes("--dry-run"));
+  assert.ok(openCalls[1].args.includes("--ack-hidden-workspace"));
+  for (const call of execCalls) {
+    assert.equal(call.args.includes("--ack-unenforced-policy"), false, call.args.join(" "));
+  }
 });
 
 test("generated settings UI auto-opens the GPUI viewer after approved workspace start", async () => {
@@ -1563,7 +2008,6 @@ test("generated settings UI auto-opens the GPUI viewer after approved workspace 
   const savedProfile = {
     id: "qa-profile",
     description: "QA profile",
-    network: { mode: "inherit_host" },
     startup_apps: [],
   };
   const post = async (method, request = {}) => {
@@ -1628,6 +2072,7 @@ test("generated settings UI auto-opens the GPUI viewer after approved workspace 
   const viewer = workspaceCalls.find((call) => call.params.action === "workspaceOpenViewer");
   assert.equal(dryRun?.params.profileId, "qa-profile");
   assert.equal(realStart?.params.profileId, "qa-profile");
+  assert.equal(Object.prototype.hasOwnProperty.call(realStart.params, "ackUnenforcedPolicy"), false);
   assert.deepEqual(JSON.parse(JSON.stringify(viewer)), {
     method: "linux-agent-workspace",
     params: {

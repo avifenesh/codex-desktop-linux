@@ -24,17 +24,21 @@ The feature adds a Linux-only settings section named **Agent Workspaces**. The
 page can point ChatGPT Community at an `agent-workspace-linux` binary, list and edit
 saved profiles, validate profile JSON without saving, preview profile-backed
 workspace starts, require an explicit approval card before starting a hidden
-workspace, stop running workspaces, run stale workspace cleanup, and create a restricted Chrome
-starter profile that keeps the `--no-sandbox` browser tradeoff visible. It can
-also prepare a browser-session profile from a picked browser data directory,
-defaulting to a managed copy under Agent Workspace data and keeping direct
-read-write mounting behind an explicit profile-lock warning.
-The friendly profile editor intentionally exposes only three network choices:
-**Closed** (`network.mode=disabled`), **Local** (`network.mode=local_only`), and
-**Open** (`network.mode=inherit_host`). More complex host allowlists are not a
-current product path; advanced JSON can still show older/internal profile data
-without making the normal UI promise filtering that the runtime does not
-enforce.
+workspace, stop running workspaces, run stale workspace cleanup, and create
+starter profiles from the `project-dev`, `chrome` and `browser-session`
+templates. The **Chrome template** starts Chrome on a fresh profile in
+`/tmp/agent-workspace-chrome`. **Browser session** prepares a profile from a
+picked browser data directory. It defaults to a managed copy under Agent
+Workspace data; the direct option runs Chrome on the chosen directory itself
+and warns that the host browser must be closed first, because
+`agent-workspace-linux` refuses to launch Chrome on a profile a desktop browser
+holds (the window would open on the user's desktop).
+
+A workspace is background computer use, not a sandbox. Apps in a workspace run
+as you, with your files, network, keyring and SSH agent; only their windows stay
+in the workspace. The page therefore has no network or file-access controls.
+The app allowlist limits what agents may launch.
+
 The startup-app picker accepts ordinary executable files and Linux `.desktop`
 launchers; when a launcher is selected, the bridge reads its `Name`/`Exec`
 fields, removes desktop field codes such as `%U`, and stores the parsed command
@@ -47,9 +51,23 @@ The launcher ignores an inherited `ELECTRON_RENDERER_URL` by default so the app
 always uses its own verified webview bundle. Set
 `CODEX_LINUX_ALLOW_RENDERER_URL_OVERRIDE=1` only for explicit debugging.
 
-Install `agent-workspace-linux` (v0.1.1 or newer) from the **Agent Workspaces**
-page with **Install from npm**, or install it manually. v0.1.1 is the first
-release whose default `./install.sh` no longer writes to `~/.codex/config.toml`,
+Install `agent-workspace-linux` v0.6.0 or newer from the **Agent Workspaces**
+page with **Install from npm**, or install it manually. Older releases are
+built around the removed sandbox options and have no `chrome` template. On
+load, **Reconnect**, **Smoke test** and after **Install from npm**, the page
+runs `agent-workspace-linux --version` (without `--permissions`). When the
+command fails or reports a version below 0.6.0, the page says so and keeps
+**Save permissions**, the profile templates, profile saves and **Start**
+disabled until a check passes.
+
+Upgrading from 0.5.x: profiles saved for 0.5.x that use a `/workspace/...`
+working directory or `--user-data-dir=/workspace/...` (the old `project-dev`,
+`browser-session` and `restricted-chrome` shapes) no longer work, because
+0.6.0 runs apps on host paths and has no `/workspace` mounts. Delete them and
+re-create them from the **Project template**, **Chrome template** or
+**Browser session** starter.
+
+Since v0.1.1 the default `./install.sh` no longer writes to `~/.codex/config.toml`,
 matching this feature's app-owned configuration model. If a previous v0.1.0
 install left a stale `agent-workspace-linux` entry in the generic Codex MCP
 config, run `./install.sh --clean-codex-config` once from a v0.1.1+ checkout
@@ -71,10 +89,11 @@ or at `~/.local/bin/agent-workspace-linux`.
 The bridge is intentionally allowlisted. It invokes `agent-workspace-linux`
 through `execFile`, never through a shell, and exposes only profile/workspace
 lifecycle actions needed by the UI. The install button also uses `execFile` with
-the fixed npm package name. When no npm prefix is already configured, the
-install button runs `npm install -g --prefix ~/.local
-@agent-sh/agent-workspace-linux` so packaged installs do not try to write into
-the application runtime or a system directory.
+the fixed npm package spec `@agent-sh/agent-workspace-linux@>=0.6.0`, so it fails
+rather than installing an older release. When no npm prefix is already
+configured, the install button runs `npm install -g --prefix ~/.local
+'@agent-sh/agent-workspace-linux@>=0.6.0'` so packaged installs do not try to
+write into the application runtime or a system directory.
 It resolves the binary in this order (highest priority first):
 
 1. the settings-page command field, persisted as
@@ -112,11 +131,12 @@ context.
 list, and permission-file inspection so a user can validate the install before
 approving a real profile directory.
 
-The **Permission rules** editor controls the actual runtime ceiling shape:
-network mode, local host entries, allowed file/folder mounts, mount access mode,
-and app allowlist. Saving those rules writes a page-owned JSON permission file
-under the Agent Workspace data directory, stores that file path in app state,
-and immediately makes it the `--permissions` file for future CLI actions.
+The **Permission rules** editor holds the app allowlist, the only ceiling
+`agent-workspace-linux` supports. Saving it writes a page-owned JSON permission
+file holding only `{"apps":{"allow":[...]}}` under the Agent Workspace data
+directory, stores that file path in app state, and immediately makes it the
+`--permissions` file for future CLI actions. An empty allowlist sets no
+ceiling on launches.
 Reconnect/Smoke test are page-owned backend control paths; changing permission
 rules does not require the user to visit the generic MCP server page.
 
@@ -156,8 +176,8 @@ conversation and composer webview assets stay untouched.
 The dedicated Settings page owns local start approvals: pressing
 **Start** first runs a dry-run preview and renders an **Approve hidden
 workspace** card with the request, profile, purpose, setup/startup choices, and
-required acknowledgements. The bridge sends `--ack-hidden-workspace` and any
-needed policy acknowledgement only after the user presses **Approve and start**.
+required acknowledgements. The bridge sends `--ack-hidden-workspace` only after
+the user presses **Approve and start**.
 
 Manual validation checklist for a build that enables this feature:
 

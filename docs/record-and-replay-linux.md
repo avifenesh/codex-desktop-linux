@@ -222,7 +222,7 @@ Recommended status values:
 | --- | --- | --- |
 | `supported` | Skill is instruction-only or uses providers verified on this host. | Allow explicit invocation without extra warning. |
 | `conditional` | Skill may work but depends on CLIs, credentials, browser state, plugin auth, MCP config, or project context. | Allow explicit invocation with clear missing/unknown requirements. |
-| `experimental` | Skill needs Linux host desktop control or isolated GUI automation. | Require opt-in diagnostics and show Computer Use or Agent Workspace readiness. |
+| `experimental` | Skill needs Linux host desktop control or background GUI automation. | Require opt-in diagnostics and show Computer Use or Agent Workspace readiness. |
 | `unsupported` | Skill clearly requires macOS/Windows-only APIs, apps, paths, or UI assumptions. | Import/read/list, but block "works on Linux" claims. |
 | `unknown` | Classifier cannot infer enough. | Import as readable context; require manual review or smoke test before treating it as runnable. |
 
@@ -236,7 +236,7 @@ Capability classes:
 | `plugin-dependent` | `agents/openai.yaml` dependencies or instructions naming plugins/MCP tools. | Conditional; map declared dependencies to installed plugins/MCP servers. |
 | `desktop-observe` | Needs screenshots, app state, accessibility tree, or frontmost window. | Experimental; require screenshot/accessibility readiness. |
 | `desktop-act` | Needs click, type, drag, scroll, focus, or window targeting. | Experimental/high-risk; require input, window focus, screenshot, and accessibility readiness. |
-| `isolated-gui` | Workflow can run in a hidden/throwaway Linux desktop or workspace-owned browser. | Optional via Agent Workspaces; not equivalent to host desktop replay. |
+| `background-gui` | Workflow can run in a hidden Linux desktop in the background or a workspace-owned browser. | Optional via Agent Workspaces; not equivalent to host desktop replay. |
 | `platform-macos` | AppleScript, Finder, `.app`, Keychain, menu bar, macOS paths, System Settings, Mac accessibility assumptions. | Unsupported on Linux. |
 | `platform-windows` | Registry, PowerShell UI setup, Win32 paths/apps, or Windows-specific Computer Use assumptions. | Unsupported on Linux. |
 | `recording` | Requires capturing a new demonstration. | Supported only through the opt-in Linux recording bundle path. |
