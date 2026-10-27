@@ -60,6 +60,17 @@ command fails or reports a version below 0.6.0, the page says so and keeps
 **Save permissions**, the profile templates, profile saves and **Start**
 disabled until a check passes.
 
+Missing executables, version-check timeouts and other check failures have separate
+messages that name the command checked. Releases that reject `--version` are
+reported as too old. After a successful npm install, the page saves the installed
+executable's full path in **Command**, so an older Cargo or system installation
+cannot shadow it. A failed install leaves the previous command unchanged.
+
+The version gate intentionally has no upper bound, matching the npm install
+range. Newer releases are accepted on purpose; this minimum-version check does
+not guarantee compatibility with future CLI changes. If a future release changes
+the commands this page uses, the integration must be updated with it.
+
 Upgrading from 0.5.x: profiles saved for 0.5.x that use a `/workspace/...`
 working directory or `--user-data-dir=/workspace/...` (the old `project-dev`,
 `browser-session` and `restricted-chrome` shapes) no longer work, because

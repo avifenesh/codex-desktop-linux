@@ -89,16 +89,47 @@ function agentWorkspaceBrowserDataCopyBridgeSource({ fsVar, pathVar }) {
 const NPM_PACKAGE_SPEC = "@agent-sh/agent-workspace-linux@>=0.6.0";
 
 function useUserWritableNpmPrefixForInstallRuntime(source) {
-  const needle = "case`installRuntime`:{let e=`npm`,t=__codexFirstExisting(__codexFromPathCandidates(e))||e,n=[`install`,`-g`,`@agent-sh/agent-workspace-linux`],r=Number.isFinite(Number(__codexTimeoutMs))?Number(__codexTimeoutMs):3e5;";
-  const replacement = "case`installRuntime`:{let e=`npm`,t=__codexFirstExisting(__codexFromPathCandidates(e))||e,p=__codexString(process.env.NPM_CONFIG_PREFIX);p=p?__codexExpandCommand(p):(__codexHome()?__CODEX_PATH_VAR__.join(__codexHome(),`.local`):null);let n=[`install`,`-g`],r=Number.isFinite(Number(__codexTimeoutMs))?Number(__codexTimeoutMs):3e5;p&&n.push(`--prefix`,p);n.push(`" + NPM_PACKAGE_SPEC + "`);";
-  if (!source.includes(needle)) {
-    throw new Error("could not update agent workspace npm install command");
-  }
-  return source.replace(needle, replacement);
+  return replaceBridgeCase(source, "installRuntime", "version", `case\`installRuntime\`:{
+    const manager="npm",npm=__codexFirstExisting(__codexFromPathCandidates(manager))||manager;
+    const timeout=Number.isFinite(Number(__codexTimeoutMs))?Number(__codexTimeoutMs):300000;
+    const run=args=>new Promise(resolve=>{
+      __CODEX_CHILD_PROCESS_VAR__.execFile(npm,args,{encoding:"utf8",timeout,maxBuffer:16777216},(error,stdout,stderr)=>{
+        resolve({ok:!error,action:__codexActionName,manager,command:npm,args,stdout:stdout||"",stderr:stderr||"",message:error?(error instanceof Error?error.message:String(error)):void 0,code:error?.code??null});
+      });
+    });
+    let prefix=__codexString(process.env.NPM_CONFIG_PREFIX);
+    prefix=prefix?__codexExpandCommand(prefix):(__codexHome()?__CODEX_PATH_VAR__.join(__codexHome(),".local"):null);
+    if(!prefix){
+      const resolved=await run(["prefix","-g"]);
+      if(!resolved.ok)return resolved;
+      prefix=resolved.stdout.trim();
+      if(!__CODEX_PATH_VAR__.isAbsolute(prefix))return {...resolved,ok:!1,message:"npm did not report an absolute installation prefix"};
+    }
+    prefix=__CODEX_PATH_VAR__.resolve(prefix);
+    const result=await run(["install","-g","--prefix",prefix,${JSON.stringify(NPM_PACKAGE_SPEC)}]);
+    if(result.ok)result.json={ok:!0,manager,command:__CODEX_PATH_VAR__.join(prefix,"bin","agent-workspace-linux")};
+    return result;
+  }`);
+}
+
+function replaceBridgeCase(source, action, nextAction, replacement) {
+  const start = source.indexOf(`case\`${action}\`:`);
+  const end = source.indexOf(`case\`${nextAction}\`:`, start);
+  if (start < 0 || end < 0) throw new Error(`could not update agent workspace ${action} command`);
+  return source.slice(0, start) + replacement + source.slice(end);
+}
+
+function agentWorkspaceVersionBridgeSource(source) {
+  return replaceBridgeCase(source, "version", "permissionConfig", `case\`version\`:return await new Promise(resolve=>{
+    __CODEX_CHILD_PROCESS_VAR__.execFile(__codexCommand,["--version"],{encoding:"utf8",timeout:Number.isFinite(Number(__codexTimeoutMs))?Number(__codexTimeoutMs):15000,maxBuffer:65536},(error,stdout,stderr)=>{
+      const match=String(stdout||"").trim().match(/^agent-workspace-linux (\\d+\\.\\d+\\.\\d+)/);
+      resolve({ok:!error&&!!match,action:__codexActionName,command:__codexCommand,args:["--version"],stdout:stdout||"",stderr:stderr||"",message:error?(error instanceof Error?error.message:String(error)):match?void 0:"unrecognized version output",code:error?.code??null,timedOut:!!error?.killed||error?.code==="ETIMEDOUT",json:{version:match?match[1]:null}});
+    });
+  });`);
 }
 
 function agentWorkspaceBridgeWithWorkspaceStartSource(args) {
-  let source = useUserWritableNpmPrefixForInstallRuntime(AGENT_WORKSPACE_BRIDGE_SOURCE_TEMPLATE)
+  let source = agentWorkspaceVersionBridgeSource(useUserWritableNpmPrefixForInstallRuntime(AGENT_WORKSPACE_BRIDGE_SOURCE_TEMPLATE))
     .split("__CODEX_CHILD_PROCESS_VAR__").join("__codexChildProcessModule")
     .split("__CODEX_FS_VAR__").join("__codexFsModule")
     .split("__CODEX_PATH_VAR__").join("__codexPathModule");
@@ -287,10 +318,20 @@ function versionAtLeast(version,minimum){
 
 function versionGateFromResponse(response){
   var installed=typeof response?.json?.version==="string"?response.json.version:null;
-  return {status:installed&&versionAtLeast(installed,MINIMUM_VERSION)?"ok":"too_old",installed:installed};
+  var command=typeof response?.command==="string"?response.command:null;
+  var detail=response?.message||String(response?.stderr||"").trim()||"unrecognized version output";
+  if(response?.ok!==false&&installed)return {status:versionAtLeast(installed,MINIMUM_VERSION)?"ok":"too_old",installed:installed,command:command};
+  if(response?.code==="ENOENT")return {status:"not_found",command:command};
+  if(response?.timedOut)return {status:"timed_out",command:command};
+  if(/(?:unknown|unrecognized|unexpected|unsupported)\\s+(?:command|argument|option|flag)[^\\n]*--version/i.test(String(response?.stderr||"")+" "+detail))return {status:"too_old",installed:null,command:command};
+  return {status:"check_failed",command:command,detail:detail};
 }
 
 function versionGateMessage(gate){
+  var target="agent-workspace-linux"+(gate.command?" at "+gate.command:"");
+  if(gate.status==="not_found")return target+" was not found. Install from npm or choose its executable in Command.";
+  if(gate.status==="timed_out")return "Checking "+target+" timed out. Check Command and try Reconnect.";
+  if(gate.status==="check_failed")return "Could not check "+target+": "+gate.detail;
   return "This page needs agent-workspace-linux "+MINIMUM_VERSION+" or newer; installed: "+(gate.installed||"too old to report a version")+". Update with Install from npm.";
 }
 
@@ -882,8 +923,13 @@ function AgentWorkspacesSettings(){
   async function installRuntime(){
     var install=await callAgentWorkspace("installRuntime",{timeoutMs:300000});
     if(install?.ok===false)return;
-    setCommand("");
-    await __post("set-global-state",{params:{key:COMMAND_KEY,value:void 0}});
+    var installedCommand=install?.json?.command;
+    if(typeof installedCommand!=="string"||!installedCommand.trim()){
+      setResult({ok:false,action:"installRuntime",message:"npm did not report the installed executable path",json:install});
+      return;
+    }
+    await __post("set-global-state",{params:{key:COMMAND_KEY,value:installedCommand}});
+    setCommand(installedCommand);
     var gate=await checkVersion();
     var doctor=await callAgentWorkspace("doctor");
     await refresh();
@@ -1256,7 +1302,7 @@ function AgentWorkspacesSettings(){
             )
           )
         ),
-        versionGate.status==="too_old"
+        versionBlocked&&versionGate.status!=="checking"
           ? h("div",{className:"rounded-md border border-red-500/40 bg-token-main-surface-secondary p-3 text-sm text-red-700 dark:text-red-300",role:"alert"},versionGateMessage(versionGate))
           : null,
         permissionConfig?permissionConfigView(permissionConfig):null,

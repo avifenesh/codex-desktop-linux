@@ -805,6 +805,7 @@ test("main bridge install action uses fixed npm package command", async () => {
     );
     assert.equal(execCalls[0].options.timeout, 300000);
     assert.equal(execCalls.length, 1);
+    assert.equal(npm.json.command, path.join(tempDir, "home", ".local", "bin", "agent-workspace-linux"));
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -831,6 +832,7 @@ test("main bridge install action expands tilde npm prefix", async () => {
       JSON.parse(JSON.stringify(execCalls[0].args)),
       ["install", "-g", "--prefix", path.join(home, "npm-prefix"), "@agent-sh/agent-workspace-linux@>=0.6.0"],
     );
+    assert.equal(npm.json.command, path.join(home, "npm-prefix", "bin", "agent-workspace-linux"));
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -1858,7 +1860,11 @@ function versionGateBridge(versionOutput) {
       execCalls.push(argv);
       if (argv[0] === "--version") {
         const [error, stdout] = output.current;
-        return callback(error ? Object.assign(new Error("Command failed"), { code: 1 }) : null, stdout, error || "");
+        return callback(
+          typeof error === "string" ? Object.assign(new Error("Command failed"), { code: 1 }) : error,
+          stdout,
+          typeof error === "string" ? error : "",
+        );
       }
       if (argv[0] === "profile" && argv[1] === "list") return callback(null, JSON.stringify({ profiles: [savedProfile] }), "");
       if (argv[0] === "workspace" && argv[1] === "list") return callback(null, JSON.stringify({ workspaces: [] }), "");
@@ -1916,6 +1922,102 @@ test("settings page blocks writes and starts until agent-workspace-linux reports
     assert.equal(findNode(tree, (node) => node.props?.role === "alert"), null, `${version} passes the gate`);
     assert.deepEqual(gatedButtonStates(tree), Object.fromEntries(GATED_BUTTONS.map((label) => [label, false])));
   }
+});
+
+test("settings page distinguishes missing commands, timeouts and failed version checks", async () => {
+  for (const [error, stdout, expected] of [
+    [Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }), "", /not found/i],
+    [Object.assign(new Error("Command failed"), { killed: true, signal: "SIGTERM" }), "", /timed out/i],
+    [Object.assign(new Error("permission denied"), { code: "EACCES" }), "", /could not check.*permission denied/i],
+    [null, "unexpected output\n", /could not check.*unrecognized version output/i],
+  ]) {
+    const { post } = versionGateBridge([error, stdout]);
+    const harness = createSettingsRenderHarness(post, { version: null });
+    for (const effect of harness.render().effects) effect();
+    await settle();
+    const tree = harness.render().tree;
+    const message = nodeText(findNode(tree, (node) => node.props?.role === "alert"));
+    assert.match(message, expected);
+    assert.match(message, /\/tmp\/agent-workspace-linux/);
+    assert.doesNotMatch(message, /too old/i);
+    assert.deepEqual(gatedButtonStates(tree), Object.fromEntries(GATED_BUTTONS.map((label) => [label, true])));
+  }
+});
+
+test("installing from the page selects the installed binary instead of an older Cargo binary", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-agent-workspace-installed-command-"));
+  try {
+    for (const customPrefix of [false, true]) {
+      for (const installFails of [false, true]) {
+        const home = path.join(temp, `${customPrefix}-${installFails}`);
+        const cargoHome = path.join(home, ".cargo");
+        const prefix = customPrefix ? path.join(home, "npm-prefix") : path.join(home, ".local");
+        const oldBinary = path.join(cargoHome, "bin", "agent-workspace-linux");
+        const installedBinary = path.join(prefix, "bin", "agent-workspace-linux");
+        fs.mkdirSync(path.dirname(oldBinary), { recursive: true });
+        fs.writeFileSync(oldBinary, "#!/bin/sh\n", { mode: 0o755 });
+        const globalState = new Map([[SETTINGS_COMMAND_KEY, oldBinary]]);
+        const calls = [];
+        const { handlers } = buildBridgeHarness({
+          env: { HOME: home, CARGO_HOME: cargoHome, NPM_CONFIG_PREFIX: customPrefix ? prefix : "", CODEX_AGENT_WORKSPACE_BIN: "", PATH: "", XDG_DATA_HOME: path.join(home, "data") },
+          globalState,
+          execFile(command, args, options, callback) {
+            const argv = Array.from(args);
+            calls.push({ command, args: argv });
+            if (argv[0] === "install") {
+              if (installFails) return callback(new Error("npm install failed"), "", "registry unavailable");
+              fs.mkdirSync(path.dirname(installedBinary), { recursive: true });
+              fs.writeFileSync(installedBinary, "#!/bin/sh\n", { mode: 0o755 });
+              return callback(null, "installed\n", "");
+            }
+            if (argv[0] === "--version") return callback(null, `agent-workspace-linux ${command === oldBinary ? "0.5.1" : "0.6.0"}\n`, "");
+            if (argv[0] === "profile" && argv[1] === "list") return callback(null, '{"profiles":[]}', "");
+            if (argv[0] === "workspace" && argv[1] === "list") return callback(null, '{"workspaces":[]}', "");
+            callback(null, '{"ok":true}', "");
+          },
+        });
+        const post = async (method, request = {}) => {
+          const params = request.params || {};
+          if (method === "get-global-state") return { value: globalState.get(params.key) };
+          if (method === "set-global-state") { globalState.set(params.key, params.value); return { success: true }; }
+          return handlers[method](params);
+        };
+        const harness = createSettingsRenderHarness(post, { version: null });
+        for (const effect of harness.render().effects) effect();
+        await settle();
+        await findButton(harness.render().tree, "Install from npm").props.onClick();
+        await settle();
+        const tree = harness.render().tree;
+        if (installFails) {
+          assert.equal(globalState.get(SETTINGS_COMMAND_KEY), oldBinary);
+          assert.match(nodeText(findNode(tree, (node) => node.props?.role === "alert")), /installed: 0\.5\.1/);
+        } else {
+          assert.equal(globalState.get(SETTINGS_COMMAND_KEY), installedBinary);
+          assert.equal(calls.filter((call) => call.args[0] === "--version").at(-1).command, installedBinary);
+          assert.equal(findNode(tree, (node) => node.props?.role === "alert"), null);
+          assert.ok(findInput(tree, (node) => node.props.value === installedBinary), "Command shows the installed executable");
+        }
+      }
+    }
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("main bridge resolves npm's prefix when HOME and NPM_CONFIG_PREFIX are absent", async () => {
+  const prefix = path.join(os.tmpdir(), "npm-configured-prefix");
+  const calls = [];
+  const { handlers } = buildBridgeHarness({
+    env: { HOME: "", NPM_CONFIG_PREFIX: "", PATH: "" },
+    execFile(command, args, options, callback) {
+      calls.push(Array.from(args));
+      callback(null, args[0] === "prefix" ? `${prefix}\n` : "installed\n", "");
+    },
+  });
+  const response = await handlers["linux-agent-workspace"]({ action: "installRuntime" });
+  assert.equal(response.ok, true);
+  assert.deepEqual(calls, [["prefix", "-g"], ["install", "-g", "--prefix", prefix, "@agent-sh/agent-workspace-linux@>=0.6.0"]]);
+  assert.equal(response.json.command, path.join(prefix, "bin", "agent-workspace-linux"));
 });
 
 test("settings page Reconnect and Smoke test rerun the version gate", async () => {
