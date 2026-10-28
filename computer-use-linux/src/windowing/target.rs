@@ -13,7 +13,25 @@ pub async fn list_windows() -> Result<Vec<WindowInfo>> {
 }
 
 pub async fn focused_window() -> Result<Option<WindowInfo>> {
-    current_focused_window().await
+    Ok(focused_window_with_backend().await?.1)
+}
+
+/// The focused window together with the backend that answered, which is known
+/// even when no window has focus.
+pub async fn focused_window_with_backend() -> Result<(String, Option<WindowInfo>)> {
+    if let Some(window) = registry::focused_window_override().await {
+        return Ok((window.backend.clone(), Some(window)));
+    }
+
+    Ok(focused_in(list_windows().await?))
+}
+
+pub(crate) fn focused_in(windows: Vec<WindowInfo>) -> (String, Option<WindowInfo>) {
+    let backend = windows
+        .first()
+        .map(|window| window.backend.clone())
+        .unwrap_or_else(|| registry::UNAVAILABLE_BACKEND.to_string());
+    (backend, windows.into_iter().find(|window| window.focused))
 }
 
 pub async fn focus_window_target(target: &WindowTarget) -> Result<WindowFocusResult> {
@@ -25,9 +43,15 @@ pub async fn focus_window_target(target: &WindowTarget) -> Result<WindowFocusRes
     let requested_window = resolve_window_target(&windows, target)?.clone();
     ensure_backend_can_focus_target(target, &requested_window)?;
 
-    registry::activate_window(&requested_window).await?;
-
-    let focused_window = wait_for_focused_window(&requested_window).await;
+    // GNOME Shell's FocusApp selects an icon in the overview, not a window.
+    // Introspect can safely verify an already focused app, but cannot raise it.
+    let passive = requested_window.backend == registry::GNOME_SHELL_INTROSPECT_BACKEND;
+    let focused_window = if passive {
+        windows.into_iter().find(|window| window.focused)
+    } else {
+        registry::activate_window(&requested_window).await?;
+        wait_for_focused_window(&requested_window).await
+    };
     let exact_window_focused = focused_window
         .as_ref()
         .is_some_and(|window| window.window_id == requested_window.window_id);
@@ -41,8 +65,11 @@ pub async fn focus_window_target(target: &WindowTarget) -> Result<WindowFocusRes
         focused_window,
         exact_window_focused,
         app_focused,
-        note: "Computer Use activated the requested window through the available window backend, then verified focus through a fresh window query."
-            .to_string(),
+        note: if passive {
+            "GNOME Introspect only verifies current app focus. Focus the target manually or install the GNOME Shell extension to activate windows."
+        } else {
+            "Computer Use activated the requested window through the available window backend, then verified focus through a fresh window query."
+        }.to_string(),
     })
 }
 
@@ -57,17 +84,6 @@ pub(crate) fn ensure_backend_can_focus_target(
         );
     }
     Ok(())
-}
-
-async fn current_focused_window() -> Result<Option<WindowInfo>> {
-    if let Some(window) = registry::focused_window_override().await {
-        return Ok(Some(window));
-    }
-
-    Ok(list_windows()
-        .await?
-        .into_iter()
-        .find(|window| window.focused))
 }
 
 async fn wait_for_focused_window(requested_window: &WindowInfo) -> Option<WindowInfo> {

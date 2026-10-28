@@ -40,7 +40,7 @@ keyboard input without a focus event. It follows the same single-dispatch path
 with an explicit monitoring warning. A no-fixed-focus session can still dispatch
 without that PointerRoot warning.
 
-The embedded backend tracks Computer Use 0.7.27. WebKitGTK AT-SPI socket children are resolved through their well-known bus names, and bounded indexed action reads avoid stalled `GetActions` calls. Native action matching uses stable machine-readable `GetName` values, including for Qt controls. Failed desktop actions and intentional refusals map to MCP `isError: true`; a successful action remains successful when only its post-action observation fails.
+The embedded backend tracks Computer Use 0.7.31. WebKitGTK AT-SPI socket children are resolved through their well-known bus names, and bounded indexed action reads avoid stalled `GetActions` calls. Native action matching uses stable machine-readable `GetName` values, including for Qt controls. Failed desktop actions and intentional refusals map to MCP `isError: true`; a successful action remains successful when only its post-action observation fails.
 
 Explicit `x/y` clicks use screenshot capture pixels by default. On KWin Wayland, `coordinate_space: "atspi"` accepts a global AT-SPI screen point together with `element_index` or a semantic selector. Unsupported backends and ambiguous window ownership return an error before pointer input. An already-running desktop portal does not need an activation service file.
 
@@ -355,3 +355,16 @@ python3 computer-use-linux/scripts/x11_type_guard_test.py \
 ```
 
 This is a manual check; the script is not run by the default CI jobs.
+
+The v0.7.28 through v0.7.31 sync reports an unavailable window backend accurately,
+reuses desktop diagnostics for up to 30 seconds while refreshing accessibility
+on every observation, and wakes immediately when short commands exit. Failed
+actions and observations invalidate cached readiness; `doctor` always probes.
+
+On COSMIC Wayland, pointer input uses per-monitor portal streams instead of
+uinput absolute coordinates. EIS input waits for its devices to resume. Portal
+consent preserves the receiving target and focus is verified again before
+targeted input. Window crops use COSMIC window geometry and logical output
+origins. Mixed-monitor mapping has fixture coverage; physical mixed-monitor
+validation remains pending. GNOME Introspect verifies existing app focus without
+opening the overview; exact activation needs the GNOME extension.

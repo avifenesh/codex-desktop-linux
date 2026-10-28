@@ -5,7 +5,11 @@ use crate::atspi_tree::{
     AccessibilityNode, AccessibleAppSummary, Bounds, EditableTextSetOutcome, FocusProbe,
     FocusedElementSummary, ValueSetInvocation,
 };
-use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
+use crate::diagnostics::{
+    doctor_report, setup_accessibility_report, DoctorReport, ReadinessReport, SetupReport,
+    WindowingReport,
+};
+use crate::diagnostics_cache::DiagnosticsCache;
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
 use crate::remote_desktop::{
     click as portal_click, drag as portal_drag, keysyms_for_text, press_key_chord,
@@ -23,9 +27,10 @@ use crate::windowing::backends::kwin::{
 };
 use crate::windowing::registry;
 use crate::windows::{
-    focus_window_target, focused_window, list_windows, resolve_window_target,
-    window_permission_hint, WindowFocusResult, WindowInfo, WindowTarget,
+    focus_window_target, focused_window, focused_window_with_backend, list_windows,
+    resolve_window_target, window_permission_hint, WindowFocusResult, WindowInfo, WindowTarget,
     GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND, KWIN_BACKEND,
+    UNAVAILABLE_BACKEND,
 };
 use crate::ydotool;
 use anyhow::{Context, Result};
@@ -129,6 +134,23 @@ pub struct ComputerUseLinux {
     indicator: Arc<crate::indicator::Indicator>,
     /// Private files for trees too large to return inline; removed on exit.
     tree_spiller: Arc<crate::tree_spill::TreeSpiller>,
+    /// Diagnostics behind get_app_state's readiness block. Failed observations,
+    /// failed actions, and setup tools invalidate it; the doctor tool bypasses
+    /// it.
+    diagnostics: Arc<DiagnosticsCache<DoctorReport>>,
+    accessibility_check: AccessibilityCheck,
+}
+
+/// The live check get_app_state compares a cached report's
+/// `can_build_accessibility_tree` against. Tests swap it to agree with their
+/// fixture report instead of reading the desktop running them.
+#[derive(Clone, Copy)]
+struct AccessibilityCheck(fn() -> bool);
+
+impl Default for AccessibilityCheck {
+    fn default() -> Self {
+        Self(crate::diagnostics::can_build_accessibility_tree_now)
+    }
 }
 
 fn sanitize_unsigned_integer_formats(value: &mut serde_json::Value) {
@@ -239,11 +261,11 @@ impl ComputerUseLinux {
         )
     )]
     async fn setup_accessibility(&self) -> Json<SetupReport> {
-        Json(
-            tokio::task::spawn_blocking(setup_accessibility_report)
-                .await
-                .expect("accessibility setup task panicked"),
-        )
+        let report = tokio::task::spawn_blocking(setup_accessibility_report)
+            .await
+            .expect("accessibility setup task panicked");
+        self.diagnostics.invalidate();
+        Json(report)
     }
 
     #[tool(
@@ -257,7 +279,9 @@ impl ComputerUseLinux {
         )
     )]
     async fn setup_window_targeting(&self) -> Json<WindowTargetingSetupReport> {
-        Json(setup_window_targeting_report().await)
+        let report = setup_window_targeting_report().await;
+        self.diagnostics.invalidate();
+        Json(report)
     }
 
     #[tool(
@@ -273,7 +297,10 @@ impl ComputerUseLinux {
     async fn list_apps(&self) -> Json<ListAppsOutput> {
         let (accessible_apps, accessibility_error) = match list_accessible_apps(50).await {
             Ok(apps) => (apps, None),
-            Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+            Err(error) => {
+                self.diagnostics.invalidate();
+                (Vec::new(), Some(format!("{error:#}")))
+            }
         };
 
         Json(ListAppsOutput {
@@ -317,7 +344,11 @@ impl ComputerUseLinux {
         )
     )]
     async fn list_windows(&self) -> Json<ListWindowsOutput> {
-        Json(window_list_output().await)
+        let output = window_list_output().await;
+        if output.error.is_some() {
+            self.diagnostics.invalidate();
+        }
+        Json(output)
     }
 
     #[tool(
@@ -331,9 +362,8 @@ impl ComputerUseLinux {
         )
     )]
     async fn focused_window(&self) -> Json<FocusedWindowOutput> {
-        match focused_window().await {
-            Ok(window) => {
-                let backend = window_backend(window.as_ref().into_iter());
+        match focused_window_with_backend().await {
+            Ok((backend, window)) => {
                 Json(FocusedWindowOutput {
                     backend,
                     focused_window: window,
@@ -345,9 +375,10 @@ impl ComputerUseLinux {
                 })
             }
             Err(error) => {
+                self.diagnostics.invalidate();
                 let error = format!("{error:#}");
                 Json(FocusedWindowOutput {
-                    backend: GNOME_SHELL_INTROSPECT_BACKEND.to_string(),
+                    backend: UNAVAILABLE_BACKEND.to_string(),
                     focused_window: None,
                     permissions_hint: window_permission_hint(&error),
                     error: Some(error),
@@ -404,7 +435,7 @@ impl ComputerUseLinux {
                 Json(ActivateWindowOutput {
                     ok: false,
                     implemented: true,
-                    backend: GNOME_SHELL_INTROSPECT_BACKEND.to_string(),
+                    backend: UNAVAILABLE_BACKEND.to_string(),
                     focus: None,
                     permissions_hint: window_permission_hint(&error),
                     error: Some(error),
@@ -439,11 +470,27 @@ impl ComputerUseLinux {
 
     async fn app_state(&self, params: GetAppStateParams) -> Result<CallToolResult, ErrorData> {
         let verbose = params.verbose.unwrap_or(false);
-        let mut diagnostics = tokio::task::spawn_blocking(doctor_report)
-            .await
-            .expect("diagnostics task panicked");
-        let (window_context, window_error, window_permissions_hint, window_enumerated) =
-            self.resolve_window_context(&params).await;
+        // A clone: this call's screenshot result is recorded on it, not on the
+        // cached report.
+        let (mut diagnostics, mut probed) = self.diagnostics.report_and_probed(verbose).await;
+        // The tree gate below must see accessibility switched on or off within
+        // the TTL.
+        if !probed {
+            let can_build_now = tokio::task::spawn_blocking(self.accessibility_check.0)
+                .await
+                .unwrap_or(false);
+            if can_build_now != diagnostics.readiness.can_build_accessibility_tree {
+                diagnostics = self.diagnostics.report(true).await;
+                probed = true;
+            }
+        }
+        let (
+            window_context,
+            window_error,
+            window_permissions_hint,
+            window_enumerated,
+            failed_window_backends,
+        ) = self.resolve_window_context(&params).await;
         let (max_nodes, max_depth) =
             crate::atspi_tree::snapshot_limits(params.max_nodes, params.max_depth);
         let include_screenshot = params.include_screenshot.unwrap_or(true);
@@ -460,6 +507,7 @@ impl ComputerUseLinux {
         let app_filter = self
             .resolve_accessibility_app_filter(&params, window_context.as_ref(), window_enumerated)
             .await;
+        let mut screenshot_captured = None;
         let (screenshot, screenshot_error) = if include_screenshot {
             let result: Result<ScreenshotCapture> = async {
                 let _pipeline = crate::screenshot::screenshot_pipeline_permit().await?;
@@ -467,7 +515,7 @@ impl ComputerUseLinux {
                     let _hold = self.indicator.hold_for_capture().await?;
                     capture_screenshot_raw().await
                 };
-                diagnostics.readiness.record_screenshot_result(raw.is_ok());
+                screenshot_captured = Some(raw.is_ok());
                 let raw = raw?;
                 self.cache_desktop_size(raw.width, raw.height);
                 let crop = if let Some(window) = window_context.as_ref() {
@@ -498,7 +546,7 @@ impl ComputerUseLinux {
         let mut tree_root_pid = None;
         let mut accessibility_tree_truncated = false;
         let mut shell_only_note = None;
-        let (accessibility_tree, accessibility_tree_raw_count, accessibility_error) =
+        let (accessibility_tree, accessibility_tree_raw_count, accessibility_error, tree_read) =
             if diagnostics.readiness.can_build_accessibility_tree {
                 let target_pid = accessibility_snapshot_target_pid(
                     app_filter.as_deref(),
@@ -523,9 +571,14 @@ impl ComputerUseLinux {
                             accessibility_tree_truncated,
                         );
                         shell_only_note = note;
-                        (nodes, raw_count, None)
+                        let read = if raw_count == 0 {
+                            TreeRead::Failed
+                        } else {
+                            TreeRead::Nodes
+                        };
+                        (nodes, raw_count, None, read)
                     }
-                    Err(error) => (Vec::new(), 0, Some(format!("{error:#}"))),
+                    Err(error) => (Vec::new(), 0, Some(format!("{error:#}")), TreeRead::Failed),
                 }
             } else {
                 (
@@ -535,8 +588,36 @@ impl ComputerUseLinux {
                         "GNOME accessibility is disabled; call setup_accessibility first."
                             .to_string(),
                     ),
+                    TreeRead::AccessibilityOff,
                 )
             };
+        let observed = AppStateObservation {
+            screenshot_failed: screenshot_error.is_some(),
+            window: match (&window_context, &window_error) {
+                (_, Some(_)) => WindowLookup::Failed,
+                (Some(_), None) => WindowLookup::Resolved,
+                (None, None) => WindowLookup::NotRequested,
+            },
+            failed_window_backends: &failed_window_backends,
+            tree: tree_read,
+        };
+        if let Some(contradiction) =
+            readiness_contradiction(&diagnostics.readiness, &diagnostics.windowing, observed)
+        {
+            // Readiness is what explains this observation, so it must describe
+            // the desktop as this call found it, not a cached report from
+            // before.
+            if !probed {
+                diagnostics = self.diagnostics.report(true).await;
+            }
+            if contradiction == Contradiction::Failure {
+                // After the refresh, so the next call probes again.
+                self.diagnostics.invalidate();
+            }
+        }
+        if let Some(captured) = screenshot_captured {
+            diagnostics.readiness.record_screenshot_result(captured);
+        }
         if accessibility_error.is_none() {
             // Record a pid only when the tree's roots were matched by it. A pid
             // with no AT-SPI root falls back to every app, or to an app-name
@@ -662,7 +743,10 @@ impl ComputerUseLinux {
     async fn screenshot(&self, Parameters(params): Parameters<ScreenshotParams>) -> CallToolResult {
         let result = match self.capture_screenshot(params).await {
             Ok(result) => result,
-            Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))]),
+            Err(error) => {
+                self.diagnostics.invalidate();
+                CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))])
+            }
         };
         self.indicator.action("screenshot").await;
         result
@@ -767,16 +851,19 @@ impl ComputerUseLinux {
     /// used by click/scroll/drag, independently of logical monitor scaling.
     /// Explicit backend overrides skip this device, including a cached one.
     async fn ensure_abs_pointer(&self) -> bool {
-        if env_flag_enabled_any(&[
-            "CU_DISABLE_ABS_POINTER",
-            "CODEX_COMPUTER_USE_DISABLE_ABS_POINTER",
-        ]) || env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
-            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER",
-        ]) || (env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
-            "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER",
-        ]) && self.is_wayland_session())
+        if self.is_cosmic_wayland_session()
+            || env_flag_enabled_any(&[
+                "CU_DISABLE_ABS_POINTER",
+                "CODEX_COMPUTER_USE_DISABLE_ABS_POINTER",
+            ])
+            || env_flag_enabled_any(&[
+                "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
+                "CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER",
+            ])
+            || (env_flag_enabled_any(&[
+                "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
+                "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER",
+            ]) && self.is_wayland_session())
         {
             return false;
         }
@@ -813,16 +900,19 @@ impl ComputerUseLinux {
         width: u32,
         height: u32,
     ) -> std::result::Result<bool, String> {
-        if env_flag_enabled_any(&[
-            "CU_DISABLE_ABS_POINTER",
-            "CODEX_COMPUTER_USE_DISABLE_ABS_POINTER",
-        ]) || env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
-            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER",
-        ]) || (env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
-            "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER",
-        ]) && self.is_wayland_session())
+        if self.is_cosmic_wayland_session()
+            || env_flag_enabled_any(&[
+                "CU_DISABLE_ABS_POINTER",
+                "CODEX_COMPUTER_USE_DISABLE_ABS_POINTER",
+            ])
+            || env_flag_enabled_any(&[
+                "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
+                "CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER",
+            ])
+            || (env_flag_enabled_any(&[
+                "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
+                "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER",
+            ]) && self.is_wayland_session())
         {
             return Ok(false);
         }
@@ -932,7 +1022,7 @@ impl ComputerUseLinux {
         }
         // Raise the target window first (if specified) so the click lands on the
         // intended app rather than whatever is stacked on top at that pixel.
-        let window_target = params.window_target();
+        let mut window_target = params.window_target();
         if params.relative == Some(true) && window_target.is_none() {
             return Json(ActionOutput {
                 ok: false,
@@ -942,8 +1032,8 @@ impl ComputerUseLinux {
                 received,
             });
         }
-        if let Some(target) = window_target {
-            let focus = match self.focus_target_for_input(&target).await {
+        if let Some(target) = window_target.as_ref() {
+            let focus = match self.focus_target_for_input(target).await {
                 Ok(focus) => focus,
                 Err(message) => {
                     return Json(ActionOutput {
@@ -998,6 +1088,9 @@ impl ComputerUseLinux {
                     .x
                     .zip(params.y)
                     .and_then(|(x, y)| coordinate_map.portal_point(x, y));
+            }
+            if let Some(focus) = focus.as_ref() {
+                window_target = Some(portal_focus_target(target, &focus.requested_window));
             }
             input_focus = focus;
         }
@@ -1269,6 +1362,11 @@ impl ComputerUseLinux {
         } else if self.should_prefer_portal_pointer_backend().await {
             match self.ensure_portal_pointer_session().await {
                 Ok(Some(session)) => {
+                    if let Some(target) = window_target.as_ref() {
+                        if let Err(message) = self.focus_target_for_input(target).await {
+                            return Json(action_result("click", Err(message), received));
+                        }
+                    }
                     let Some((portal_x, portal_y)) =
                         portal_target_point.or_else(|| self.logical_portal_point(&session, x, y))
                     else {
@@ -1532,7 +1630,7 @@ impl ComputerUseLinux {
         let mut target_pid = params.pid;
         // Raise/focus the target window first (parity with click) so wheel
         // events land on the intended app.
-        let window_target = params.window_target();
+        let mut window_target = params.window_target();
         if params.relative == Some(true) && window_target.is_none() {
             return Json(ActionOutput {
                 ok: false,
@@ -1542,8 +1640,8 @@ impl ComputerUseLinux {
                 received,
             });
         }
-        if let Some(target) = window_target {
-            let focus = match self.focus_target_for_input(&target).await {
+        if let Some(target) = window_target.as_ref() {
+            let focus = match self.focus_target_for_input(target).await {
                 Ok(focus) => focus,
                 Err(message) => {
                     return Json(ActionOutput {
@@ -1639,6 +1737,9 @@ impl ComputerUseLinux {
                     .x
                     .zip(params.y)
                     .and_then(|(x, y)| coordinate_map.portal_point(x, y));
+            }
+            if let Some(focus) = focus.as_ref() {
+                window_target = Some(portal_focus_target(target, &focus.requested_window));
             }
         }
         if params.x.is_none() && params.y.is_none() {
@@ -1774,6 +1875,11 @@ impl ComputerUseLinux {
         } else if self.should_prefer_portal_pointer_backend().await {
             match self.ensure_portal_pointer_session().await {
                 Ok(Some(session)) => {
+                    if let Some(target) = window_target.as_ref() {
+                        if let Err(message) = self.focus_target_for_input(target).await {
+                            return Json(action_result("scroll", Err(message), received));
+                        }
+                    }
                     let mapped_target = match (portal_target_point, target_point) {
                         (Some(point), _) => Some(Some(point)),
                         (None, Some((x, y))) => self.logical_portal_point(&session, x, y).map(Some),
@@ -2147,8 +2253,28 @@ impl ComputerUseLinux {
         let secret = self.typing_into_secret(focus.as_ref()).await;
         self.indicator.keys(&params.key, secret).await;
         if self.should_prefer_portal_keyboard_for_chords().await {
+            let portal_target = match self
+                .portal_keyboard_target(&params.window_target(), focus.as_ref())
+                .await
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    return Json(action_result_with_focus(
+                        "press_key",
+                        Err(format!("{error:#}")),
+                        received,
+                        focus,
+                    ))
+                }
+            };
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
+                    let focus = match self.focus_target_for_input(&portal_target).await {
+                        Ok(focus) => focus,
+                        Err(message) => {
+                            return Json(action_result("press_key", Err(message), received))
+                        }
+                    };
                     // KDE keeps physical keycodes: its keysym path is untested
                     // here, and #191 was reported against mutter.
                     let (modifiers, key) = portal_key_chord(&params.key)
@@ -2353,23 +2479,27 @@ impl ComputerUseLinux {
         }
         self.indicator.text("type_text", &params.text, secret).await;
         if self.should_prefer_kde_clipboard_text_backend() {
+            let portal_target = match self
+                .portal_keyboard_target(&window_target, focus.as_ref())
+                .await
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    return Json(action_result_with_focus(
+                        "type_text",
+                        Err(format!("{error:#}")),
+                        received,
+                        focus,
+                    ))
+                }
+            };
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
-                    let kde_focus = if window_target.has_target() {
-                        match self.focus_target_for_input(&window_target).await {
-                            Ok(focus) => focus,
-                            Err(message) => {
-                                return Json(ActionOutput {
-                                    ok: false,
-                                    implemented: true,
-                                    action: "type_text".to_string(),
-                                    message,
-                                    received,
-                                });
-                            }
+                    let kde_focus = match self.focus_target_for_input(&portal_target).await {
+                        Ok(focus) => focus,
+                        Err(message) => {
+                            return Json(action_result("type_text", Err(message), received))
                         }
-                    } else {
-                        focus.clone()
                     };
                     let paste_shortcut =
                         kde_clipboard_paste_shortcut(&window_target, kde_focus.as_ref()).await;
@@ -2449,74 +2579,50 @@ impl ComputerUseLinux {
             }
         }
         if self.should_prefer_portal_text_backend() {
-            let keysyms = match keysyms_for_text(&params.text) {
-                Ok(keysyms) => keysyms,
-                Err(error) => {
-                    return Json(action_result_with_focus(
-                        "type_text",
-                        Err(format!(
-                            "text cannot be represented by the selected portal keyboard backend; input was not replayed through another backend: {error:#}"
-                        )),
-                        received,
-                        focus,
-                    ));
+            let mut focus = focus;
+            let result = async {
+                let portal_target = self
+                    .portal_keyboard_target(&window_target, focus.as_ref())
+                    .await
+                    .map_err(|error| format!("{error:#}"))?;
+                let keysyms = keysyms_for_text(&params.text)
+                    .map_err(|error| format!("Literal text was not sent: {error:#}"))?;
+                if self.is_gnome_wayland_session() {
+                    crate::keyboard_keymap::validate_gnome_text(&params.text, &keysyms)
+                        .await
+                        .map_err(|error| format!("Literal text was not sent: {error:#}"))?;
                 }
-            };
-            if self.is_gnome_wayland_session() {
-                if let Err(error) =
-                    crate::keyboard_keymap::validate_gnome_text(&params.text, &keysyms).await
-                {
-                    return Json(action_result_with_focus(
-                        "type_text",
-                        Err(format!("Literal text was not sent: {error:#}")),
-                        received,
-                        focus,
-                    ));
-                }
+                let session = self
+                    .ensure_portal_keyboard_session()
+                    .await
+                    .map_err(|error| format!("Portal text input could not start: {error:#}"))?
+                    .ok_or_else(|| {
+                        "Portal keyboard input is unavailable; no text was sent.".to_string()
+                    })?;
+                focus = self.focus_target_for_input(&portal_target).await?;
+                type_text_with_keysyms(&session, &keysyms, Some(input_guard))
+                    .await
+                    .map_err(|error| {
+                        self.clear_portal_keyboard_session(&session);
+                        format!("{error:#}")
+                    })
             }
-            match self.ensure_portal_keyboard_session().await {
-                Ok(Some(session)) => {
-                    match type_text_with_keysyms(&session, &keysyms, Some(input_guard)).await {
-                        Ok(()) => {
-                            let notes = self.input_landing_notes(focus.as_ref(), true).await;
-                            return Json(with_notes(
-                                successful_action_with_focus(
-                                    "type_text",
-                                    "Action sent through the remote desktop portal.",
-                                    received,
-                                    focus,
-                                ),
-                                notes,
-                            ));
-                        }
-                        Err(error) => {
-                            self.clear_portal_keyboard_session(&session);
-                            return Json(action_result_with_focus(
-                                "type_text",
-                                Err(format!("{error:#}")),
-                                received,
-                                focus,
-                            ));
-                        }
-                    }
-                }
-                Ok(None) => {
-                    return Json(action_result_with_focus(
+            .await;
+            return Json(match result {
+                Ok(()) => {
+                    let notes = self.input_landing_notes(focus.as_ref(), true).await;
+                    with_notes(
+                        successful_action_with_focus(
                             "type_text",
-                            Err("the selected portal keyboard backend was unavailable; input was not replayed through another backend".to_string()),
+                            "Action sent through the remote desktop portal.",
                             received,
                             focus,
-                        ));
+                        ),
+                        notes,
+                    )
                 }
-                Err(error) => {
-                    return Json(action_result_with_focus(
-                            "type_text",
-                            Err(format!("remote desktop portal keyboard initialization failed; input was not replayed through another backend: {error:#}")),
-                            received,
-                            focus,
-                        ));
-                }
-            }
+                Err(error) => action_result_with_focus("type_text", Err(error), received, focus),
+            });
         }
         if self.should_prefer_xdotool_keyboard() {
             let delay_ms = xdotool_type_delay_ms();
@@ -2671,7 +2777,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.7.27",
+    version = "0.7.31",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes and optional include_tree=true to return post-action observation in the same tool call. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype uses a single literal argument after -- to avoid stdin keymap-refresh corruption; text is visible in process arguments, so confirmed password fields are rejected (use set_value). Terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call; split larger input into smaller calls or expose accessibility. Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again, or page through it with get_tree_page when files are not readable. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content. run_shell is absent unless CODEX_COMPUTER_USE_ENABLE_SHELL=1 or the standalone COMPUTER_USE_LINUX_ENABLE_SHELL=1 compatibility alias; when enabled it is same-user arbitrary host execution, not a sandbox, and hosts should require explicit approval."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -3595,6 +3701,76 @@ fn tree_page(nodes: &[AccessibilityNode], offset: usize) -> GetTreePageOutput {
 /// Bytes kept for a tree page's other fields.
 const TREE_PAGE_RESERVE: usize = 500;
 
+/// What one get_app_state call found, in the terms its readiness block makes
+/// claims about.
+#[derive(Debug, Clone, Copy)]
+struct AppStateObservation<'a> {
+    screenshot_failed: bool,
+    window: WindowLookup,
+    /// Window backends that failed in a lookup another backend answered.
+    failed_window_backends: &'a [&'static str],
+    tree: TreeRead,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowLookup {
+    NotRequested,
+    Resolved,
+    /// The window list failed, or listed no window matching the target.
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TreeRead {
+    Nodes,
+    /// The read failed or returned no nodes, as the post-action observation
+    /// also counts it.
+    Failed,
+    /// Not read, because this call found accessibility off, either in a probe
+    /// it ran or in the live check that agreed with the cached report.
+    AccessibilityOff,
+}
+
+/// How an observation disagrees with the readiness the call would report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Contradiction {
+    /// Something failed. The desktop may still be changing, so the next call
+    /// probes again as well, to see a recovery.
+    Failure,
+    /// Something worked that the readiness says cannot. The refreshed report
+    /// postdates that success, so the next call can reuse it. If the
+    /// contradiction persists, that call refreshes again.
+    Success,
+}
+
+/// Why a get_app_state call must refresh `readiness` before it reports it, or
+/// `None` when the readiness stands. `windowing` comes from the same report.
+fn readiness_contradiction(
+    readiness: &ReadinessReport,
+    windowing: &WindowingReport,
+    observed: AppStateObservation,
+) -> Option<Contradiction> {
+    // A backend the report already calls unhealthy fails as predicted. On KDE
+    // both GNOME backends fail before KWin answers, on every call.
+    let healthy_backend_failed = observed.failed_window_backends.iter().any(|backend| {
+        windowing
+            .backends
+            .get(*backend)
+            .is_some_and(|check| check.ok)
+    });
+    if observed.screenshot_failed
+        || observed.window == WindowLookup::Failed
+        || healthy_backend_failed
+        || observed.tree == TreeRead::Failed
+    {
+        Some(Contradiction::Failure)
+    } else if observed.window == WindowLookup::Resolved && !readiness.can_query_windows {
+        Some(Contradiction::Success)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct GetAppStateOutput {
     app_name_or_bundle_identifier: Option<String>,
@@ -4049,6 +4225,11 @@ impl ComputerUseLinux {
         ]) {
             return self.is_wayland_session();
         }
+        // COSMIC maps uinput absolute axes to the active output, not the
+        // desktop bounding box. Portal streams address each output directly.
+        if self.is_cosmic_wayland_session() {
+            return true;
+        }
         should_prefer_portal_backend_by_default(
             self.is_wayland_session(),
             ydotool_backend_available().await,
@@ -4169,6 +4350,13 @@ impl ComputerUseLinux {
         ))
     }
 
+    fn is_cosmic_wayland_session(&self) -> bool {
+        self.is_wayland_session()
+            && (env_contains("XDG_CURRENT_DESKTOP", "cosmic")
+                || env_contains("XDG_SESSION_DESKTOP", "cosmic")
+                || env_contains("DESKTOP_SESSION", "cosmic"))
+    }
+
     fn is_gnome_wayland_session(&self) -> bool {
         self.is_wayland_session()
             && (env_contains("XDG_CURRENT_DESKTOP", "gnome")
@@ -4242,10 +4430,37 @@ impl ComputerUseLinux {
         }
 
         let session = start_portal_pointer_session().await?;
+        self.capture_space_rect().await;
         if let Ok(mut cached) = self.portal_pointer_session.lock() {
             *cached = Some(session.clone());
         }
         Ok(Some(session))
+    }
+
+    async fn portal_keyboard_target(
+        &self,
+        target: &WindowTarget,
+        focus: Option<&WindowFocusResult>,
+    ) -> Result<WindowTarget> {
+        // Preserve the receiving target across consent. Pin the selected
+        // window when its backend supports exact focus; otherwise keep app focus.
+        if let Some(focus) = focus {
+            return Ok(portal_focus_target(target, &focus.requested_window));
+        }
+        if target.has_target() {
+            anyhow::bail!(
+                "Portal keyboard input requires verified target-window focus. No input was sent."
+            );
+        }
+        let window = focused_window().await?
+            .context("Portal keyboard input requires a focused window before consent; pass a window target. No input was sent.")?;
+        let target = portal_focus_target(target, &window);
+        if !target.has_target() {
+            anyhow::bail!(
+                "Portal keyboard input could not preserve the receiving app. No input was sent."
+            );
+        }
+        Ok(target)
     }
 
     async fn ensure_portal_keyboard_session(&self) -> Result<Option<PortalKeyboardSession>> {
@@ -4275,21 +4490,30 @@ impl ComputerUseLinux {
     async fn resolve_window_context(
         &self,
         params: &GetAppStateParams,
-    ) -> (Option<WindowInfo>, Option<String>, Option<String>, bool) {
+    ) -> (
+        Option<WindowInfo>,
+        Option<String>,
+        Option<String>,
+        bool,
+        Vec<&'static str>,
+    ) {
         let target = params.window_target();
         if !target.has_target() {
-            return (None, None, None, false);
+            return (None, None, None, false, Vec::new());
         }
 
-        match list_windows().await {
-            Ok(windows) => match resolve_window_target(&windows, &target) {
-                Ok(window) => (Some(window.clone()), None, None, true),
-                Err(error) => (None, Some(format!("{error:#}")), None, true),
-            },
+        match registry::list_windows_with_failures().await {
+            Ok(listing) => {
+                let (window, error) = match resolve_window_target(&listing.windows, &target) {
+                    Ok(window) => (Some(window.clone()), None),
+                    Err(error) => (None, Some(format!("{error:#}"))),
+                };
+                (window, error, None, true, listing.failed_backends)
+            }
             Err(error) => {
                 let error = format!("{error:#}");
                 let hint = window_permission_hint(&error);
-                (None, Some(error), hint, false)
+                (None, Some(error), hint, false, Vec::new())
             }
         }
     }
@@ -4336,6 +4560,7 @@ impl ComputerUseLinux {
             match list_windows().await {
                 Ok(windows) => resolve_window_target(&windows, target)?.clone(),
                 Err(error) => {
+                    self.diagnostics.invalidate();
                     if let Some(window) = fallback_window {
                         window.clone()
                     } else {
@@ -4479,13 +4704,23 @@ impl ComputerUseLinux {
                 {
                     list_windows()
                         .await
+                        .inspect_err(|_| self.diagnostics.invalidate())
                         .ok()
-                        .and_then(|windows| resolve_window_target(&windows, target).ok().cloned())
+                        .and_then(|windows| {
+                            resolve_window_target(&windows, target)
+                                .inspect_err(|_| self.diagnostics.invalidate())
+                                .ok()
+                                .cloned()
+                        })
                         .or_else(|| fallback_window.cloned())
                 } else if let Some(window) = fallback_window {
                     Some(window.clone())
                 } else {
-                    focused_window().await.ok().flatten()
+                    focused_window()
+                        .await
+                        .inspect_err(|_| self.diagnostics.invalidate())
+                        .ok()
+                        .flatten()
                 };
             }
             let target_pid = resolved_window
@@ -4585,7 +4820,29 @@ impl ComputerUseLinux {
             }
         }
 
+        if observation.screenshot_error.is_some()
+            || observation.accessibility_error.is_some()
+            || observation.accessibility_tree_raw_count == Some(0)
+        {
+            self.diagnostics.invalidate();
+        }
         (observation, screenshot_capture, notes)
+    }
+
+    /// `structured_tool_result` for an action. A failed action can mean the
+    /// desktop changed under the cached diagnostics, such as a dropped portal
+    /// session or a window backend that stopped answering, so any failure marks
+    /// them stale without classifying its reason.
+    fn action_tool_result<T: Serialize>(
+        &self,
+        output: T,
+        screenshot: Option<ScreenshotCapture>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let result = structured_tool_result(output, screenshot)?;
+        if result.is_error == Some(true) {
+            self.diagnostics.invalidate();
+        }
+        Ok(result)
     }
 
     async fn finish_action_output(
@@ -4595,7 +4852,7 @@ impl ComputerUseLinux {
         target: Option<&WindowTarget>,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok {
-            return structured_tool_result(
+            return self.action_tool_result(
                 ActionToolOutput {
                     action: output,
                     observation: PostActionObservation::default(),
@@ -4607,7 +4864,7 @@ impl ComputerUseLinux {
             .capture_post_action_observation(capture, target, None)
             .await;
         output = with_notes(output, notes);
-        structured_tool_result(
+        self.action_tool_result(
             ActionToolOutput {
                 action: output,
                 observation,
@@ -4623,7 +4880,7 @@ impl ComputerUseLinux {
         capture: &PostActionCaptureParams,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok && verified != Some(false) {
-            return structured_tool_result(
+            return self.action_tool_result(
                 SetValueToolOutput {
                     action: output,
                     verified,
@@ -4636,7 +4893,7 @@ impl ComputerUseLinux {
             .capture_post_action_observation(capture, None, None)
             .await;
         output = with_notes(output, notes);
-        structured_tool_result(
+        self.action_tool_result(
             SetValueToolOutput {
                 action: output,
                 verified,
@@ -4653,7 +4910,7 @@ impl ComputerUseLinux {
         target: &WindowTarget,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok {
-            return structured_tool_result(
+            return self.action_tool_result(
                 ActivateWindowToolOutput {
                     output,
                     message: None,
@@ -4671,7 +4928,7 @@ impl ComputerUseLinux {
             .capture_post_action_observation(capture, Some(target), fallback_window)
             .await;
         let message = (!notes.is_empty()).then(|| notes.join(" "));
-        structured_tool_result(
+        self.action_tool_result(
             ActivateWindowToolOutput {
                 output,
                 message,
@@ -4688,7 +4945,7 @@ impl ComputerUseLinux {
         target: &WindowTarget,
     ) -> Result<CallToolResult, ErrorData> {
         if !output.ok {
-            return structured_tool_result(
+            return self.action_tool_result(
                 WindowGeometryToolOutput {
                     output,
                     observation: PostActionObservation::default(),
@@ -4706,7 +4963,7 @@ impl ComputerUseLinux {
             }
             output.message.push_str(&note);
         }
-        structured_tool_result(
+        self.action_tool_result(
             WindowGeometryToolOutput {
                 output,
                 observation,
@@ -4775,6 +5032,14 @@ impl ComputerUseLinux {
                         .map(|monitor| (monitor.x, monitor.y, monitor.width, monitor.height))
                         .collect()
                 })
+        } else if window.backend == crate::windowing::backends::cosmic::COSMIC_WAYLAND_BACKEND {
+            Some(
+                crate::cosmic_helper::monitor_layout()
+                    .await?
+                    .into_iter()
+                    .map(|monitor| (monitor.x, monitor.y, monitor.width, monitor.height))
+                    .collect(),
+            )
         } else if window.backend == KWIN_BACKEND {
             Some(vec![
                 crate::windowing::backends::kwin::logical_desktop_rect()
@@ -4812,7 +5077,10 @@ impl ComputerUseLinux {
             .unwrap_or(&focus.requested_window);
         if !matches!(
             window.backend.as_str(),
-            GNOME_SHELL_EXTENSION_BACKEND | GNOME_SHELL_INTROSPECT_BACKEND | KWIN_BACKEND
+            GNOME_SHELL_EXTENSION_BACKEND
+                | GNOME_SHELL_INTROSPECT_BACKEND
+                | KWIN_BACKEND
+                | crate::windowing::backends::cosmic::COSMIC_WAYLAND_BACKEND
         ) {
             let full_capture_rect = window
                 .bounds
@@ -5188,11 +5456,15 @@ impl ComputerUseLinux {
             Ok(message) => {
                 // Re-query so the caller sees the compositor-final geometry
                 // (tiling constraints, minimum sizes, etc. may adjust it).
-                let window = list_windows().await.ok().and_then(|windows| {
-                    windows
-                        .into_iter()
-                        .find(|window| window.window_id == window_id)
-                });
+                let window = list_windows()
+                    .await
+                    .inspect_err(|_| self.diagnostics.invalidate())
+                    .ok()
+                    .and_then(|windows| {
+                        windows
+                            .into_iter()
+                            .find(|window| window.window_id == window_id)
+                    });
                 let mut message = message;
                 if let Some(bounds) = window.as_ref().and_then(|window| window.bounds.as_ref()) {
                     if let Some(note) = self.off_screen_note_for_bounds(bounds).await {
@@ -5639,7 +5911,8 @@ impl ComputerUseLinux {
         scope: &AccessibilityRecoveryScope,
     ) -> Result<RefreshedAccessibilitySnapshot> {
         let params = &scope.params;
-        let (window_context, _, _, window_enumerated) = self.resolve_window_context(params).await;
+        let (window_context, _, _, window_enumerated, _) =
+            self.resolve_window_context(params).await;
         let app_filter = self
             .resolve_accessibility_app_filter(params, window_context.as_ref(), window_enumerated)
             .await;
@@ -7355,6 +7628,24 @@ fn abs_pointer_clamp_note(landing: crate::abs_pointer::PointerLanding) -> Option
     })
 }
 
+fn portal_focus_target(target: &WindowTarget, window: &WindowInfo) -> WindowTarget {
+    if registry::backend_can_exact_focus(&window.backend) {
+        WindowTarget {
+            window_id: Some(window.window_id),
+            ..Default::default()
+        }
+    } else if target.has_target() {
+        // GNOME Introspect can activate an app, but cannot activate a specific
+        // window. Preserve the caller's app-level focus contract there.
+        target.clone()
+    } else {
+        WindowTarget {
+            app_id: window.app_id.clone(),
+            ..Default::default()
+        }
+    }
+}
+
 fn focus_satisfies_target(focus: &WindowFocusResult, target: &WindowTarget) -> bool {
     if target.requires_exact_focus() {
         focus.exact_window_focused
@@ -7379,7 +7670,7 @@ async fn window_list_output() -> ListWindowsOutput {
         Err(error) => {
             let error = format!("{error:#}");
             ListWindowsOutput {
-                backend: GNOME_SHELL_INTROSPECT_BACKEND.to_string(),
+                backend: UNAVAILABLE_BACKEND.to_string(),
                 windows: Vec::new(),
                 permissions_hint: window_permission_hint(&error),
                 error: Some(error),
@@ -7394,7 +7685,7 @@ fn window_backend<'a>(windows: impl Iterator<Item = &'a WindowInfo>) -> String {
     windows
         .map(|window| window.backend.clone())
         .next()
-        .unwrap_or_else(|| GNOME_SHELL_INTROSPECT_BACKEND.to_string())
+        .unwrap_or_else(|| UNAVAILABLE_BACKEND.to_string())
 }
 
 fn absolute_mousemove_args(x: i32, y: i32) -> Vec<String> {
@@ -8739,7 +9030,7 @@ fn looks_like_desktop_app(name: &str, command: &str) -> bool {
 mod tests {
     use super::*;
     use crate::atspi_tree::{AccessibilityAction, Bounds};
-    use crate::windows::{WindowBounds, GNOME_SHELL_EXTENSION_BACKEND};
+    use crate::windows::{WindowBounds, GNOME_SHELL_EXTENSION_BACKEND, NIRI_BACKEND};
     use std::os::unix::fs::PermissionsExt;
 
     /// Restores an environment variable when a test ends, including on panic.
@@ -9552,6 +9843,450 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
         );
     }
 
+    /// A server whose diagnostics probe labels each report with its run number
+    /// in `recommended_next_step`, so a result shows which run it came from.
+    /// Each run, and the live accessibility check, read `accessibility_enabled`.
+    /// Each run reads `windows_available` for whether a window backend answers.
+    pub(super) fn server_with_labelled_diagnostics(
+        accessibility_enabled: fn() -> bool,
+        windows_available: fn() -> bool,
+    ) -> (ComputerUseLinux, Arc<std::sync::atomic::AtomicUsize>) {
+        server_with_labelled_reports(accessibility_enabled, move || {
+            crate::diagnostics::tests::doctor_report_fixture(
+                accessibility_enabled(),
+                windows_available(),
+            )
+        })
+    }
+
+    /// Like `server_with_labelled_diagnostics`, with each probe's report built
+    /// by `report`.
+    pub(super) fn server_with_labelled_reports(
+        accessibility_enabled: fn() -> bool,
+        report: impl Fn() -> DoctorReport + Send + Sync + 'static,
+    ) -> (ComputerUseLinux, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&runs);
+        let probe = move || {
+            let run = counter.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut report = report();
+            report.readiness.recommended_next_step = format!("probe run {run}");
+            report
+        };
+        let server = ComputerUseLinux {
+            diagnostics: Arc::new(DiagnosticsCache::new(
+                Arc::new(probe),
+                Duration::from_secs(3600),
+            )),
+            accessibility_check: AccessibilityCheck(accessibility_enabled),
+            ..Default::default()
+        };
+        (server, runs)
+    }
+
+    pub(super) async fn app_state_value(
+        server: &ComputerUseLinux,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let params: GetAppStateParams = serde_json::from_value(params).unwrap();
+        server
+            .app_state(params)
+            .await
+            .unwrap()
+            .structured_content
+            .unwrap()
+    }
+
+    #[test]
+    fn readiness_is_refreshed_only_when_an_observation_contradicts_it() {
+        use crate::windowing::registry::{
+            GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND, KWIN_BACKEND,
+        };
+        use Contradiction::{Failure, Success};
+        let cached = |can_build_accessibility_tree: bool, can_query_windows: bool| {
+            crate::diagnostics::tests::doctor_report_fixture(
+                can_build_accessibility_tree,
+                can_query_windows,
+            )
+        };
+        let backends = |health: &[(&str, bool)]| {
+            let mut report = cached(true, true);
+            for (backend, ok) in health {
+                report.windowing.backends.insert(
+                    backend.to_string(),
+                    crate::diagnostics::Check {
+                        ok: *ok,
+                        detail: String::new(),
+                    },
+                );
+            }
+            report
+        };
+        let observed = |screenshot_failed, window, tree| AppStateObservation {
+            screenshot_failed,
+            window,
+            failed_window_backends: &[],
+            tree,
+        };
+        let resolved_after_failures = |failed_window_backends| AppStateObservation {
+            screenshot_failed: false,
+            window: WindowLookup::Resolved,
+            failed_window_backends,
+            tree: TreeRead::Nodes,
+        };
+        let cases = [
+            (
+                "everything worked as the readiness says",
+                cached(true, true),
+                observed(false, WindowLookup::Resolved, TreeRead::Nodes),
+                None,
+            ),
+            (
+                "a screenshot failed",
+                cached(true, true),
+                observed(true, WindowLookup::NotRequested, TreeRead::Nodes),
+                Some(Failure),
+            ),
+            (
+                "a window lookup failed",
+                cached(true, true),
+                observed(false, WindowLookup::Failed, TreeRead::Nodes),
+                Some(Failure),
+            ),
+            (
+                "a window lookup failed where the readiness says it would",
+                cached(true, false),
+                observed(false, WindowLookup::Failed, TreeRead::Nodes),
+                Some(Failure),
+            ),
+            (
+                "the tree read failed or found no nodes",
+                cached(true, true),
+                observed(false, WindowLookup::NotRequested, TreeRead::Failed),
+                Some(Failure),
+            ),
+            (
+                "the tree was skipped because this call found accessibility off",
+                cached(false, true),
+                observed(
+                    false,
+                    WindowLookup::NotRequested,
+                    TreeRead::AccessibilityOff,
+                ),
+                None,
+            ),
+            (
+                "a failure alongside the expected skip",
+                cached(false, true),
+                observed(true, WindowLookup::NotRequested, TreeRead::AccessibilityOff),
+                Some(Failure),
+            ),
+            (
+                "a window resolved where the readiness says none can be listed",
+                cached(false, false),
+                observed(false, WindowLookup::Resolved, TreeRead::AccessibilityOff),
+                Some(Success),
+            ),
+            (
+                "no window was requested where the readiness says none can be listed",
+                cached(true, false),
+                observed(false, WindowLookup::NotRequested, TreeRead::Nodes),
+                None,
+            ),
+            (
+                "a backend the cached report calls healthy failed before another answered",
+                backends(&[(GNOME_SHELL_EXTENSION_BACKEND, true)]),
+                resolved_after_failures(&[GNOME_SHELL_EXTENSION_BACKEND]),
+                Some(Failure),
+            ),
+            (
+                "backends the cached report calls unhealthy failed before KWin answered",
+                backends(&[
+                    (GNOME_SHELL_EXTENSION_BACKEND, false),
+                    (GNOME_SHELL_INTROSPECT_BACKEND, false),
+                    (KWIN_BACKEND, true),
+                ]),
+                resolved_after_failures(&[
+                    GNOME_SHELL_EXTENSION_BACKEND,
+                    GNOME_SHELL_INTROSPECT_BACKEND,
+                ]),
+                None,
+            ),
+        ];
+        for (case, cached, observed, expected) in cases {
+            assert_eq!(
+                readiness_contradiction(&cached.readiness, &cached.windowing, observed),
+                expected,
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn app_state_calls_that_find_what_the_cache_predicts_reuse_one_report() {
+        use std::sync::atomic::Ordering;
+        // Accessibility is off in the fixture and in the live check, so every
+        // call skips the tree, as the cached report predicts, without touching
+        // the desktop.
+        let (server, runs) = server_with_labelled_diagnostics(|| false, || true);
+        for call in 1..=3 {
+            let state =
+                app_state_value(&server, serde_json::json!({"include_screenshot": false})).await;
+            assert!(
+                state["accessibility_error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("accessibility is disabled"),
+                "{state}"
+            );
+            assert_eq!(
+                state["readiness"]["recommended_next_step"], "probe run 1",
+                "call {call} reports the first call's report"
+            );
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "only the first call probed");
+    }
+
+    #[tokio::test]
+    async fn a_failed_action_makes_the_next_app_state_probe_again() {
+        use std::sync::atomic::Ordering;
+        // Accessibility is off as the cached report says, so the observation
+        // itself never asks for a probe.
+        let (server, runs) = server_with_labelled_diagnostics(|| false, || true);
+        server.diagnostics.report(false).await;
+
+        // No observation has cached a tree, so the index is stale and the
+        // action fails before it reaches the desktop.
+        let params = serde_json::from_value(serde_json::json!({"element_index": 3})).unwrap();
+        let result = server.perform_action(Parameters(params)).await.unwrap();
+        assert_eq!(result.is_error, Some(true));
+
+        let state =
+            app_state_value(&server, serde_json::json!({"include_screenshot": false})).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "the failed action forced a probe"
+        );
+        assert_eq!(state["readiness"]["recommended_next_step"], "probe run 2");
+    }
+
+    #[tokio::test]
+    async fn verbose_app_state_always_probes_and_refreshes_the_cache() {
+        use std::sync::atomic::Ordering;
+        let (server, runs) = server_with_labelled_diagnostics(|| false, || true);
+        server.diagnostics.report(false).await;
+
+        let verbose = app_state_value(
+            &server,
+            serde_json::json!({"include_screenshot": false, "verbose": true}),
+        )
+        .await;
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(verbose["readiness"]["recommended_next_step"], "probe run 2");
+        assert_eq!(
+            verbose["diagnostics"]["readiness"]["recommended_next_step"],
+            "probe run 2"
+        );
+
+        let next = app_state_value(&server, serde_json::json!({"include_screenshot": false})).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            next["readiness"]["recommended_next_step"], "probe run 2",
+            "the next call reuses the verbose call's report"
+        );
+    }
+
+    /// Runs `child` in a process whose busctl and gsettings answer the
+    /// accessibility probes from CUL_A11Y_ENABLED, which starts as true. The
+    /// AT-SPI bus they name has no socket, so every tree read fails.
+    fn run_accessibility_child(child: &str) {
+        let dir = std::env::temp_dir().join(format!(
+            "cul-a11y-{child}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+
+        // systemctl keeps session discovery off the desktop.
+        for program in ["busctl", "gsettings", "systemctl"] {
+            let path = dir.join(program);
+            std::fs::write(
+                &path,
+                r#"#!/bin/sh
+case "${0##*/} $*" in
+  systemctl*) exit 1 ;;
+  *GetAddress) echo "s \"unix:path=$HOME/no-a11y-bus\"" ;;
+  *IsEnabled|*toolkit-accessibility) echo "$CUL_A11Y_ENABLED" ;;
+  *) echo false ;;
+esac
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                &format!("server::tests::{child}"),
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("PATH", &dir)
+            .env("HOME", &dir)
+            .env("XDG_RUNTIME_DIR", &dir)
+            .env("DISPLAY", ":9876")
+            .env("WAYLAND_DISPLAY", "")
+            .env("XDG_SESSION_TYPE", "x11")
+            .env("CUL_A11Y_CHILD", "1")
+            .env("CUL_A11Y_ENABLED", "true")
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}/no-bus", dir.display()),
+            );
+        for key in [
+            "DESKTOP_SESSION",
+            "HYPRLAND_INSTANCE_SIGNATURE",
+            "XAUTHORITY",
+            "XDG_SESSION_DESKTOP",
+            "XDG_CURRENT_DESKTOP",
+        ] {
+            command.env(key, "a11y-child-test");
+        }
+
+        let output = crate::command_runner::output_blocking_with_timeout(
+            &mut command,
+            child,
+            Duration::from_secs(15),
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+            "{child} must execute its assertions"
+        );
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn a_failed_app_state_reports_fresh_readiness_and_the_next_call_probes_again() {
+        run_accessibility_child("failed_app_state_child");
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated environment subprocess; invoked by a_failed_app_state_reports_fresh_readiness_and_the_next_call_probes_again"]
+    async fn failed_app_state_child() {
+        use std::sync::atomic::Ordering;
+        assert_eq!(env::var("CUL_A11Y_CHILD").as_deref(), Ok("1"));
+        let (server, runs) = server_with_labelled_diagnostics(
+            crate::diagnostics::can_build_accessibility_tree_now,
+            || true,
+        );
+        server.diagnostics.report(false).await;
+
+        let state =
+            app_state_value(&server, serde_json::json!({"include_screenshot": false})).await;
+        let error = state["accessibility_error"].as_str().unwrap();
+        assert!(error.contains("failed to connect to AT-SPI bus"), "{error}");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "the failed call probed once"
+        );
+        assert_eq!(state["readiness"]["recommended_next_step"], "probe run 2");
+        assert!(state["diagnostics"].is_null());
+
+        // Every tree read fails here, so a second call would probe on its
+        // failure either way. Read what its start would read instead.
+        let (_, probed) = server.diagnostics.report_and_probed(false).await;
+        assert!(probed, "the next call probes again to see a recovery");
+    }
+
+    #[test]
+    fn app_state_sees_accessibility_switched_off_and_on_within_the_ttl() {
+        run_accessibility_child("accessibility_switch_child");
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated environment subprocess; invoked by app_state_sees_accessibility_switched_off_and_on_within_the_ttl"]
+    async fn accessibility_switch_child() {
+        use std::sync::atomic::Ordering;
+        assert_eq!(env::var("CUL_A11Y_CHILD").as_deref(), Ok("1"));
+        let (server, runs) = server_with_labelled_diagnostics(
+            crate::diagnostics::can_build_accessibility_tree_now,
+            || true,
+        );
+        let params = serde_json::json!({"include_screenshot": false});
+        let cached = server.diagnostics.report(false).await;
+        assert!(cached.readiness.can_build_accessibility_tree);
+
+        env::set_var("CUL_A11Y_ENABLED", "false");
+        let off = app_state_value(&server, params.clone()).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "switching off forced a probe"
+        );
+        assert_eq!(off["readiness"]["recommended_next_step"], "probe run 2");
+        assert_eq!(off["readiness"]["can_build_accessibility_tree"], false);
+        assert!(
+            off["accessibility_error"]
+                .as_str()
+                .unwrap()
+                .contains("accessibility is disabled"),
+            "{}",
+            off["accessibility_error"]
+        );
+
+        let still_off = app_state_value(&server, params.clone()).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "a call that finds accessibility off, as cached, keeps the cache"
+        );
+        assert_eq!(
+            still_off["readiness"]["recommended_next_step"],
+            "probe run 2"
+        );
+
+        env::set_var("CUL_A11Y_ENABLED", "true");
+        let on = app_state_value(&server, params).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            3,
+            "switching on forced a probe"
+        );
+        assert_eq!(on["readiness"]["recommended_next_step"], "probe run 3");
+        assert_eq!(on["readiness"]["can_build_accessibility_tree"], true);
+        assert!(
+            !on["accessibility_error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("accessibility is disabled"),
+            "the tree read must run: {}",
+            on["accessibility_error"]
+        );
+    }
+
     #[test]
     fn gnome_window_crop_scales_logical_bounds_to_capture_pixels() {
         let bounds = WindowBounds {
@@ -9829,6 +10564,14 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$CUL_POINTER_TEST_LOG"
             backend: GNOME_SHELL_EXTENSION_BACKEND.to_string(),
             terminal: None,
         }
+    }
+
+    #[test]
+    fn window_backend_names_the_backend_that_answered() {
+        let mut window = window_info(1, Some("Editor"), None, None, None);
+        window.backend = NIRI_BACKEND.to_string();
+        assert_eq!(window_backend(std::iter::once(&window)), NIRI_BACKEND);
+        assert_eq!(window_backend(std::iter::empty()), UNAVAILABLE_BACKEND);
     }
 
     #[test]
@@ -14430,6 +15173,29 @@ mod node_target_scope_tests {
 mod post_action_capture_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    type ToolCall<'a> =
+        std::pin::Pin<Box<dyn Future<Output = Result<CallToolResult, ErrorData>> + 'a>>;
+
+    fn arguments<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Parameters<T> {
+        Parameters(serde_json::from_value(value).unwrap())
+    }
+
+    /// Runs `action` against a freshly cached report, then reads readiness the
+    /// way get_app_state does. Returns the action's result and whether that
+    /// read had to probe again.
+    async fn readiness_probed_after(
+        server: &ComputerUseLinux,
+        probes: &AtomicUsize,
+        action: impl Future<Output = Result<CallToolResult, ErrorData>>,
+    ) -> (CallToolResult, bool) {
+        server.diagnostics.report(false).await;
+        let cached = probes.load(Ordering::SeqCst);
+        let result = action.await.unwrap();
+        server.diagnostics.report(false).await;
+        (result, probes.load(Ordering::SeqCst) != cached)
+    }
 
     fn solid_png(width: u32, height: u32) -> Vec<u8> {
         let img = image::RgbaImage::from_pixel(width, height, image::Rgba([32, 128, 192, 255]));
@@ -14665,6 +15431,27 @@ exit 1
         std::fs::set_permissions(&gnome_screenshot, std::fs::Permissions::from_mode(0o700))
             .unwrap();
 
+        // wmctrl answers only while CUL_WMCTRL_STATE names a file. It lists
+        // window 7, applies a resize, and fails every listing after the one
+        // that verified the resize.
+        let wmctrl = dir.join("wmctrl");
+        std::fs::write(
+            &wmctrl,
+            r#"#!/bin/sh
+[ -n "$CUL_WMCTRL_STATE" ] || exit 1
+read -r state < "$CUL_WMCTRL_STATE"
+case "$1:$state" in
+  -l:verified) exit 1 ;;
+  -l:resized) echo verified > "$CUL_WMCTRL_STATE"; size="40 30" ;;
+  -l:*) size="32 24" ;;
+  *) case "$*" in *" -e "*) echo resized > "$CUL_WMCTRL_STATE" ;; esac; exit 0 ;;
+esac
+echo "0x00000007 0 0 0 0 $size fixture.Fixture host Fixture"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&wmctrl, std::fs::Permissions::from_mode(0o700)).unwrap();
+
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args([
@@ -14722,7 +15509,12 @@ exit 1
     async fn post_action_capture_child() {
         assert_eq!(std::env::var("CUL_POST_ACTION_CHILD").as_deref(), Ok("1"));
         let log_path = std::path::PathBuf::from(std::env::var("CUL_POST_ACTION_LOG").unwrap());
-        let server = ComputerUseLinux::default();
+        // The fake desktop has a window backend exactly while wmctrl answers.
+        let (server, diagnostics_probes) = super::tests::server_with_labelled_diagnostics(
+            || false,
+            || std::env::var_os("CUL_WMCTRL_STATE").is_some(),
+        );
+        server.diagnostics.report(false).await;
 
         // 1. Successful click + post-action JPEG screenshot.
         let click_params: ClickParams = serde_json::from_value(serde_json::json!({
@@ -14760,6 +15552,12 @@ exit 1
             events, "xdotool\ngnome-screenshot\n",
             "action must execute strictly before post-action screenshot capture"
         );
+        server.diagnostics.report(false).await;
+        assert_eq!(
+            diagnostics_probes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a successful post-action capture keeps the cached diagnostics"
+        );
 
         // 2. Screenshot failure after a successful action must keep ok=true.
         std::fs::write(&log_path, "").unwrap();
@@ -14785,6 +15583,12 @@ exit 1
             .as_str()
             .unwrap()
             .contains("Post-action screenshot failed:"));
+        server.diagnostics.report(false).await;
+        assert_eq!(
+            diagnostics_probes.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a failed post-action capture makes the next readiness read probe again"
+        );
 
         // 3. Failed action (relative coordinates without a target) must not capture.
         std::fs::write(&log_path, "").unwrap();
@@ -14837,16 +15641,275 @@ exit 1
             .unwrap()
             .contains("Post-action screenshot failed:"));
 
-        // XTEST dispatch can succeed while a non-US or changing XKB map
-        // substitutes symbols. The fake display cannot monitor XKB, so both
-        // the warning and unavailable-detection note must survive capture.
+        // 5. A window capture that falls back to the activated window when the
+        // window list fails still makes the next readiness read probe again.
+        server.diagnostics.report(false).await;
+        let probes = diagnostics_probes.load(std::sync::atomic::Ordering::SeqCst);
+        let window: WindowInfo = serde_json::from_value(serde_json::json!({
+            "window_id": 7,
+            "bounds": {"x": 8, "y": 8, "width": 32, "height": 24},
+            "focused": true,
+            "hidden": false,
+            "backend": "test"
+        }))
+        .unwrap();
+        let window_capture: PostActionCaptureParams =
+            serde_json::from_value(serde_json::json!({"screenshot_after": "window"})).unwrap();
+        let activate_result = server
+            .finish_activate_window_output(
+                ActivateWindowOutput {
+                    ok: true,
+                    implemented: true,
+                    backend: "test".to_string(),
+                    focus: Some(WindowFocusResult {
+                        requested_window: window.clone(),
+                        focused_window: Some(window),
+                        exact_window_focused: true,
+                        app_focused: true,
+                        backend: "test".to_string(),
+                        note: String::new(),
+                    }),
+                    error: None,
+                    permissions_hint: None,
+                    received: None,
+                },
+                &window_capture,
+                &WindowTarget {
+                    window_id: Some(7),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let activate_structured = activate_result
+            .structured_content
+            .expect("structured activate_window content");
+        assert!(activate_structured.get("screenshot_error").is_none());
+        assert_eq!(
+            activate_structured["screenshot"]["cropped_to_window"],
+            serde_json::json!(true)
+        );
+        server.diagnostics.report(false).await;
+        assert_eq!(
+            diagnostics_probes.load(std::sync::atomic::Ordering::SeqCst),
+            probes + 1,
+            "a failed window list makes the next readiness read probe again"
+        );
+
+        // 6. Every action that fails, whatever the reason, makes the next
+        // readiness read probe again. Input commands fail or are missing, no
+        // window backend answers, and no observation has cached an element
+        // index.
+        std::env::set_var("CUL_POST_ACTION_FAIL_INPUT", "9");
+        let failed_actions: Vec<(&str, ToolCall<'_>)> = vec![
+            (
+                "click",
+                Box::pin(server.click(arguments(serde_json::json!({"x": 120, "y": 240})))),
+            ),
+            (
+                "type_text",
+                Box::pin(server.type_text(arguments(serde_json::json!({"text": "a"})))),
+            ),
+            (
+                "press_key",
+                Box::pin(server.press_key(arguments(serde_json::json!({"key": "Escape"})))),
+            ),
+            (
+                "scroll",
+                Box::pin(server.scroll(arguments(
+                    serde_json::json!({"x": 120, "y": 240, "direction": "down"}),
+                ))),
+            ),
+            (
+                "drag",
+                Box::pin(server.drag(arguments(serde_json::json!({
+                    "start_x": 10, "start_y": 10, "end_x": 40, "end_y": 40
+                })))),
+            ),
+            (
+                "perform_action",
+                Box::pin(server.perform_action(arguments(serde_json::json!({"element_index": 3})))),
+            ),
+            (
+                "set_value",
+                Box::pin(server.set_value(arguments(
+                    serde_json::json!({"element_index": 3, "value": "x"}),
+                ))),
+            ),
+            (
+                "activate_window",
+                Box::pin(server.activate_window(arguments(serde_json::json!({"window_id": 7})))),
+            ),
+            (
+                "move_window",
+                Box::pin(server.move_window(arguments(
+                    serde_json::json!({"window_id": 7, "x": 0, "y": 0}),
+                ))),
+            ),
+            (
+                "resize_window",
+                Box::pin(server.resize_window(arguments(
+                    serde_json::json!({"window_id": 7, "width": 40, "height": 30}),
+                ))),
+            ),
+        ];
+        for (tool, action) in failed_actions {
+            let (result, probed) =
+                readiness_probed_after(&server, &diagnostics_probes, action).await;
+            assert_eq!(
+                result.is_error,
+                Some(true),
+                "{tool} must fail here: {:?}",
+                result.structured_content
+            );
+            assert!(
+                probed,
+                "a failed {tool} makes the next readiness read probe again"
+            );
+        }
+        std::env::remove_var("CUL_POST_ACTION_FAIL_INPUT");
+
+        // 7. A resize that lands but whose geometry re-query finds no window
+        // backend stays ok and still makes the next readiness read probe again.
+        let wmctrl_state = log_path.with_file_name("wmctrl.state");
+        std::fs::write(&wmctrl_state, "").unwrap();
+        std::env::set_var("CUL_WMCTRL_STATE", &wmctrl_state);
+        let (result, probed) = readiness_probed_after(
+            &server,
+            &diagnostics_probes,
+            server.resize_window(arguments(
+                serde_json::json!({"window_id": 7, "width": 40, "height": 30}),
+            )),
+        )
+        .await;
+        std::env::remove_var("CUL_WMCTRL_STATE");
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["ok"], true, "{structured}");
+        assert!(structured["window"].is_null(), "{structured}");
+        assert!(
+            probed,
+            "a failed geometry re-query makes the next readiness read probe again"
+        );
+
+        // 8. A get_app_state whose window lookup fails reports readiness from a
+        // probe it ran itself, that report carries the call's own screenshot
+        // result, and the next call probes again. The raw capture succeeds
+        // before the unresolved target refuses the crop.
+        server.diagnostics.report(false).await;
+        let probes = diagnostics_probes.load(Ordering::SeqCst);
+        let state =
+            super::tests::app_state_value(&server, serde_json::json!({"window_id": 7})).await;
+        assert!(state["window_error"].is_string(), "{state}");
+        assert_eq!(
+            state["readiness"]["recommended_next_step"],
+            format!("probe run {}", probes + 1)
+        );
+        assert_eq!(state["readiness"]["screenshot_capture_status"], "verified");
+        let next = super::tests::app_state_value(
+            &server,
+            serde_json::json!({"include_screenshot": false}),
+        )
+        .await;
+        assert_eq!(
+            next["readiness"]["recommended_next_step"],
+            format!("probe run {}", probes + 2),
+            "the call after a failed one probes again"
+        );
+
+        // 9. A get_app_state that resolves a window the cached report says no
+        // backend can list reports refreshed readiness, and the next call
+        // reuses that report.
+        let cached = server.diagnostics.report(false).await;
+        assert!(!cached.readiness.can_query_windows);
+        std::fs::write(&wmctrl_state, "").unwrap();
+        std::env::set_var("CUL_WMCTRL_STATE", &wmctrl_state);
+        let probes = diagnostics_probes.load(Ordering::SeqCst);
+        let window_7 = serde_json::json!({"window_id": 7, "include_screenshot": false});
+        let state = super::tests::app_state_value(&server, window_7.clone()).await;
+        assert_eq!(state["window_context"]["window_id"], 7, "{state}");
+        assert_eq!(state["readiness"]["can_query_windows"], true, "{state}");
+        assert_eq!(
+            state["readiness"]["recommended_next_step"],
+            format!("probe run {}", probes + 1)
+        );
+        let next = super::tests::app_state_value(&server, window_7).await;
+        std::env::remove_var("CUL_WMCTRL_STATE");
+        assert_eq!(next["window_context"]["window_id"], 7, "{next}");
+        assert_eq!(
+            next["readiness"]["recommended_next_step"],
+            format!("probe run {}", probes + 1),
+            "the refreshed report already shows the window backend"
+        );
+
+        // 10. A window that wmctrl lists after the GNOME extension failed. A
+        // cached report that calls the extension healthy is refreshed for this
+        // call, and the next call probes again. One that calls it unhealthy,
+        // as on KDE, where it fails on every call, stays cached.
+        for (extension_ok, expected) in [
+            (true, ["probe run 2", "probe run 3"]),
+            (false, ["probe run 1", "probe run 1"]),
+        ] {
+            let (server, _) = super::tests::server_with_labelled_reports(
+                || false,
+                move || {
+                    let mut report = crate::diagnostics::tests::doctor_report_fixture(false, true);
+                    report.windowing.backends.insert(
+                        GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                        crate::diagnostics::Check {
+                            ok: extension_ok,
+                            detail: String::new(),
+                        },
+                    );
+                    report
+                },
+            );
+            server.diagnostics.report(false).await;
+            std::fs::write(&wmctrl_state, "").unwrap();
+            std::env::set_var("CUL_WMCTRL_STATE", &wmctrl_state);
+            let state = super::tests::app_state_value(
+                &server,
+                serde_json::json!({"window_id": 7, "include_screenshot": false}),
+            )
+            .await;
+            std::env::remove_var("CUL_WMCTRL_STATE");
+            assert_eq!(
+                state["window_context"]["backend"],
+                crate::windows::X11_BACKEND,
+                "{state}"
+            );
+            let next = super::tests::app_state_value(
+                &server,
+                serde_json::json!({"include_screenshot": false}),
+            )
+            .await;
+            assert_eq!(
+                [
+                    &state["readiness"]["recommended_next_step"],
+                    &next["readiness"]["recommended_next_step"],
+                ],
+                expected,
+                "cached report calls the failed GNOME extension healthy: {extension_ok}"
+            );
+        }
+
+        // The fake display cannot monitor XKB. Preserve xdotool compatibility
+        // and make the unavailable detection explicit, including after capture.
         std::fs::write(&log_path, "").unwrap();
         let params = serde_json::from_value(serde_json::json!({
             "text": "quotes '\"; : / date +%H:%M:%S",
             "screenshot_after": true
         }))
         .unwrap();
-        let result = server.type_text(Parameters(params)).await.unwrap();
+        let (result, probed) = readiness_probed_after(
+            &server,
+            &diagnostics_probes,
+            server.type_text(Parameters(params)),
+        )
+        .await;
+        assert!(
+            !probed,
+            "a successful type_text keeps the cached diagnostics"
+        );
         let structured = result.structured_content.unwrap();
         assert_eq!(structured["ok"], true);
         assert!(structured.get("screenshot").is_some());
@@ -14869,8 +15932,16 @@ exit 1
         );
 
         // The text-specific risk does not apply to named key dispatch.
-        let params = serde_json::from_value(serde_json::json!({"key": "Escape"})).unwrap();
-        let result = server.press_key(Parameters(params)).await.unwrap();
+        let (result, probed) = readiness_probed_after(
+            &server,
+            &diagnostics_probes,
+            server.press_key(arguments(serde_json::json!({"key": "Escape"}))),
+        )
+        .await;
+        assert!(
+            !probed,
+            "a successful press_key keeps the cached diagnostics"
+        );
         assert_eq!(result.structured_content.as_ref().unwrap()["ok"], true);
         assert!(!result.structured_content.unwrap()["message"]
             .as_str()
