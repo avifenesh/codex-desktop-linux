@@ -7,96 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- Synchronize the embedded Computer Use backend to standalone v0.7.24. Keep scoped semantic recovery, exact Unicode text verification, Qt native actions, KWin fractional-scale and dialog targeting, and single-dispatch X11 monitoring. Preserve Codex identities, Chrome integration and cancellation guards.
+- Synchronize the embedded Computer Use backend to standalone v0.7.24. Carry scoped semantic recovery, exact Unicode editable-text verification, Qt native actions, KWin fractional-scale and dialog targeting, and X11 dispatch monitoring. Preserve Codex identities, Chrome integration, avatar feedback and cancellation guards.
 
-- Sync the embedded Computer Use backend to standalone v0.7.7 as
-  `0.7.7-linux-alpha1`. Niri window listing and exact focus fall back to direct
-  IPC when `niri msg` is unavailable. Socket discovery requires an unambiguous
-  session match; bounds stay unknown when position or scale data is missing.
-
-- Synchronize the embedded backend to standalone v0.7.6 as
-  `0.7.6-linux-alpha1`. Portal `press_key` resolves modifiers and named keys
-  through the active keymap, so Ctrl shortcuts work with remapped modifiers.
-  Letters and digits retain physical US keycodes for non-Latin layouts, and
-  KDE retains physical keycodes for all chords (standalone #193, fixes #191).
-  The shared input-operation guard, cancellation cleanup, and avatar
-  notifications are preserved.
-- Synchronize the embedded backend to standalone v0.7.5 as
-  `0.7.5-linux-alpha1`. Native X11 `scroll` sends XTEST wheel buttons through
-  xdotool, so GTK 3 no longer drops the only wheel event of a call (standalone
-  #186). Opt-in `CODEX_COMPUTER_USE_PERSIST_REMOTE_DESKTOP=1` (standalone alias
-  `COMPUTER_USE_LINUX_PERSIST_REMOTE_DESKTOP=1`) persists the GNOME
-  remote-control grant through `RemoteDesktop.SelectDevices` and a single-use
-  restore token under `codex-computer-use-linux/` in the XDG state directory,
-  separate from the standalone binary's tokens (standalone #188). Codex
-  identities, DBus interfaces, and the extension screenshot route are
-  preserved.
-- Synchronize the embedded backend to standalone v0.7.4 as
-  `0.7.4-linux-alpha1`. v0.7.4 ships only standalone #178, which this copy
-  already carries, so the code is unchanged; the version follows the
-  standalone release. Remove `computer-use-linux/src/server.rs.orig`, a
-  leftover from applying the v0.7.3 port that was committed by mistake.
-- Synchronize the embedded backend to standalone v0.7.3 as
-  `0.7.3-linux-alpha1`. `click` and `scroll` refuse an element index taken
-  from another app's snapshot; post-input focus feedback says when the search
-  hit its limits or the app exposes no AT-SPI tree, instead of warning "no
-  focused element"; and portal pointer input on scaled GNOME Wayland sends
-  physical stream coordinates, so clicks no longer land at 1/scale. The
-  index check records a snapshot pid only when the tree's roots were selected
-  by that pid; a tree from an app-name fallback is checked node by node
-  against its owner on the accessibility bus (standalone #178). Codex
-  identities, DBus interfaces, and the extension screenshot route are
-  preserved.
-- Carry the standalone KDE terminal paste fix as `0.7.2-linux-alpha3`. KDE
-  clipboard paste sends Shift+Insert to xterm, uxterm, rxvt, urxvt, and
-  koi8rxterm, which have no Ctrl+Shift+V binding; Klipper sets the selection
-  too, so the new text pastes. A focused non-terminal widget inside a terminal
-  window, reported by that terminal's own AT-SPI app, switches to Ctrl+V. The
-  check reads the AT-SPI role enum, not the localized name. This is the
-  behavior of this repo's upstream #1413, now in the standalone crate.
-- Carry the standalone post-v0.7.2 spawn fix as `0.7.2-linux-alpha2`. Helper
-  launches (ydotool, wtype, xdotool, gnome-screenshot, and every supervised
-  command) retry a transient `ETXTBSY` ("Text file busy") for up to 75 ms, so
-  a helper being replaced no longer reads as missing and xdotool input no
-  longer falls back to ydotool for that reason. This also removes the
-  intermittent fake-helper test failures under the parallel suite.
-- Synchronize the embedded backend to standalone v0.7.2 as
-  `0.7.2-linux-alpha1`. `doctor` requires XDG portal methods before reporting
-  Screenshot, ScreenCast, or InputCapture, and readiness gains
-  `can_capture_screenshots`. Native X11 sessions gain a root-window `GetImage`
-  screenshot route and read EWMH window origins from the X server instead of
-  `wmctrl -lG`. The embedded crate adds the pure-Rust `x11rb` client. Codex
-  identities, DBus interfaces, the GNOME Shell extension screenshot route,
-  Chrome integration, and compositor behavior are preserved.
-- Synchronize the embedded backend to standalone v0.7.1 as
-  `0.7.1-linux-alpha1`. `get_app_state` now returns screenshot pixels as an
-  image content block instead of inline base64 JSON, X11 typing retains an
-  ordered per-character delay with Codex-first environment-variable naming,
-  and the embedded MCP dependency advances to rmcp 2.1. Codex identities,
-  DBus interfaces, Chrome integration, and compositor behavior are preserved.
-- Synchronize the embedded backend to standalone v0.7.0 as
-  `0.7.0-linux-alpha1`. `get_app_state` now reports `tree_scoped` and
-  `accessibility_tree_truncated`, appends a context-flood warning to `message`
-  when no app target narrowed the AT-SPI tree (with target-aware advice when a
-  passed `pid` or window target matched no AT-SPI root), derives truncation
-  from the traversal itself instead of a node-count heuristic, and documents
-  every scoping parameter in its schema, tool description, and server
-  instructions.
-  Codex identities, DBus interfaces, Chrome integration, and compositor
-  behavior are unchanged.
-- Synchronize the embedded backend enumeration to standalone v0.6.0 as
-  `0.6.0-linux-alpha1`, retaining Codex identities, DBus interfaces, Chrome
-  integration, and existing compositor behavior. The v0.6.0 implementation
-  changes were already carried by the preceding focused syncs.
-- Port the optional `complete_interaction` notification with Codex-first
-  environment-variable precedence and the standalone compatibility alias.
-
-- The embedded Computer Use backend is synchronized to standalone v0.4.10
-  post-release input fixes as `0.4.10-linux-alpha2`. Compatible Wayland
-  compositors now use the UTF-8-preserving `wtype` virtual-keyboard backend
-  when available, with bounded ydotool fallback and no replay after a launched
-  wtype failure; GNOME, KDE/Plasma, and COSMIC retain their existing guarded
-  paths.
+- Synchronize the embedded Computer Use backend from v0.4.9 to standalone
+  v0.7.6 as `0.7.6-linux-alpha1`. Carry the accessibility setup/guard, native
+  AT-SPI actions, X11 geometry and screenshots, bounded KWin transactions,
+  safe typing/cancellation, optional completion cue and portal persistence
+  changes. Portal keyboard chords resolve modifiers and named keys through
+  the live keymap on GNOME; letters/digits stay physical and KDE retains its
+  keycode path. Preserve Codex DBus, Chrome, identity and operation guards.
 
 - The launcher sends at most one anonymous `/app-launch` count per UTC day to
   the public GoatCounter dashboard so maintainers can gauge whether the
@@ -108,16 +27,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   updates automatically** setting. Turning it off keeps notification and DMG
   verification active while deferring local package builds until an explicit
   **Check for updates**.
-- The embedded Computer Use backend is synchronized to standalone v0.4.10 as
-  `0.4.10-linux-alpha1`. The port retains the Codex DBus, GNOME extension,
-  Chrome-host, and input replay-safety boundaries while adding bounded KWin
-  script transactions, stronger GNOME setup process cleanup, and explicit
-  requested-versus-emitted absolute-pointer coordinates.
-- The embedded Computer Use MCP now carries the standalone opt-in `run_shell`
-  tool. It remains absent unless `CODEX_COMPUTER_USE_ENABLE_SHELL=1` (or the
-  standalone `COMPUTER_USE_LINUX_ENABLE_SHELL=1` compatibility alias), preserves
-  Codex naming and DBus boundaries, clears ambient credentials, bounds execution
-  and output, and records command digests without becoming a sandbox.
 - The embedded Computer Use backend is synchronized to standalone v0.4.9 as
   `0.4.9-linux-alpha1`, including generic X11/EWMH window control, deep GTK4
   accessibility traversal, bounded queue and child-read work, X11 `xdotool`
@@ -156,6 +65,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- The app no longer stops at launch with "Organization settings could not be
+  loaded" on upstream 26.1021+. The remote-mobile-control patch added
+  `--remote-control` (or the `proxy` subcommand) to every app-server launch,
+  including the one-shot `--print-startup-config` check, which app-server
+  0.164 rejects. Startup checks now run without those arguments; the
+  long-running Desktop app-server still owns Remote Control.
 - The updater no longer leaks a ~2 GB `workspaces/<version>` directory per
   release under `~/.cache/codex-update-manager`. Cache cleanup only pruned
   superseded upstream `.deb` files, so every rebuilt candidate's extracted app

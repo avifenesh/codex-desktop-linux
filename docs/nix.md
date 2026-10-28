@@ -4,6 +4,15 @@ The flake downloads the official architecture-specific Linux package pinned in
 `nix/upstream-linux-packages.json`, verifies its hash through Nix, extracts the
 ELF payload, and wraps it with the required Nix libraries.
 
+The derivation and directory installer pass
+`--skip-oai-official-sig-verification` to the shared installer for that fixed
+input. Nix has already checked its pinned hash; sandboxed builds do not fetch
+live APT metadata to repeat signature verification. Build provenance records
+`signatureVerification: "skipped"` for this step. Pins are refreshed through
+signed metadata as described below. Ordinary local `.deb` builds outside these
+Nix entrypoints verify by default without prompting; only the explicit flag
+selects an unverified local build.
+
 These inputs are official Linux `.deb` files. Nix wraps the official runtime
 directly instead of replacing Electron or rebuilding upstream native modules.
 The derivation audits every ELF in that payload. Target-architecture glibc
@@ -190,7 +199,7 @@ nix build .#checks.$(nix eval --impure --raw --expr builtins.currentSystem).nix-
 Pins are updated from signed OpenAI APT metadata:
 
 ```bash
-scripts/ci/update-official-linux-pins.sh
+scripts/ci/update-nix-hashes.sh
 ```
 
 The automation checks both architectures. Do not hand-invent or bypass hashes.

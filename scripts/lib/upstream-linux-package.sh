@@ -14,6 +14,7 @@ map_upstream_architecture() {
 resolve_upstream_linux_package() {
     local metadata_path="$1"
     local architecture
+    local -a verifier_args=()
     architecture="$(map_upstream_architecture "$ARCH")"
 
     if [ -n "$PROVIDED_UPSTREAM_DEB_PATH" ]; then
@@ -21,8 +22,12 @@ resolve_upstream_linux_package() {
         UPSTREAM_DEB_PATH="$(realpath "$PROVIDED_UPSTREAM_DEB_PATH")"
         info "Using explicitly provided upstream Linux package: $UPSTREAM_DEB_PATH"
         validate_upstream_linux_package "$UPSTREAM_DEB_PATH" "$architecture"
-        write_local_upstream_metadata "$metadata_path" "$UPSTREAM_DEB_PATH" "$architecture"
-        return 0
+        if [ "${SKIP_OAI_OFFICIAL_SIG_VERIFICATION:-0}" -eq 1 ]; then
+            warn "Skipping OpenAI official signed-repository verification for this local package for this build"
+            write_local_upstream_metadata "$metadata_path" "$UPSTREAM_DEB_PATH" "$architecture"
+            return 0
+        fi
+        verifier_args=(--local-package "$UPSTREAM_DEB_PATH")
     fi
 
     info "Resolving official chatgpt/$architecture from signed stable APT metadata"
@@ -32,7 +37,8 @@ resolve_upstream_linux_package() {
             --metadata "$metadata_path" \
             --key-base64 "$SCRIPT_DIR/assets/openai-codex-linux-repository-key.gpg.base64" \
             --arch "$architecture" \
-            --repository "${CODEX_UPSTREAM_LINUX_REPOSITORY:-https://persistent.oaistatic.com/codex-app-prod/linux/deb}"
+            --repository "${CODEX_UPSTREAM_LINUX_REPOSITORY:-https://persistent.oaistatic.com/codex-app-prod/linux/deb}" \
+            "${verifier_args[@]}"
     )"
     validate_upstream_linux_package "$UPSTREAM_DEB_PATH" "$architecture"
 }
@@ -77,6 +83,7 @@ const metadata = {
   size: bytes.length,
   depends: field("Depends"),
   explicitlyProvided: true,
+  signatureVerification: "skipped",
 };
 fs.mkdirSync(path.dirname(metadataPath), { recursive: true });
 fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);

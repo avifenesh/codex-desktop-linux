@@ -16,7 +16,8 @@ resolve it through signed stable APT metadata rather than trusting the moving
    enabled features.
 4. If no core or feature ASAR descriptor is active, `resources/app.asar` is
    never unpacked and its SHA-256 must equal upstream. Otherwise a temporary
-   copy is patched, deterministically repacked, and reported.
+   copy is patched and reported; deterministic repacking happens only if a
+   descriptor reports changes. An unchanged report retains the official archive.
 5. Package builders transform the same staged tree into deb, RPM, pacman, a
    local Gentoo ebuild/payload, or
    AppImage output. Nix extracts the architecture-specific official package
@@ -42,6 +43,14 @@ convenience aliases only. Trust is derived from `InRelease`, then the digest of
 the architecture-specific `Packages` file, then the package SHA-256 recorded in
 that index. Wrong signatures, hashes, package names, versions, architectures,
 or incomplete payloads fail closed.
+
+Local input reuses package bytes while retaining signed verification by default.
+All builds verify without prompting or reading user input. Only
+`--skip-oai-official-sig-verification` selects the local exception.
+The exception retains structural
+checks and records `signatureVerification: "skipped"` in build provenance; it
+does not follow automatically from a signature or digest failure. Nix's offline
+builds use that explicit exception with their independently hash-verified pins.
 
 The upstream source/key setup and maintainer scripts are never copied into the
 custom package. This prevents an official package-manager transaction from
@@ -74,7 +83,7 @@ the official browser registry.
 | Optional feature framework | `scripts/lib/linux-features.*`, `linux-features/` |
 | ASAR descriptors and reports | `scripts/patches/`, `scripts/patch-linux-window-ui.js`, `scripts/lib/patch-report.js` |
 | Cross-format payload assembly | `scripts/lib/package-common.sh`, `packaging/` |
-| Native update state machine | `updater/src/`, `packaging/update-builder/` |
+| Native update state machine | `updater/src/`; rebuild payload: `scripts/lib/package-common.sh` |
 | Reproducible Nix packaging | `flake.nix`, `nix/` |
 | Upstream drift automation | `scripts/automation/upstream-linux-package-watchdog/`, `.github/workflows/upstream-build-app.yml` |
 
@@ -86,8 +95,10 @@ Quit-confirmation dialog and defers early shell-environment startup so browser
 initialization does not overwrite libuv's child-process signal handler. See the
 [core patch registry](../scripts/patches/core/README.md) for reproduction evidence
 and retirement criteria. Patch reports remain the candidate-acceptance contract.
-An enabled feature's missing or drifted required surface rejects promotion;
-disabled features do not participate.
+Enabled feature descriptors default to enforced acceptance even when their
+execution policy is optional: warnings or drift reject promotion unless an
+optional descriptor explicitly opts out with `enforceWhenEnabled: false`.
+Target/gate skips are not applicable; disabled feature modules are not loaded.
 
 The committed feature config is empty. Features stage declarative resources,
 runtime hooks, package hooks, or narrowly scoped ASAR descriptors. Native helper
@@ -121,9 +132,14 @@ user-authored plugins.
 ## Updates
 
 The Rust updater polls signed metadata, downloads into a
-version/architecture/SHA cache, runs the minimal packaged update-builder, and
-builds a sibling candidate. Atomic promotion happens only after the app exits.
-The previous managed artifact is retained for rollback. Legacy schema-v1
+version/architecture/SHA cache, and builds a native package in the configured
+workspace with the minimal packaged update-builder. After the managed app exits,
+it authorizes the package manager through `pkexec`, using a durable transaction
+and command-owner identity to reconcile interrupted installs. Package-manager
+failure can leave partial changes; this is distinct from the atomic sibling
+directory exchange used for manual generated-tree rebuilds. The previous
+managed package is retained for rollback. See [Updater](updater.md) for both
+workflows. Legacy schema-v1
 candidate state is reset without deleting installed or rollback packages. A
 schema-2 interrupted package transaction whose owner identity cannot survive a
 reboot is instead retained as failed evidence behind a manual-recovery barrier;
@@ -140,8 +156,9 @@ committed. See [Generated and runtime notes](agents/generated-and-runtime-notes.
 
 - The latest signed stable upstream package is the only supported baseline.
 - Without a required core patch or enabled ASAR feature, the clean ASAR hash
-  equals the official package hash. Required core changes are reported and
-  verified separately.
+  equals the hash of `resources/app.asar` inside the verified official package.
+  Required core and enabled feature changes are explained by the patch report;
+  an active descriptor does not imply that every build changes bytes.
 - Upstream package scripts and APT source configuration never enter the custom
   output.
 - `codex-desktop` package identity and **ChatGPT Community** display identity

@@ -18,7 +18,6 @@ const {
   LOCAL_DEFAULT_PATCH_MARKER,
   LOCAL_COMPOSER_CONFIG_MARKER,
   LOCAL_COMPOSER_RESOLVER_MARKER,
-  LOCAL_DRAFT_SELECTION_MARKER,
   SLIDER_PATCH_MARKER,
   applyCatalogPatch,
   applyExistingChatOptimisticPatch,
@@ -35,6 +34,8 @@ const {
   sliderAssetMatch,
   sliderPatchContract,
   upstreamDefaultSelectionAssetMatch,
+  upstreamResetEffectAssetMatch,
+  upstreamResetEffectContract,
 } = require("./patch.js");
 
 function context(presets) {
@@ -77,6 +78,25 @@ function powerSelectionResolverFixture(name = "Picker") {
   ].join("");
 }
 
+function upstreamResetEffectFixture(name = "ResetPowerPicker", memoized = false) {
+  const effect =
+    "E=()=>{if(!i){if(!C){b.current=null;return}x!=null&&S!=null&&b.current!==S&&(b.current=S,T(x))}}";
+  return [
+    `function ${name}(e){`,
+    "let{canRenderPowerPickerSurface:n,fallbackPowerSelection:r,isModelSettingsLoading:i,menuView:a,onReset:o,powerSelectionsWithXHigh:s,resetContextKey:c,selectedPowerSelectionWithXHigh:l,showXHighInSimplePicker:u}=e,",
+    "h=n&&s.length>0,v=resolveFallback({canInitializePowerPicker:h,fallbackPowerSelection:r,menuView:a,selectedPowerSelection:l,showXHighInSimplePicker:u});",
+    "let y=v,b=(0,React.useRef)(null),x=y?.id??null,S=x==null?null:`${c}:${x}`,C=!u&&h&&a===`simple`,w;",
+    "w=e=>{y?.id===e&&o(y)};let T=(0,React.useEffectEvent)(w),E;",
+    memoized
+      ? `cache[0]!==C||cache[4]!==i?(${effect},cache[0]=C,cache[4]=i,cache[1]=E):E=cache[1];`
+      : `${effect};`,
+    memoized
+      ? "let D;return cache[2]!==C?(D=[x,S,C,i],cache[2]=C,cache[3]=D):D=cache[3],(0,React.useEffect)(E,D),s}"
+      : "let D=[x,S,C,i];return(0,React.useEffect)(E,D),s}",
+    "function Next(){}",
+  ].join("");
+}
+
 function sliderFixture(name = "Wkr") {
   return [
     `function ${name}(e){`,
@@ -107,7 +127,7 @@ function localComposerFixture(name = "LocalComposer") {
     "let He=available.find(Wqr),Ue=Power(available,{includeUltraInSlider:true,sliderModelsConfig:serverConfig,stripGptPrefix:true}),",
     "Ge=Ue,Ke=zae(Ge,He==null?void 0:`${He.model}:${He.defaultReasoningEffort}`);",
     "picker({resetContextKey:JSON.stringify([conversationId,hostId,host.cwd])});",
-    "composer.mode.local.model.custom;let scratch=(0,React.useRef)(null),choose=function(e,t,n){let callback=()=>{};return draftSelection==null?select(normalize(e),t,callback,n):draftSelection.selectModelAndReasoningEffort(normalize(e),t,callback)};",
+    "composer.mode.local.model.custom;async function choose(e,t){let n=normalize(e);await(draftSelection==null?select(n,t):draftSelection.setModelAndReasoningEffort(n,t))}",
     "function normalize(e){return e}let selected=manualSelection?choose(`gpt-5.6-sol`,`high`):null;",
     "let reset=zae(Ue,He==null?void 0:`${He.model}:${He.defaultReasoningEffort}`);",
     "render({onSelectDefault:reset});",
@@ -422,6 +442,157 @@ test("upstream Default-selection compatibility audit fails closed on missing and
   ), false);
 });
 
+test("upstream reset effect is reset-context scoped and selects the resolved fallback pair", () => {
+  const presets = context([{ model: "gpt-6-astra", effort: "medium", default: true }]);
+  const source = upstreamResetEffectFixture();
+  assert.equal(upstreamResetEffectContract(source), "current");
+  assert.equal(upstreamResetEffectAssetMatch(source, "fixture.js", presets), true);
+  const memoizedSource = upstreamResetEffectFixture("MemoizedResetPowerPicker", true);
+  assert.equal(upstreamResetEffectContract(memoizedSource), "current");
+  assert.equal(upstreamResetEffectAssetMatch(memoizedSource, "fixture.js", presets), true);
+
+  const hooks = { refs: [] };
+  const selections = [];
+  const render = (resetContextKey) => {
+    const effects = [];
+    let refIndex = 0;
+    const React = {
+      useEffect(effect) {
+        effects.push(effect);
+      },
+      useEffectEvent(callback) {
+        return callback;
+      },
+      useRef(value) {
+        const index = refIndex++;
+        hooks.refs[index] ??= { current: value };
+        return hooks.refs[index];
+      },
+    };
+    evaluate(source, "ResetPowerPicker(input)", {
+      React,
+      input: {
+        canRenderPowerPickerSurface: true,
+        fallbackPowerSelection: { id: "gpt-6-astra:medium", model: "gpt-6-astra", reasoningEffort: "medium" },
+        isModelSettingsLoading: false,
+        menuView: "simple",
+        onReset: (selection) => selections.push(plain(selection)),
+        powerSelectionsWithXHigh: [{ id: "gpt-6-astra:medium" }],
+        resetContextKey,
+        selectedPowerSelectionWithXHigh: null,
+        showXHighInSimplePicker: false,
+      },
+      resolveFallback: ({ fallbackPowerSelection }) => fallbackPowerSelection,
+    });
+    for (const effect of effects) effect();
+  };
+
+  render(JSON.stringify([null, "local", "/repo"]));
+  assert.equal(selections.length, 1, "initial draft resets to the resolved fallback");
+  render(JSON.stringify([null, "local", "/repo"]));
+  assert.equal(selections.length, 1, "the same draft context resets only once");
+  render(JSON.stringify(["created", "local", "/repo"]));
+  assert.equal(selections.length, 2, "the created conversation has its own reset context");
+  render(JSON.stringify([null, "local", "/repo"]));
+  assert.equal(selections.length, 3, "the next draft resets to the resolved fallback");
+  assert.deepEqual(selections, [
+    { id: "gpt-6-astra:medium", model: "gpt-6-astra", reasoningEffort: "medium" },
+    { id: "gpt-6-astra:medium", model: "gpt-6-astra", reasoningEffort: "medium" },
+    { id: "gpt-6-astra:medium", model: "gpt-6-astra", reasoningEffort: "medium" },
+  ]);
+});
+
+test("upstream reset-effect compatibility audit fails closed on missing, ambiguous, and partial drift", () => {
+  const presets = context([{ model: "gpt-6-astra", effort: "medium", default: true }]);
+  const fixture = upstreamResetEffectFixture();
+  const memoizedFixture = upstreamResetEffectFixture("MemoizedResetPowerPicker", true);
+  for (const source of [
+    "function unrelated(){}",
+    fixture + upstreamResetEffectFixture("DuplicateResetPowerPicker"),
+    fixture.replace("resetContextKey:c,", "resetKey:c,"),
+    fixture.replace("`${c}:${x}`", "`${x}`"),
+    fixture.replace("o(y)", "o(e)"),
+    fixture.replace("C=!u&&h&&a===`simple`", "C=!1"),
+    fixture.replace("C=!u&&h&&a===`simple`", "C=globalThis.unrelated"),
+    fixture.replace(
+      "C=!u&&h&&a===`simple`,w;",
+      "C=!u&&h&&a===`simple`;C=!1;let w;",
+    ),
+    fixture.replace(
+      "C=!u&&h&&a===`simple`,w;",
+      "C=!u&&h&&a===`simple`;C=globalThis.unrelated;let w;",
+    ),
+    fixture.replace(
+      "C=!u&&h&&a===`simple`,w;",
+      "C=!u&&h&&a===`simple`;[C]=[!1];let w;",
+    ),
+    fixture.replace(
+      "C=!u&&h&&a===`simple`,w;",
+      "C=!u&&h&&a===`simple`;({C}={C:!1});let w;",
+    ),
+    fixture.replace(
+      "C=!u&&h&&a===`simple`,w;",
+      "C=!u&&h&&a===`simple`;for(C of [!1]);let w;",
+    ),
+    fixture.replace(
+      "C=!u&&h&&a===`simple`,w;",
+      "C=!u&&h&&a===`simple`;C/*comment*/=!1;let w;",
+    ),
+    fixture.replace(
+      "C=!u&&h&&a===`simple`,w;",
+      "C=!u&&h&&a===`simple`;\\u0043=!1;let w;",
+    ),
+    fixture.replace(
+      "C=!u&&h&&a===`simple`,w;",
+      "C=!u&&h&&a===`simple`,Q=!u&&h&&a===`simple`,w;",
+    ),
+    fixture.replace(
+      "return(0,React.useEffect)(E,D),s}",
+      "return(0,React.useEffect)(E,D),C=!1,s}",
+    ),
+    fixture.replace("(0,React.useEffect)(E,D)", "E()"),
+    memoizedFixture.replace("cache[0]=C", "cache[0]=C=!1"),
+    memoizedFixture.replace("cache[2]=C", "cache[2]=C=!1"),
+    memoizedFixture.replace("cache[0]=C", "cache[0]=C++"),
+    memoizedFixture.replace("cache[2]=C", "cache[2]=C++"),
+    memoizedFixture.replace("cache[0]=C", "cache[0]=C+=1"),
+    memoizedFixture.replace("cache[2]=C", "cache[2]=C+=1"),
+    ...["cache[0]=C", "cache[2]=C"].flatMap((anchor) =>
+      ["\r", " ", " "].map((terminator) =>
+        memoizedFixture.replace(anchor, `${anchor}//comment${terminator}=!1`)
+      )
+    ),
+    ...[
+      ["cache[0]!==C", "cache[0]!==C"],
+      ["cache[0]=C", "cache[0]=C"],
+      ["cache[2]!==C", "cache[2]!==C"],
+      ["cache[2]=C", "cache[2]=C"],
+    ].flatMap(([anchor, read]) => [
+      `${read}//comment\r=!1`,
+      `${read}//comment =!1`,
+      `${read}//comment =!1`,
+      `${read}//comment\n=!1`,
+      `${read}/*comment*/=!1`,
+      `${read} =!1`,
+      `${read}||=!1`,
+      `${read}??=!1`,
+      `${read}&&=!1`,
+    ].map((replacement) => memoizedFixture.replace(anchor, replacement)))
+      .filter((source) => {
+        try {
+          new Function(source);
+          return true;
+        } catch {
+          return false;
+        }
+      }),
+  ]) {
+    assert.doesNotThrow(() => new Function(source));
+    assert.equal(upstreamResetEffectContract(source), "drifted");
+    assert.equal(upstreamResetEffectAssetMatch(source, "fixture.js", presets), false);
+  }
+});
+
 test("slider patch fails closed on drift, duplicate, and partial states", () => {
   const presets = context([{ model: "gpt-6-astra", effort: "medium", default: true }]);
   for (const source of [
@@ -524,18 +695,10 @@ test("local composer uses configured pairs and lowers only its config threshold"
     (patchedComposer.match(new RegExp(LOCAL_COMPOSER_CONFIG_MARKER, "g")) ?? []).length,
     1,
   );
-  assert.equal(
-    (patchedComposer.match(new RegExp(LOCAL_DRAFT_SELECTION_MARKER, "g")) ?? []).length,
-    1,
-  );
   assert.match(patchedComposer, /gpt-5\.6-sol:medium/);
   assert.match(
     patchedComposer,
     /sliderModelsConfig:serverConfig==null\?serverConfig:codexLinuxLocalDefaultPresetConfig/,
-  );
-  assert.match(
-    patchedComposer,
-    /codexLinuxLocalDraftDefaultScope=conversationId==null\?JSON\.stringify\(\[hostId,host\.cwd\]\):null/,
   );
   const runComposer = ({
     available,
@@ -610,13 +773,7 @@ test("local composer uses configured pairs and lowers only its config threshold"
   });
   assert.equal(unavailableDefault.result.fallback.id, "gpt-5.6-sol:high");
   assert.equal(unavailableDefault.result.reset.id, "gpt-5.6-sol:high");
-  assert.deepEqual(unavailableDefault.selections, [
-    {
-      effort: "high",
-      model: "gpt-5.6-sol",
-      options: { persistAsDefault: false },
-    },
-  ]);
+  assert.deepEqual(unavailableDefault.selections, []);
 
   const configuredDefault = runComposer({
     available: [
@@ -624,11 +781,7 @@ test("local composer uses configured pairs and lowers only its config threshold"
       { id: "gpt-5.6-sol:medium", model: "gpt-5.6-sol", reasoningEffort: "medium" },
     ],
   });
-  assert.deepEqual(configuredDefault.selections[0], {
-    effort: "medium",
-    model: "gpt-5.6-sol",
-    options: { persistAsDefault: false },
-  });
+  assert.deepEqual(configuredDefault.selections, []);
 
   const gatedOut = runComposer({
     available: [
@@ -703,9 +856,9 @@ test("local composer uses configured pairs and lowers only its config threshold"
     hookState: lifecycleHooks,
   });
   const nextDraft = runComposer({ available: lifecycleAvailable, hookState: lifecycleHooks });
-  assert.equal(firstDraft.selections.length, 1);
+  assert.equal(firstDraft.selections.length, 0);
   assert.equal(createdConversation.selections.length, 0);
-  assert.equal(nextDraft.selections.length, 1);
+  assert.equal(nextDraft.selections.length, 0);
 
   const manuallySelected = runComposer({
     available: [
@@ -714,12 +867,10 @@ test("local composer uses configured pairs and lowers only its config threshold"
     ],
     manualSelection: true,
   });
-  assert.equal(manuallySelected.result.selected.persistAsDefault, false);
   assert.deepEqual(manuallySelected.selections, [
     {
       effort: "high",
       model: "gpt-5.6-sol",
-      options: { persistAsDefault: false },
     },
   ]);
 });
@@ -890,14 +1041,14 @@ test("feature descriptors load alone and alongside ui-tweaks", () => {
       featuresRoot: root,
       featuresConfigPath: configPath,
     });
-    assert.equal(alone.length, 6);
+    assert.equal(alone.length, 7);
     assert.ok(alone.every(({ featureId }) => featureId === "model-picker-default-presets"));
     const [scenario] = require("./feature.json").officialBundleAuditScenarios;
     writeConfig(["model-picker-default-presets"], scenario.settings.presets);
     assert.equal(loadLinuxFeaturePatchDescriptors({
       featuresRoot: root,
       featuresConfigPath: configPath,
-    }).length, 6);
+    }).length, 7);
     writeConfig(["model-picker-default-presets", "ui-tweaks"]);
     const together = loadLinuxFeaturePatchDescriptors({
       featuresRoot: root,

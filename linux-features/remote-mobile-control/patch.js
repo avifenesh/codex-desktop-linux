@@ -52,6 +52,13 @@ const REMOTE_MOBILE_APP_SERVER_REMOTE_CONTROL_MARKER = "codexLinuxRemoteMobileLo
 const REMOTE_MOBILE_APP_SERVER_BASE_ARGS_NEEDLE = "[`-c`,`features.code_mode_host=true`]";
 const REMOTE_MOBILE_APP_SERVER_REMOTE_CONTROL_HELPER =
   "function codexLinuxRemoteMobileLocalAppServerArgs(e,t){if(process.env.CODEX_REMOTE_CONTROL_APP_SERVER_MODE===`proxy`){let n=process.env.CODEX_REMOTE_CONTROL_APP_SERVER_PROXY_SOCKET;if(n?.startsWith(`%h/`)&&process.env.HOME)n=`${process.env.HOME}${n.slice(2)}`;return[...e,...t,`app-server`,`proxy`,...(n?[`--sock`,n]:[])]}return t.length===0?[...e,`app-server`,`--remote-control`,`--analytics-default-enabled`]:[`app-server`,...e,...t,`--remote-control`,`--analytics-default-enabled`]}";
+// Startup checks (`--print-startup-config`) are one-shot runs; app-server
+// rejects them together with `--remote-control` or the `proxy` subcommand.
+const REMOTE_MOBILE_APP_SERVER_STARTUP_GUARD_MARKER = "codexLinuxStartupCommandAppServerArgs";
+const REMOTE_MOBILE_APP_SERVER_STARTUP_GUARD_HELPER =
+  "function codexLinuxStartupCommandAppServerArgs(e,t){if(t==null||process.platform!==`linux`)return e;let n=e.indexOf(`app-server`);return n>=0&&e[n+1]===`proxy`?[...e.slice(0,n),`app-server`,`--analytics-default-enabled`]:e.filter(e=>e!==`--remote-control`)}";
+const REMOTE_MOBILE_APP_SERVER_STARTUP_ARGS_PATTERN =
+  /\.\.\.([A-Za-z_$][\w$]*)\.args,\.\.\.([A-Za-z_$][\w$]*)\.startupCommand\?\.args\?\?\[\]/gu;
 const REMOTE_CONTROL_APP_INITIAL_ASSET_PATTERN = /^app-initial-[^.]+\.js$/u;
 const REMOTE_CONTROL_APP_PRIMARY_ASSET_PATTERN = /^app-primary-[^.]+\.js$/u;
 const REMOTE_CONTROL_VISIBILITY_ASSET_PATTERN = /^[^.]+\.js$/u;
@@ -281,6 +288,34 @@ function applyLinuxRemoteControlClientRevocationRecoveryPatch(source) {
 }
 
 function applyLinuxRemoteMobileAppServerRemoteControlPatch(source) {
+  return applyLinuxRemoteMobileStartupCommandArgsGuard(
+    applyLinuxRemoteMobileAppServerRemoteControlLaunchPatch(source),
+  );
+}
+
+function applyLinuxRemoteMobileStartupCommandArgsGuard(source) {
+  if (
+    source.includes(REMOTE_MOBILE_APP_SERVER_STARTUP_GUARD_MARKER) ||
+    !hasLinuxRemoteMobileLocalAppServerRemoteControlPatch(source)
+  ) {
+    return source;
+  }
+  const guarded = source.replace(
+    REMOTE_MOBILE_APP_SERVER_STARTUP_ARGS_PATTERN,
+    (_match, launch, options) =>
+      `...${REMOTE_MOBILE_APP_SERVER_STARTUP_GUARD_MARKER}(${launch}.args,${options}.startupCommand),` +
+      `...${options}.startupCommand?.args??[]`,
+  );
+  if (guarded === source) {
+    return source;
+  }
+  return guarded.replace(
+    REMOTE_MOBILE_APP_SERVER_REMOTE_CONTROL_HELPER,
+    `${REMOTE_MOBILE_APP_SERVER_REMOTE_CONTROL_HELPER}${REMOTE_MOBILE_APP_SERVER_STARTUP_GUARD_HELPER}`,
+  );
+}
+
+function applyLinuxRemoteMobileAppServerRemoteControlLaunchPatch(source) {
   if (source.includes(REMOTE_MOBILE_APP_SERVER_REMOTE_CONTROL_MARKER)) {
     if (!hasLinuxRemoteMobileLocalAppServerRemoteControlPatch(source)) {
       console.warn(
@@ -1078,8 +1113,8 @@ function remoteMobileConversationHydrationGuardPattern({ patched = false, flags 
     ? `/\\*${REMOTE_MOBILE_CONVERSATION_HYDRATION_MARKER}\\*/`
     : "";
   const hostGuard = patched
-    ? "this\\.manager\\.getHostId\\(\\)!==`durable`&&this\\.manager\\.getHostId\\(\\)!==`local`\\|\\|"
-    : "this\\.manager\\.getHostId\\(\\)!==`durable`\\|\\|";
+    ? "!this\\.manager\\.isCloudHost&&this\\.manager\\.getHostId\\(\\)!==`local`\\|\\|"
+    : "!this\\.manager\\.isCloudHost\\|\\|";
   const methodGuard = patched
     ? `(?<notification>${DEVICE_KEY_IDENT})\\.method!==\`turn/started\`&&` +
       `\\k<notification>\\.method!==\`turn/completed\`&&` +
@@ -1149,7 +1184,7 @@ function applyLinuxRemoteMobileConversationHydrationPatch(source) {
   const { conversation, notification, pending, ignore, delivery } = contract.match.groups;
   const replacement =
     `return ${pending}==null?/*${REMOTE_MOBILE_CONVERSATION_HYDRATION_MARKER}*/` +
-    "this.manager.getHostId()!==`durable`&&this.manager.getHostId()!==`local`||" +
+    "!this.manager.isCloudHost&&this.manager.getHostId()!==`local`||" +
     `${notification}.method!==\`turn/started\`&&${notification}.method!==\`turn/completed\`&&` +
     `(this.manager.getHostId()!==\`local\`||${notification}.method!==\`item/started\`&&` +
     `${notification}.method!==\`item/completed\`)||` +
