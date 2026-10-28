@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+FEATURE_ENTRYPOINTS = ("patchDescriptors", "stageHook", "cleanupHook")
 PACKAGE_NAME = "codex-desktop"
 INSTALL_ROOT = "/opt/codex-desktop"
 
@@ -84,12 +85,28 @@ def discover_features(root: pathlib.Path) -> dict[str, Feature]:
         feature_id = data.get("id")
         if not isinstance(feature_id, str) or not ID_RE.fullmatch(feature_id):
             raise SelectionError(f"{manifest}: invalid feature id")
+        if feature_id != manifest.parent.name:
+            raise SelectionError(
+                f"{manifest}: feature id '{feature_id}' must match its directory name '{manifest.parent.name}'"
+            )
+        if "defaultEnabled" in data and not isinstance(data["defaultEnabled"], bool):
+            raise SelectionError(f"{manifest}: defaultEnabled must be a boolean (false when provided)")
         if data.get("defaultEnabled") is True:
             raise SelectionError(
                 f"{manifest}: defaultEnabled true is not allowed"
             )
         if "internal" in data and not isinstance(data["internal"], bool):
             raise SelectionError(f"{manifest}: internal must be a boolean")
+        entrypoints = data.get("entrypoints")
+        if entrypoints is not None:
+            if not isinstance(entrypoints, dict):
+                raise SelectionError(f"{manifest}: entrypoints must be an object")
+            for key in entrypoints:
+                if key not in FEATURE_ENTRYPOINTS:
+                    raise SelectionError(
+                        f"{manifest}: unknown entrypoint '{key}'; "
+                        f"supported entrypoints: {', '.join(FEATURE_ENTRYPOINTS)}"
+                    )
         if data.get("internal") is True:
             continue
         if feature_id in features:

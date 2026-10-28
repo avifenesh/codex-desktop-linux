@@ -34,19 +34,42 @@ This is a Linux `.deb`-only source pipeline. Retired source inputs and
 compatibility variables are rejected rather than emulated; the official
 Electron runtime and native modules are preserved directly.
 
-Use an explicit already-downloaded package that you trust:
+Use an already-downloaded package to avoid downloading the package body again:
 
 ```bash
 ./install.sh /path/to/chatgpt_<version>_<arch>.deb
 UPSTREAM_DEB=/path/to/chatgpt_<version>_<arch>.deb make build-app
 ```
 
-The explicit package is validated for package name, version, architecture, and
-required payload, and its SHA-256 is recorded in build metadata. Supplying a
-local file deliberately skips signed repository discovery, so the caller is
-responsible for its provenance. Source package formats from the retired build
-architecture are rejected with a clear error and have no compatibility
-fallback.
+Local packages are verified against the same signed stable metadata by default:
+the pinned key authenticates `InRelease`, its digest authenticates `Packages`,
+and the indexed size/SHA-256 and package control fields must match the local
+file. Only metadata is fetched; the package body is reused.
+
+All builds verify without prompting or reading user input, whether or not a
+terminal is attached. Only this explicit flag selects the local exception for
+this invocation:
+
+```bash
+./install.sh --skip-oai-official-sig-verification /path/to/chatgpt_<version>_<arch>.deb
+```
+
+The flag requires a local path (positional or `UPSTREAM_DEB`). It skips official
+metadata discovery and its signature/version/digest comparison, while retaining
+package-name, version-format, architecture, payload-completeness checks, and
+SHA-256 recording. The caller owns provenance in that mode. A verification
+failure never automatically chooses the exception, and the choice is not saved
+to feature or updater settings. The supported compatibility baseline remains
+the latest signed stable package. `scripts/rebuild-candidate.sh` accepts the
+same flag.
+
+Local verification failures distinguish an unavailable or invalid signed index
+from a package that does not match the current signed stable release. They
+retain the technical cause and name the explicit skip flag for an intentional
+unverified local build; the failure still stops the build.
+
+Source package formats from the retired build architecture are rejected with a
+clear error and have no compatibility fallback.
 
 Inspection writes reports without promoting an app:
 
@@ -57,6 +80,10 @@ make inspect-upstream
 Generated metadata under `.codex-linux/build-info.json` uses schema v2 and
 records `upstreamLinuxPackage` version, architecture, repository path, and
 SHA-256.
+`upstreamLinuxPackage.signatureVerification` records `verified` for successful
+signed-repository verification and `skipped` for the explicit local exception;
+metadata without a recorded result is `unknown`. Nix's hash-verified fixed
+input uses the explicit exception during offline builds; see [Nix](nix.md).
 
 ## Running the generated app
 
@@ -81,12 +108,28 @@ Useful diagnostics:
 ## Baseline ASAR invariant
 
 `linux-features/features.example.json` contains no enabled features. For that
-configuration, the installer copies `resources/app.asar` directly and compares
-its SHA-256 with the package payload. No ASAR extraction tool runs.
+configuration, enabled-feature descriptors are empty; required core descriptors
+are still discovered independently. The installer skips ASAR extraction only
+when both sets are empty:
 
-If a selected feature contains patch descriptors, the installer patches a
-temporary extraction, repacks deterministically, and writes a feature-aware
-patch report. An enabled feature drift blocks candidate acceptance.
+| Required core descriptors | Enabled feature descriptors | ASAR handling |
+|---|---|---|
+| None | None | No extraction; preserve the official input ASAR byte-for-byte |
+| Present | None | Extract a temporary copy and run core descriptors |
+| None | Present | Extract a temporary copy and run feature descriptors |
+| Present | Present | Extract a temporary copy and run both sets |
+
+Entering the patch flow does not necessarily change bytes. The patch report
+records core and feature outcomes and the official-input/staged ASAR hashes.
+If no descriptor reports a change, the installer keeps the original archive;
+otherwise it repacks deterministically. An enabled feature drift blocks
+candidate acceptance. Do not infer a permanently empty core registry from an
+empty feature configuration.
+
+Compare `resources/app.asar` in the verified official `.deb` with the staged
+app's copy to audit patching. Separately, the copy inside a custom output
+package must match that output's staged ASAR; this packaging comparison does
+not imply equality with the official input when patches changed it.
 
 ## Package formats
 
@@ -176,7 +219,7 @@ launcher still enforces the sandbox policy.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `UPSTREAM_DEB` | signed stable discovery | Use an explicitly trusted local official package |
+| `UPSTREAM_DEB` | signed stable discovery | Reuse a local package body; signed verification remains the default |
 | `APP_DIR` | `./codex-app` | Generated active app directory |
 | `NEXT_APP_DIR` | `./codex-app-next` | Side-by-side candidate directory |
 | `PACKAGE_WITH_UPDATER` | `1` (`0` on Gentoo) | Include the native updater when supported |
@@ -192,7 +235,10 @@ MAX_BUILD_THREADS=4 PACKAGE_WITH_UPDATER=0 make install-native
 
 ## Update-builder payload
 
-`packaging/update-builder/` contains only source verification/extraction,
+`stage_update_builder_bundle()` in
+[`scripts/lib/package-common.sh`](../scripts/lib/package-common.sh) assembles
+the minimal rebuild payload under `/opt/codex-desktop/update-builder/` in native
+package staging. It contains only source verification/extraction,
 feature selection/descriptors/resources, the ASAR toolchain, package templates,
 required build helpers, and already staged release executables for enabled
 native features. It excludes the full repository, Cargo workspaces, and
@@ -209,8 +255,8 @@ bash tests/scripts_smoke.sh
 ./scripts/ci-local.sh all
 ```
 
-Inspect the final packages for the `ChatGPT` ELF, byte identity of clean
-`app.asar`, bundled commands, desktop files, AppArmor policy, update-builder,
+Inspect the final packages for the `ChatGPT` ELF, the ASAR identity/report
+contract above, bundled commands, desktop files, AppArmor policy, update-builder,
 and absence of upstream package-manager configuration.
 
 Package inspection should also confirm the payload architecture matches the

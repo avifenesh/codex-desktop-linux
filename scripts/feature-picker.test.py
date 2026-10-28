@@ -9,6 +9,9 @@ import unittest
 
 MODULE_PATH = pathlib.Path(__file__).with_name("feature-picker.py")
 REPO_ROOT = MODULE_PATH.parent.parent
+MANIFEST_CASES = json.loads(
+    (REPO_ROOT / "tests/fixtures/linux-features/manifest-validation.json").read_text()
+)
 SPEC = importlib.util.spec_from_file_location("feature_picker", MODULE_PATH)
 feature_picker = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -18,6 +21,109 @@ SPEC.loader.exec_module(feature_picker)
 
 
 class FeaturePickerModelTests(unittest.TestCase):
+    def test_internal_accepts_only_omission_or_booleans_for_repository_and_local_manifests(self):
+        for origin in ("repo", "local"):
+            for case in MANIFEST_CASES["internal"]:
+                with self.subTest(origin=origin, case=case["label"]), tempfile.TemporaryDirectory() as temp:
+                    root = pathlib.Path(temp)
+                    directory = root / ("local/probe" if origin == "local" else "probe")
+                    directory.mkdir(parents=True)
+                    data = {"id": "probe"}
+                    if "value" in case:
+                        data["internal"] = case["value"]
+                    (directory / "feature.json").write_text(json.dumps(data))
+                    (directory / "README.md").write_text("# Internal fixture\n")
+                    if "error" in case:
+                        with self.assertRaises(feature_picker.SelectionError) as failure:
+                            feature_picker.discover_features(root)
+                        self.assertIn(case["error"], str(failure.exception))
+                    else:
+                        features = feature_picker.discover_features(root)
+                        self.assertEqual(list(features), [] if case.get("value") is True else ["probe"])
+
+    def test_default_enabled_types_for_repository_local_and_internal_features(self):
+        for origin in ("repo", "local", "internal"):
+            for case in MANIFEST_CASES["defaultEnabled"]:
+                with self.subTest(origin=origin, case=case["label"]), tempfile.TemporaryDirectory() as temp:
+                    root = pathlib.Path(temp)
+                    directory = root / ("local/probe" if origin == "local" else "probe")
+                    directory.mkdir(parents=True)
+                    data = {"id": "probe", "internal": origin == "internal"}
+                    if "value" in case:
+                        data["defaultEnabled"] = case["value"]
+                    (directory / "feature.json").write_text(json.dumps(data))
+                    (directory / "README.md").write_text("# Default fixture\n")
+                    if "error" in case:
+                        with self.assertRaises(feature_picker.SelectionError) as failure:
+                            feature_picker.discover_features(root)
+                        self.assertIn(case["error"], str(failure.exception))
+                    else:
+                        features = feature_picker.discover_features(root)
+                        self.assertEqual(list(features), [] if origin == "internal" else ["probe"])
+                        self.assertEqual(feature_picker.SelectionModel(features).ordered_selected(), [])
+
+    def test_feature_ids_match_public_local_and_alternate_directories(self):
+        for case in MANIFEST_CASES["directories"]:
+            with self.subTest(case=case["label"]), tempfile.TemporaryDirectory() as temp:
+                root = pathlib.Path(temp) / case.get("root", "linux-features")
+                directory = root / case["directory"]
+                directory.mkdir(parents=True)
+                (directory / "feature.json").write_text(json.dumps({"id": case["id"]}))
+                (directory / "README.md").write_text("# Directory fixture\n")
+                if case.get("error"):
+                    with self.assertRaises(feature_picker.SelectionError) as failure:
+                        feature_picker.discover_features(root)
+                    self.assertIn(case["id"], str(failure.exception))
+                    self.assertIn(directory.name, str(failure.exception))
+                    self.assertIn("must match", str(failure.exception))
+                else:
+                    features = feature_picker.discover_features(root)
+                    self.assertEqual(list(features), [case["id"]])
+                    self.assertEqual(features[case["id"]].local, case["directory"].startswith("local/"))
+
+    def test_directory_matching_uses_declaration_path_and_preserves_discovery_rules(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp) / "features"
+            target = pathlib.Path(temp) / "differently-named-target"
+            root.mkdir()
+            target.mkdir()
+            (target / "feature.json").write_text('{"id":"linked"}')
+            (target / "README.md").write_text("# Linked\n")
+            (root / "linked").symlink_to(target, target_is_directory=True)
+            for name in (".ignored", "README.md"):
+                (root / name).mkdir()
+                (root / name / "feature.json").write_text('{"id":"INVALID"}')
+            self.assertEqual(list(feature_picker.discover_features(root)), ["linked"])
+            local = root / "local/linked"
+            local.mkdir(parents=True)
+            (local / "feature.json").write_text('{"id":"linked"}')
+            (local / "README.md").write_text("# Linked local\n")
+            with self.assertRaisesRegex(feature_picker.SelectionError, "Duplicate feature id: linked"):
+                feature_picker.discover_features(root)
+
+    def test_manifest_entrypoint_declarations_without_executing_modules(self):
+        for case in MANIFEST_CASES["entrypoints"]:
+            with self.subTest(case=case["label"]), tempfile.TemporaryDirectory() as temp:
+                root = pathlib.Path(temp)
+                directory = root / "probe"
+                directory.mkdir()
+                manifest = directory / "feature.json"
+                data = {"id": "probe", "featureOwned": {"keep": True}}
+                if "entrypoints" in case:
+                    data["entrypoints"] = case["entrypoints"]
+                manifest.write_text(json.dumps(data))
+                (directory / "README.md").write_text("# Probe\n")
+                (directory / "patch.js").write_text("throw Error('must not execute');")
+                if "error" in case:
+                    with self.assertRaises(feature_picker.SelectionError) as failure:
+                        feature_picker.discover_features(root)
+                    self.assertIn(str(manifest), str(failure.exception))
+                    self.assertIn(case["error"], str(failure.exception))
+                    if "must be an object" not in case["error"]:
+                        self.assertIn("patchDescriptors, stageHook, cleanupHook", str(failure.exception))
+                else:
+                    self.assertEqual(list(feature_picker.discover_features(root)), ["probe"])
+
     def test_global_shortcut_features_are_independent_and_leave_no_derived_selection(self):
         features = feature_picker.discover_features(REPO_ROOT / "linux-features")
         for feature_id in ("global-dictation", "wayland-global-shortcuts"):

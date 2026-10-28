@@ -199,9 +199,8 @@ The main RPC boundaries are:
   `remoteControl/status/changed`;
 - outbound Connections: the current `remoteConnections` service methods
   `setRemoteControlEnabled`, `refreshRemoteControl`, and `setAutoConnect`;
-- shared host routing: `set-experimental-feature-enablement-for-host`,
-  and `refresh-remote-connections`;
-- Remote SSH: the existing `install-codex` action and its release parameter.
+- shared host routing: `set-experimental-feature-enablement-for-host`
+  and `refresh-remote-connections`.
 
 Remote mobile daemon requirement:
 
@@ -310,3 +309,14 @@ Run the feature tests with:
 ```bash
 node --test linux-features/remote-mobile-control/test.js
 ```
+
+## Catalog subfeatures
+
+The community feature catalog lists these user-facing capabilities separately:
+
+- **Mobile Remote host** (`mobile-host`): Adapt this Linux installation for experimental mobile Remote hosting, subject to account and pairing requirements.
+- **Control other devices** (`outbound-control`): Expose outbound Remote enrollment and connection discovery without bypassing account authorization.
+
+These declarations use `enabledWhen: "parent"`: all are included whenever this
+feature is built. They add no independent configuration switches and do not
+report runtime activation, permissions, external dependencies or backend health.

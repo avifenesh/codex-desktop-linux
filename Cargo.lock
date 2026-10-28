@@ -488,7 +488,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codex-computer-use-linux"
-version = "0.7.27"
+version = "0.7.31"
 dependencies = [
  "anyhow",
  "atspi",
@@ -501,6 +501,7 @@ dependencies = [
  "image",
  "libc",
  "mimalloc",
+ "reis",
  "rmcp 3.5.1",
  "schemars",
  "serde",
@@ -1721,6 +1722,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "reis"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b967ec6489a42067a20724f11987bb96178ea796873cbe1afd25fb93ee6f85f"
+dependencies = [
+ "enumflags2",
+ "futures-util",
+ "log",
+ "rustix",
+ "tokio",
 ]
 
 [[package]]

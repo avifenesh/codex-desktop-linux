@@ -351,7 +351,7 @@ fn capability_map_with_portal_keyboard(
 ) -> CapabilityMap {
     let mut input_backends = Vec::new();
     // Absolute uinput pointer: accurate, non-blocking of coordinates; preferred.
-    if input.uinput.ok {
+    if input.uinput.ok && !is_cosmic_wayland_platform(platform) {
         input_backends.push("abs_pointer".to_string());
     }
     let force_ydotool = env_flag_enabled_any(FORCE_YDOTOOL_KEYBOARD_ENV_KEYS);
@@ -381,13 +381,17 @@ fn capability_map_with_portal_keyboard(
     ) {
         input_backends.push("wtype".to_string());
     }
-    if portal_available && portal_forced_for_all_input {
+    let portal_first = portal_forced_for_all_input
+        || (is_cosmic_wayland_platform(platform)
+            && portal_pointer_available
+            && !env_flag_enabled_any(FORCE_YDOTOOL_POINTER_ENV_KEYS));
+    if portal_available && portal_first {
         input_backends.push("portal".to_string());
     }
     if input.ydotool.ok && input.ydotool_socket.ok {
         input_backends.push("ydotool".to_string());
     }
-    if portal_available && !portal_forced_for_all_input {
+    if portal_available && !portal_first {
         input_backends.push("portal".to_string());
     }
 
@@ -1782,8 +1786,33 @@ fn run_command(command: &str, args: &[&str], with_session_bus: bool) -> Check {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A complete report for tests outside this module. With accessibility
+    /// disabled, get_app_state skips the tree and touches no desktop service.
+    pub(crate) fn doctor_report_fixture(
+        accessibility_enabled: bool,
+        windows_available: bool,
+    ) -> DoctorReport {
+        let platform = platform_report();
+        let portals = portal_report(Check::fail("missing"));
+        let accessibility = accessibility_report(
+            Check::ok("bus"),
+            Check::ok(accessibility_enabled.to_string()),
+        );
+        let windowing = windowing_report(windows_available, windows_available);
+        let input = input_report(true);
+        DoctorReport {
+            readiness: readiness_report(&platform, &portals, &accessibility, &windowing, &input),
+            capabilities: capability_map(&platform, &portals, &accessibility, &windowing, &input),
+            platform,
+            portals,
+            accessibility,
+            windowing,
+            input,
+        }
+    }
 
     #[test]
     fn describe_bool_reads_busctl_gdbus_and_gsettings_output() {
@@ -2218,6 +2247,31 @@ mod tests {
             "NAME TYPE SIGNATURE RESULT/VALUE FLAGS\n\
              .SelectSources method oa{sv} o -",
         )
+    }
+
+    #[test]
+    fn cosmic_prefers_per_monitor_portal_over_uinput_and_ydotool() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("wayland".to_string());
+        platform.xdg_current_desktop = Some("COSMIC".to_string());
+        let input = input_report_parts(
+            Check::ok("ydotool"),
+            Check::ok("socket"),
+            Check::ok("socket"),
+            Check::ok("uinput"),
+        );
+        let capabilities = capability_map(
+            &platform,
+            &portal_report(Check::ok("portal")),
+            &accessibility_report(Check::ok("bus"), Check::ok("true")),
+            &windowing_report(true, true),
+            &input,
+        );
+        assert_eq!(capabilities.preferred.input.as_deref(), Some("portal"));
+        assert!(!capabilities
+            .input
+            .iter()
+            .any(|backend| backend == "abs_pointer"));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const childProcess = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -9,6 +10,10 @@ const test = require("node:test");
 
 const {
   enabledFeatureIdsFromBuildInfo,
+  disabledLinuxFeatureCleanupHooks,
+  discoverLinuxFeatureManifests,
+  enabledLinuxFeaturesConfig,
+  enabledLinuxFeatureStageHooks,
   enabledLinuxFeaturePackageDependencies,
   enabledLinuxFeaturePackageFiles,
   enabledLinuxFeaturePackagePlan,
@@ -19,6 +24,159 @@ const {
   stageEnabledLinuxFeaturePackageResources,
   stageEnabledLinuxFeatureInstall,
 } = require("./linux-features.js");
+
+const manifestCases = require("../../tests/fixtures/linux-features/manifest-validation.json");
+
+test("internal accepts only omission or booleans for repository and local manifests", (t) => {
+  for (const origin of ["repo", "local"]) {
+    for (const scenario of manifestCases.internal) {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), `codex-feature-internal-${origin}-${scenario.label}-`));
+      t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+      const featureDir = path.join(root, origin === "local" ? "local/probe" : "probe");
+      fs.mkdirSync(featureDir, { recursive: true });
+      const manifest = { id: "probe" };
+      if (Object.prototype.hasOwnProperty.call(scenario, "value")) manifest.internal = scenario.value;
+      fs.writeFileSync(path.join(featureDir, "feature.json"), JSON.stringify(manifest));
+      fs.writeFileSync(path.join(featureDir, "README.md"), "# Internal fixture\n");
+      if (scenario.error) {
+        assert.throws(() => discoverLinuxFeatureManifests({ featuresRoot: root }), (failure) => {
+          assert.ok(failure.message.includes(scenario.error), failure.message);
+          return true;
+        });
+      } else {
+        const [feature] = discoverLinuxFeatureManifests({ featuresRoot: root });
+        assert.equal(feature.manifest.internal, scenario.value === true);
+      }
+    }
+  }
+});
+
+test("defaultEnabled accepts only omission or boolean false for repository, local, and internal features", (t) => {
+  for (const origin of ["repo", "local", "internal"]) {
+    for (const scenario of manifestCases.defaultEnabled) {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), `codex-feature-default-${origin}-${scenario.label}-`));
+      t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+      const featureDir = path.join(root, origin === "local" ? "local/probe" : "probe");
+      fs.mkdirSync(featureDir, { recursive: true });
+      const manifest = { id: "probe", internal: origin === "internal" };
+      if (Object.prototype.hasOwnProperty.call(scenario, "value")) manifest.defaultEnabled = scenario.value;
+      fs.writeFileSync(path.join(featureDir, "feature.json"), JSON.stringify(manifest));
+      fs.writeFileSync(path.join(featureDir, "README.md"), "# Default fixture\n");
+      fs.writeFileSync(path.join(root, "features.json"), '{"enabled":[]}');
+      if (scenario.error) {
+        assert.throws(() => discoverLinuxFeatureManifests({ featuresRoot: root }), (failure) => {
+          assert.ok(failure.message.includes(scenario.error), failure.message);
+          assert.match(failure.message, /probe/);
+          return true;
+        });
+      } else {
+        const [feature] = discoverLinuxFeatureManifests({ featuresRoot: root });
+        assert.equal(feature.manifest.defaultEnabled, false);
+        assert.deepEqual(loadEnabledLinuxFeatures({ featuresRoot: root }), []);
+      }
+    }
+  }
+});
+
+test("feature IDs match their declaring directory in public, local, and alternate roots", (t) => {
+  for (const scenario of manifestCases.directories) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `codex-feature-directory-${scenario.label}-`));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const featuresRoot = path.join(root, scenario.root ?? "linux-features");
+    const featureDir = path.join(featuresRoot, scenario.directory);
+    fs.mkdirSync(featureDir, { recursive: true });
+    fs.writeFileSync(path.join(featureDir, "feature.json"), JSON.stringify({ id: scenario.id }));
+    fs.writeFileSync(path.join(featureDir, "README.md"), "# Directory fixture\n");
+    const config = path.join(featuresRoot, "features.json");
+    fs.writeFileSync(config, JSON.stringify({ enabled: [scenario.id] }));
+    if (scenario.error) {
+      assert.throws(() => loadEnabledLinuxFeatures({ featuresRoot }), (failure) => {
+        assert.ok(failure.message.includes(scenario.id), failure.message);
+        assert.ok(failure.message.includes(path.basename(featureDir)), failure.message);
+        assert.match(failure.message, /must match.*directory/);
+        return true;
+      });
+    } else {
+      const [feature] = loadEnabledLinuxFeatures({ featuresRoot });
+      assert.equal(feature.id, scenario.id);
+      assert.equal(feature.relativeDir, scenario.directory);
+      const result = childProcess.spawnSync(process.execPath, [__dirname + "/linux-features.js", "--enabled-feature-dirs0"], {
+        encoding: "utf8",
+        env: { ...process.env, CODEX_LINUX_FEATURES_ROOT: featuresRoot, CODEX_LINUX_FEATURES_CONFIG: config },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, `${scenario.id}\0${scenario.directory}\0`);
+    }
+  }
+});
+
+test("directory matching uses the declaration path and preserves duplicate and reserved-directory rules", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-feature-directory-rules-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const featuresRoot = path.join(root, "features");
+  const target = path.join(root, "differently-named-target");
+  fs.mkdirSync(featuresRoot);
+  fs.mkdirSync(target);
+  fs.writeFileSync(path.join(target, "feature.json"), '{"id":"linked"}');
+  fs.writeFileSync(path.join(target, "README.md"), "# Linked\n");
+  fs.symlinkSync(target, path.join(featuresRoot, "linked"));
+  for (const name of [".ignored", "README.md"]) {
+    fs.mkdirSync(path.join(featuresRoot, name));
+    fs.writeFileSync(path.join(featuresRoot, name, "feature.json"), '{"id":"INVALID"}');
+  }
+  assert.deepEqual(discoverLinuxFeatureManifests({ featuresRoot }).map(({ id }) => id), ["linked"]);
+  const localDir = path.join(featuresRoot, "local/linked");
+  fs.mkdirSync(localDir, { recursive: true });
+  fs.copyFileSync(path.join(target, "feature.json"), path.join(localDir, "feature.json"));
+  fs.copyFileSync(path.join(target, "README.md"), path.join(localDir, "README.md"));
+  assert.throws(() => discoverLinuxFeatureManifests({ featuresRoot }), /Duplicate Linux feature id 'linked'/);
+});
+
+test("manifest discovery validates entrypoint declarations without executing modules", (t) => {
+  for (const { label, error, ...manifest } of manifestCases.entrypoints) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `codex-entrypoints-${label}-`));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const { featureDir, featuresRoot } = makeFeatureRoot(root, {
+      id: "unsafe-link", ...manifest, featureOwned: { keep: true },
+    });
+    fs.writeFileSync(path.join(featureDir, "patch.js"), "throw Error('metadata discovery must not load modules');");
+    const options = { featuresRoot };
+    if (error) {
+      for (const load of [discoverLinuxFeatureManifests, loadEnabledLinuxFeatures, loadLinuxFeaturePatchDescriptors]) {
+        assert.throws(() => load(options), (failure) => {
+          assert.ok(failure.message.includes(path.join(featureDir, "feature.json")), failure.message);
+          assert.ok(failure.message.includes(error), failure.message);
+          if (!error.includes("must be an object")) {
+            assert.match(failure.message, /patchDescriptors, stageHook, cleanupHook/);
+          }
+          return true;
+        });
+      }
+    } else {
+      const [feature] = discoverLinuxFeatureManifests(options);
+      assert.deepEqual(feature.manifest.featureOwned, { keep: true });
+      assert.deepEqual(loadEnabledLinuxFeatures(options).map(({ id }) => id), ["unsafe-link"]);
+    }
+  }
+});
+
+test("stage and disabled cleanup entrypoints remain discoverable without executing hooks", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-hook-entrypoints-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const { featureDir, featuresRoot } = makeFeatureRoot(root, {
+    id: "unsafe-link", entrypoints: { stageHook: "./stage.sh", cleanupHook: "./cleanup.sh" },
+  });
+  for (const name of ["stage.sh", "cleanup.sh"]) {
+    fs.writeFileSync(path.join(featureDir, name), "exit 99\n");
+  }
+  assert.deepEqual(enabledLinuxFeatureStageHooks({ featuresRoot }), [
+    { id: "unsafe-link", path: path.join(featureDir, "stage.sh") },
+  ]);
+  fs.writeFileSync(path.join(featuresRoot, "features.json"), '{"enabled":[]}');
+  assert.deepEqual(disabledLinuxFeatureCleanupHooks({ featuresRoot }), [
+    { id: "unsafe-link", path: path.join(featureDir, "cleanup.sh") },
+  ]);
+});
 
 test("known retired feature ids are ignored while arbitrary unknown ids fail", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-retired-feature-"));
@@ -1101,6 +1259,79 @@ test("native package plans strictly validate the current feature config", (t) =>
     ),
     /could not read Linux features config.*file does not exist/i,
   );
+});
+
+test("strict settings validation rejects malformed input in config and every native package plan", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-feature-settings-validation-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const { featuresRoot, id } = makePackageFeatureRoot(root, {});
+  const appDir = path.join(root, "app");
+  writeBuildInfoSnapshot(appDir, [id]);
+  const configPath = path.join(featuresRoot, "features.json");
+  const warnings = [];
+  t.mock.method(console, "warn", (message) => warnings.push(message));
+  const invalid = [
+    ...[[], "bad", 0, false].map((value) => [value, /settings must be an object/]),
+    ...[[], "bad", 0, false, null].map((value) => [
+      { [id]: value }, /package-framework-fixture.*settings.*must be an object/,
+    ]),
+    [{ INVALID: {} }, /Invalid Linux feature settings id.*INVALID/],
+    [{ "bad key": {} }, /Invalid Linux feature settings id.*bad key/],
+  ];
+  for (const [settings, reason] of invalid) {
+    fs.writeFileSync(configPath, JSON.stringify({ enabled: [id], settings }));
+    const diagnostic = (error) => {
+      assert.ok(error.message.includes(configPath), error.message);
+      assert.match(error.message, reason);
+      return true;
+    };
+    assert.throws(() => linuxFeaturesConfig({ featuresRoot, strictConfig: true }), diagnostic);
+    for (const packageFormat of ["deb", "rpm", "pacman", "ebuild"]) {
+      assert.throws(() => enabledLinuxFeaturePackagePlan({
+        featuresRoot, appDir, packageFormat,
+      }), diagnostic);
+    }
+    assert.equal(warnings.length, 0, "strict settings validation throws without warning and ignoring");
+    assert.deepEqual(linuxFeaturesConfig({ featuresRoot }).settings, {});
+    assert.equal(warnings.length, 1);
+    assert.match(warnings.pop(), reason);
+  }
+});
+
+test("valid settings preserve nested values, disabled settings, aliases, and enabled-only export", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-feature-valid-settings-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const { featuresRoot, id } = makePackageFeatureRoot(root, {});
+  const configPath = path.join(featuresRoot, "features.json");
+  const appDir = path.join(root, "app");
+  writeBuildInfoSnapshot(appDir, [id]);
+  const options = { featuresRoot, strictConfig: true };
+  const nested = { nested: { list: [1, null, false], featureOwned: null } };
+  for (const settings of [undefined, null, {}, { [id]: nested }]) {
+    fs.writeFileSync(configPath, JSON.stringify({ enabled: [id], settings }));
+    assert.deepEqual(linuxFeaturesConfig(options).settings, settings ?? {});
+    assert.deepEqual(enabledLinuxFeaturePackagePlan({ ...options, appDir, packageFormat: "deb" }), {
+      resources: [], dependencies: [],
+    });
+  }
+  const warnings = [];
+  t.mock.method(console, "warn", (message) => warnings.push(message));
+  fs.writeFileSync(configPath, JSON.stringify({ enabled: [id], settings: {
+    [id]: nested,
+    dormant: { keep: true },
+    "open-target-discovery": null,
+    "zed-opener": [],
+    "conversation-mode": "retired",
+  } }));
+  assert.deepEqual(linuxFeaturesConfig(options).settings, { [id]: nested, dormant: { keep: true } });
+  assert.deepEqual(enabledLinuxFeaturesConfig(options), { enabled: [id], settings: { [id]: nested } });
+  assert.deepEqual(warnings, []);
+
+  fs.writeFileSync(configPath, JSON.stringify({ enabled: [id], settings: {
+    [id]: nested, dormant: [], INVALID: {},
+  } }));
+  assert.deepEqual(linuxFeaturesConfig({ featuresRoot }).settings, { [id]: nested });
+  assert.equal(warnings.length, 2, "non-strict reading retains valid entries while warning about invalid ones");
 });
 
 test("native package plans reject missing or malformed app feature snapshots", (t) => {

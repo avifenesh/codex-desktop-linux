@@ -1,14 +1,19 @@
 ---
 name: agent-workspace-linux
-description: "Use when a task needs an isolated hidden Linux desktop or workspace-owned browser: GUI app QA, web/browser/shopping automation, sandboxed app observation, or stale workspace cleanup. Routes agent-workspace-linux MCP tools on demand. Does NOT apply to host desktop/Chrome control, generic MCP setup, or pure code/file edits."
+description: "Use when a task needs a hidden Linux desktop running in the background or a workspace-owned browser: GUI app QA, web/browser/shopping automation, app observation, or stale workspace cleanup. Routes agent-workspace-linux MCP tools on demand. Does NOT apply to host desktop/Chrome control, generic MCP setup, or pure code/file edits."
 ---
 
 # agent-workspace-linux
 
-Drive an isolated, agent-owned Linux desktop and workspace-owned browser through
-the `agent-workspace-linux` MCP server. The workspace runs apps, browser
-automation, screenshots, clipboard, and input inside its own hidden display,
-never the user's real desktop, focus, or host Chrome.
+Drive an agent-owned Linux desktop and workspace-owned browser in the
+background through the `agent-workspace-linux` MCP server. The workspace runs
+apps, browser automation, screenshots, clipboard, and input inside its own
+hidden display, never the user's real desktop, focus, or host Chrome.
+
+It is not a sandbox. Apps you launch there run as the user, with the user's
+files, network, keyring and SSH agent: a `git push`, a sent message or a file
+deleted from a workspace terminal is real. Act as carefully as on the user's
+own machine. Launch Chrome through `workspace_open_browser` or with `--user-data-dir`: a plain launch would hand off to the user's running browser and is refused.
 
 This skill is the lightweight entry point. The MCP exposes many tools; do not
 load, list, or paste them all up front. Route by phase and ask the host to load
@@ -41,29 +46,31 @@ Use this skill only for the hidden workspace. For the user's real Linux desktop,
 real Chrome profile, existing tabs, or host focus/mouse/keyboard, use the
 appropriate host-desktop or browser tool instead.
 
-Skip unless: the requested action can run inside the isolated workspace display
+Skip unless: the requested action can run inside the workspace display
 or workspace-owned browser.
 
 ## When To Use
 
 - GUI app QA in a throwaway desktop.
 - Browser/web/shopping automation that must not hijack host Chrome.
-- Observation of sandboxed windows, logs, events, screenshots, or artifacts.
+- Observation of workspace windows, logs, events, screenshots, or artifacts.
 - Cleanup of stale or orphaned agent workspaces.
 
-Skip unless: the user task requires running or driving a real GUI app/browser in
-isolation. For pure code, shell, or file edits, do not start a workspace.
+Skip unless: the user task requires running or driving a real GUI app/browser
+off the user's screen. For pure code, shell, or file edits, do not start a workspace.
 
 ## Permission Model
 
 - **Default**: no MCP ceiling is configured; the host/client owns approvals.
   Call `mcp_permissions` once before mutating to confirm `configured=false`.
-- **Permission ceiling**: `--permissions PATH` or
-  `AGENT_WORKSPACE_PERMISSIONS` caps network, mounts, and app allowlist for the
-  life of that MCP process. It can only be broadened by changing the config and
+- **App allowlist**: `--permissions PATH` or `AGENT_WORKSPACE_PERMISSIONS`
+  limits which programs agents may launch, for the life of that MCP process. It can only be broadened by changing the config and
   restarting/reconnecting the backend from the owning setup surface.
+- **Action marks**: `mcp_action_catalog` marks each tool read-only, write,
+  destructive or open-world. Ask the user before destructive or open-world
+  actions they did not request.
 - **Live control**: `mcp_control_state` read-only/paused/active is a
-  best-effort runtime control, not the authoritative security boundary.
+  best-effort runtime control, not the authoritative boundary.
 - **Real-world actions**: checkout, purchases, account changes, and messages
   require explicit user approval. Keep drafting separate from final action.
 
@@ -102,6 +109,29 @@ schemas for later phases until the plan reaches them.
 6. Stop: use `workspace_stop` when finished; use `workspace_cleanup_stale` for
    orphaned runtimes.
 
+Session selection supports X11 (`Xvfb` + Openbox), i3 on private Xvfb, and
+native Wayland sessions on KWin, GNOME, Hyprland and COSMIC. MCP callers pass
+`session: {"backend":"<name>"}` with one of `x11`, `kwin`, `gnome`, `i3`,
+`hyprland` or `cosmic`, and may add `"scale":1.5` on the native Wayland
+backends for 150% output scaling. CLI start/open-profile accepts the same
+names with `--session NAME --scale 1.5`. Explicit MCP input overrides the
+profile session; omitting both keeps the pinned X11 default.
+KWin needs version 6.6 or newer, kwin-common, kscreen-doctor, wl-clipboard,
+and an accessible DRM render node. It runs directly, without a parent Xvfb, and
+is not a full Plasma shell. GNOME runs GNOME Shell 50 or 51 with a private
+headless output and software rendering; Mutter accepts only scales the chosen
+output mode supports. Hyprland uses a private KWin renderer and supports
+fractional output scales; see [the Hyprland backend guide](https://github.com/agent-sh/agent-workspace-linux/blob/main/docs/hyprland.md).
+COSMIC runs `cosmic-comp` under a software-only private Weston parent; see
+[the COSMIC guide](https://github.com/agent-sh/agent-workspace-linux/blob/main/docs/native-cosmic.md) for its compositor and
+XWayland dependencies.
+Select i3 with `session: {"backend":"i3"}` or `--session i3`. It uses scale 1,
+needs `i3-wm` and the X11 dependencies including ImageMagick `import`, and has
+no launcher bindings or startup commands. Move and resize float the target window.
+Minimize uses the scratchpad; show restores the window to the current workspace.
+Pointer and window coordinates use screenshot pixels on every backend.
+Unsupported session names are rejected.
+
 Skip unless: each step's precondition is visible in the previous tool result
 (workspace id, app id, target window, browser target, or explicit user approval).
 
@@ -112,7 +142,22 @@ Use the workspace-owned browser over its loopback DevTools endpoint. Start with
 with `workspace_browser_snapshot` or `workspace_browser_search_results`, then
 navigate or click with browser tools.
 
-Skip unless: the task is web/browser automation that can run in the isolated
+Browser tools require a Chrome launched with `--user-data-dir` and loopback
+DevTools. Always get it from `workspace_open_browser` (MCP) or
+`workspace open-browser` (CLI) rather than hand-rolling a `workspace_launch_app`
+argv.
+
+If you attach your own CDP/WebSocket client to that endpoint, omit the `Origin`
+header (e.g. `websocket-client`'s `suppress_origin=True`). The DevTools port is
+ephemeral, so Chrome's origin allow-list cannot be pre-seeded and an `Origin`-
+bearing handshake is rejected with `403 Forbidden`.
+
+After `workspace_browser_navigate` or `workspace_browser_click`, read
+`page.url` / `page.title` for post-action state. `target.*` is refreshed to match,
+but if the refresh fails the response carries a warning saying it may be stale:
+check `warnings` before trusting `target` for verification.
+
+Skip unless: the task is web/browser automation that can run in the
 workspace. Do not attach to host Chrome, Playwright, or Computer Use as a
 shortcut.
 
@@ -143,7 +188,7 @@ Task: "QA the settings dialog of myapp."
 
 ## Constraints
 
-- Keep activation low-noise: only use this skill for isolated GUI/browser work.
+- Keep activation low-noise: only use this skill for background GUI/browser work.
 - Keep context small: frontmatter loads by default; body loads on activation;
   tool schemas load on demand.
 - Omit `allowed-tools` intentionally: different hosts namespace MCP tools

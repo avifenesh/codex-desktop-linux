@@ -5,6 +5,11 @@ Repository features live in `linux-features/<id>/`; private local features live
 in the gitignored `linux-features/local/<id>/`. Every feature requires adjacent
 `feature.json` and `README.md` files.
 
+The manifest `id` must equal the declaring feature directory's final name:
+`<id>` in both repository and `local/<id>` paths, including alternate feature
+roots. Discovery checks the declaration path, not a symlink target's name, and
+reports mismatches without renaming directories or migrating private features.
+
 Features are always disabled by default. Enable them only in the gitignored
 configuration:
 
@@ -22,9 +27,19 @@ configuration:
 remains enabled for updater rebuilds because its validated snapshot is included
 in the custom package's minimal update-builder.
 
-Known retired IDs are discarded during config loading. Other unknown IDs,
-duplicate IDs, malformed settings, default-enabled manifests, unmet
-requirements, and conflicts are errors.
+Known retired IDs and their aliases are discarded during config loading. Other
+unknown enabled IDs, default-enabled manifests, unmet requirements, and
+conflicts are errors. Strict configuration reads (`strictConfig: true`),
+including native package plans, also reject duplicate enabled IDs and malformed
+settings. Non-strict reads warn and ignore malformed settings entries (or the
+whole malformed settings container) and deduplicate enabled IDs.
+
+The entire `settings` field may be omitted or `null`. Otherwise it must be an
+object keyed by syntactically valid feature IDs, with non-null, non-array
+objects as values. Nested business fields remain feature-owned. Retired IDs
+are filtered before validating their values. Settings for disabled features
+are retained; the package/update-builder snapshot exports only enabled feature
+settings.
 
 ## Manifest
 
@@ -50,7 +65,11 @@ requirements, and conflicts are errors.
 
 Use `stageHook` only when the operation cannot be represented declaratively.
 Feature patching supports only `entrypoints.patchDescriptors`; removed legacy
-entrypoint aliases are rejected.
+entrypoint aliases are rejected. `entrypoints` may be omitted, `null`, or an
+empty object. Otherwise it must be an object containing only `patchDescriptors`,
+`stageHook`, and `cleanupHook`; unknown keys fail during manifest discovery in
+both the build loader and setup picker, without executing modules or hooks.
+Entrypoint paths remain relative to and inside the owning feature directory.
 
 Manifest fields:
 
@@ -58,10 +77,11 @@ Manifest fields:
 |---|---|
 | `id` | Stable configuration ID matching the directory name |
 | `title`, `description` | User-facing wizard and documentation text |
-| `defaultEnabled` | Must be `false` for every repository and local feature |
-| `internal` | Optional boolean for build-owned plumbing hidden from public feature selection |
+| `defaultEnabled` | Omitted means `false`; an explicit value must be boolean `false`, including local and internal features |
+| `internal` | Optional boolean for build-owned plumbing hidden from public feature selection; omission means `false`, and explicit `null` or non-boolean values are rejected |
 | `entrypoints.patchDescriptors` | Optional ASAR descriptor module |
 | `entrypoints.stageHook` | Last-resort app staging script |
+| `entrypoints.cleanupHook` | Cleanup script discovered for disabled features |
 | `resources` | Declarative files copied into the app tree |
 | `runtimeHooks` | Launcher environment and lifecycle extensions |
 | `packageResources` | Declarative files outside the app tree in native packages |
@@ -71,16 +91,39 @@ Manifest fields:
 | `requires` | Other feature IDs that must be enabled |
 | `conflicts` | Feature IDs that cannot be enabled together |
 
-Unknown keys and unsafe paths fail validation. A manifest title or description
-does not replace the adjacent README; document setup, settings, side effects,
-cleanup, supported sessions/architectures, and tests there.
+The table describes framework fields, not a whitelist of top-level keys.
+Manifest normalization preserves feature-owned top-level extensions for both
+repository and private features. Their consumers own semantic validation when
+using them; retaining a field does not mean its value has been validated.
+Existing examples include:
+
+| Extension field | Consumer and handling |
+|---|---|
+| `presets` | `model-picker-default-presets/patch.js` validates model/effort preset entries |
+| `petOverlay` | `pet-overlay/patch.js` normalizes overlay defaults and user overrides |
+| `catalogSubfeatures` | `community-features-in-gui-settings/catalog.js` validates subfeature metadata |
+| `officialBundleAuditScenarios` | `scripts/ci/verify-official-linux-features.js` validates audit scenario names and settings containers |
+
+Framework-defined structures have their own constrained keys: `entrypoints`
+rejects unknown entrypoint types during discovery, `runtimeHooks` rejects
+unsupported hook names when planning app resources, and `packageDependencies`
+rejects unsupported package formats when planning dependencies. A top-level
+extension does not register an executable entrypoint or make a misspelled key
+inside `entrypoints` valid. Unsafe paths fail their corresponding resource or
+entrypoint checks.
+
+A manifest title or description does not replace the adjacent README; document
+setup, settings, side effects, cleanup, supported sessions/architectures, and
+tests there.
 
 ## Lifecycle
 
 1. The installer validates enabled manifests and relationships.
-2. If any enabled feature has ASAR descriptors, a temporary ASAR copy is
-   extracted, patched, deterministically repacked, and reported. Otherwise ASAR
-   is never opened.
+2. If required core or enabled feature ASAR descriptors exist, a temporary ASAR
+   copy is extracted and patched. The patch report explains both sets of
+   outcomes; only reported changes trigger deterministic repacking. With no
+   descriptors in either set, ASAR is never extracted and stays byte-identical
+   to the verified official input. Empty feature selection alone is insufficient.
 3. Declarative app resources and launcher hooks are staged.
 4. Remaining legacy stage hooks run.
 5. Native package resources/dependencies/hooks are applied to package staging.
@@ -115,8 +158,35 @@ in the installed package/update-builder only when enabled.
 Descriptor modules export an array or `{ descriptors: [] }`. IDs are reported
 as `feature:<feature-id>:<descriptor-id>`. Supported phases are
 `main-bundle`, `extracted-app:pre-webview`, `webview-asset`, and
-`extracted-app:post-webview`. Descriptors must be idempotent and fail softly
-unless the feature deliberately declares a required acceptance surface.
+`extracted-app:post-webview`. Descriptors must be idempotent. Execution policy
+and candidate acceptance are separate: `ciPolicy` defaults to `optional`, so
+ordinary execution errors may be recorded as warnings or optional skips;
+`enforceWhenEnabled` defaults to `true`, so those outcomes still reject a
+candidate when the owning feature is explicitly enabled. The standard build
+runs `patch-linux-window-ui.js --enforce-critical`, which checks both
+`criticalFailuresFromReport` and `enabledFeatureFailuresFromReport`.
+
+| Report status | Default acceptance for an enabled feature |
+|---|---|
+| `applied`, `already-applied` | Successful |
+| `applied-with-warnings`, `skipped-optional` | Rejected; execution continued but the enabled surface was not validated |
+| `skipped-target`, `skipped-disabled` | Not applicable to this target or descriptor enable gate; not an acceptance failure |
+| `failed-required`, `failed-integrity` | Rejected by the independent critical-failure check |
+
+A descriptor may explicitly set `enforceWhenEnabled: false` only with
+`ciPolicy: "optional"`. This exempts that descriptor from enabled-feature
+acceptance, but cannot bypass required core or integrity failures. Use this
+only for intentionally best-effort behavior, never to conceal enabled-feature
+drift. Required core policy remains independent of feature selection.
+
+An enabled patch entrypoint with an invalid export or descriptor aborts loading
+before patch execution: every descriptor must be an object with a nonempty
+string `id` (or `name`) and an `apply` function. Diagnostics identify the
+feature, module path, and offending item. These input errors cannot become an
+empty successful patch report. Empty descriptor arrays and resource-only
+features are valid; disabled feature modules are not loaded. Execution warnings
+from valid descriptors are reported separately and remain subject to candidate
+acceptance checks.
 
 Features may share ordinary patch libraries in `scripts/patches/lib/`. For
 example, `global-dictation` and `wayland-global-shortcuts` each install an
@@ -277,8 +347,9 @@ node --test scripts/lib/linux-features.test.js linux-features/*/test.js
 ```
 
 An `applied-with-warnings` or optional skip is not evidence that a feature
-works. Required feature surfaces must apply cleanly before the candidate is
-accepted.
+works. Enabled descriptors must apply cleanly before the candidate is accepted,
+unless they carry the explicit optional exemption described above; target and
+descriptor-gate skips retain their not-applicable semantics.
 
 ## Retirement policy
 

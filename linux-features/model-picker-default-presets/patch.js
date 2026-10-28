@@ -12,8 +12,6 @@ const LOCAL_COMPOSER_CONFIG_MARKER =
   "codex-linux-model-picker-default-presets-local-composer-config";
 const LOCAL_COMPOSER_RESOLVER_MARKER =
   "codex-linux-model-picker-default-presets-local-composer-resolver";
-const LOCAL_DRAFT_SELECTION_MARKER =
-  "codex-linux-model-picker-default-presets-local-draft-selection";
 const EXISTING_CHAT_OPTIMISTIC_MARKER =
   "codex-linux-model-picker-default-presets-existing-chat-optimistic-selection";
 const EXISTING_CHAT_PRESET_IDS_KEY = "codexLinuxExistingChatDefaultPresetIds";
@@ -31,6 +29,16 @@ const EFFORT_TO_THINKING_EFFORT = Object.freeze({
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function identifierSpellingPattern(identifier) {
+  return [...identifier].map((character) => {
+    const hex = character.codePointAt(0).toString(16)
+      .replace(/[a-f]/gu, (digit) => `[${digit}${digit.toUpperCase()}]`);
+    const fixedHex = character.codePointAt(0).toString(16).padStart(4, "0")
+      .replace(/[a-f]/gu, (digit) => `[${digit}${digit.toUpperCase()}]`);
+    return `(?:${escapeRegExp(character)}|\\\\u${fixedHex}|\\\\u\\{0*${hex}\\})`;
+  }).join("");
 }
 const THINKING_EFFORT_TO_EFFORT = Object.freeze(
   Object.fromEntries(
@@ -484,6 +492,205 @@ function upstreamDefaultSelectionAssetMatch(source, _assetName, context = {}) {
   return upstreamSliderFilterCondition(section, condition) != null;
 }
 
+function upstreamResetEffectSection(source) {
+  return uniqueFunctionWithMarkers(source, [
+    "fallbackPowerSelection:",
+    "isModelSettingsLoading:",
+    "onReset:",
+    "resetContextKey:",
+    "selectedPowerSelectionWithXHigh:",
+    ".useEffectEvent)(",
+  ]);
+}
+
+function upstreamResetEffectAliases(section) {
+  const properties = [
+    "fallbackPowerSelection",
+    "isModelSettingsLoading",
+    "onReset",
+    "resetContextKey",
+    "selectedPowerSelectionWithXHigh",
+  ];
+  const destructurings = [
+    ...(section?.source ?? "").matchAll(
+      new RegExp(`\\{([^{}]+)\\}=${IDENT}(?=,|;)`, "gu"),
+    ),
+  ].filter((match) =>
+    properties.every((property) =>
+      new RegExp(`(?:^|,)${property}:${IDENT}(?=,|$)`, "u").test(match[1]),
+    )
+  );
+  if (destructurings.length !== 1) return null;
+  const aliases = {};
+  for (const property of properties) {
+    const match = new RegExp(`(?:^|,)${property}:(${IDENT})(?=,|$)`, "u").exec(
+      destructurings[0][1],
+    );
+    if (match == null) return null;
+    aliases[property] = match[1];
+  }
+  return aliases;
+}
+
+function uniqueMatch(source, pattern) {
+  const matches = [...source.matchAll(pattern)];
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function upstreamResetEffectContract(source) {
+  const section = upstreamResetEffectSection(source);
+  if (section == null) return "drifted";
+  const aliases = upstreamResetEffectAliases(section);
+  if (aliases == null) return "drifted";
+  const {
+    fallbackPowerSelection: fallback,
+    isModelSettingsLoading: loading,
+    onReset,
+    resetContextKey: resetContext,
+    selectedPowerSelectionWithXHigh: selected,
+  } = aliases;
+
+  const resolution = uniqueMatch(
+    section.source,
+    new RegExp(
+      `(${IDENT})=${IDENT}\\(\\{[^{}]{0,1200}?canInitializePowerPicker:(${IDENT}),` +
+        `[^{}]{0,1200}?fallbackPowerSelection:${fallback},` +
+        `[^{}]{0,1200}?menuView:(${IDENT}),` +
+        `[^{}]{0,1200}?selectedPowerSelection:${selected},` +
+        `[^{}]{0,1200}?showXHighInSimplePicker:(${IDENT})[^{}]{0,1200}?\\}\\)`,
+      "gu",
+    ),
+  );
+  if (resolution == null) return "drifted";
+  const resolved = resolution[1];
+  const canInitialize = resolution[2];
+  const menuView = resolution[3];
+  const showXHigh = resolution[4];
+  const selection = uniqueMatch(
+    section.source,
+    new RegExp(`(?:let\\s+|,)(${IDENT})=${resolved}(?=,)`, "gu"),
+  )?.[1];
+  if (selection == null) return "drifted";
+  const selectedId = uniqueMatch(
+    section.source,
+    new RegExp(`(${IDENT})=${selection}\\?\\.id\\?\\?null`, "gu"),
+  )?.[1];
+  if (selectedId == null) return "drifted";
+  const resetScope = uniqueMatch(
+    section.source,
+    new RegExp(
+      `(${IDENT})=${selectedId}==null\\?null:\\x60\\$\\{${resetContext}\\}:` +
+        `\\$\\{${selectedId}\\}\\x60`,
+      "gu",
+    ),
+  )?.[1];
+  if (resetScope == null) return "drifted";
+  const resetCallback = uniqueMatch(
+    section.source,
+    new RegExp(
+      `(${IDENT})=(${IDENT})=>\\{${selection}\\?\\.id===\\2&&${onReset}\\(${selection}\\)\\}`,
+      "gu",
+    ),
+  )?.[1];
+  if (resetCallback == null) return "drifted";
+  const resetEvent = uniqueMatch(
+    section.source,
+    new RegExp(
+      `(${IDENT})=\\(0,${IDENT}\\.useEffectEvent\\)\\(${resetCallback}\\)`,
+      "gu",
+    ),
+  )?.[1];
+  const resetRef = uniqueMatch(
+    section.source,
+    new RegExp(`(${IDENT})=\\(0,${IDENT}\\.useRef\\)\\(null\\)`, "gu"),
+  )?.[1];
+  if (resetEvent == null || resetRef == null) return "drifted";
+
+  const effect = uniqueMatch(
+    section.source,
+    new RegExp(
+      `(${IDENT})=\\(\\)=>\\{if\\(!${loading}\\)\\{if\\(!(${IDENT})\\)\\{` +
+        `${resetRef}\\.current=null;return\\}${selectedId}!=null&&${resetScope}!=null&&` +
+        `${resetRef}\\.current!==${resetScope}&&\\(${resetRef}\\.current=${resetScope},` +
+        `${resetEvent}\\(${selectedId}\\)\\)\\}\\}`,
+      "gu",
+    ),
+  );
+  if (effect == null) return "drifted";
+  const active = effect[2];
+  const pickerReady = uniqueMatch(
+    section.source,
+    new RegExp(
+      `(${IDENT})=!${showXHigh}&&${canInitialize}&&${menuView}===([\\x60'"])simple\\2(?=,|;)`,
+      "gu",
+    ),
+  );
+  if (pickerReady == null || pickerReady[1] !== active) return "drifted";
+  const dependencies = uniqueMatch(
+    section.source,
+    new RegExp(
+      `(${IDENT})=\\[${selectedId},${resetScope},${active},${loading}\\]`,
+      "gu",
+    ),
+  );
+  if (dependencies == null || effect.index >= dependencies.index) return "drifted";
+  const effectRegistration = uniqueMatch(
+    section.source,
+    new RegExp(
+      `\\(0,${IDENT}\\.useEffect\\)\\(${effect[1]},${dependencies[1]}\\)`,
+      "gu",
+    ),
+  );
+  if (
+    effectRegistration == null ||
+    dependencies.index >= effectRegistration.index
+  ) {
+    return "drifted";
+  }
+  const auditedScope = section.source;
+  const activeOccurrences = [
+    ...auditedScope.matchAll(
+      new RegExp(`(?<![\\w$])${identifierSpellingPattern(active)}(?![\\w$])`, "gu"),
+    ),
+  ].map((match) => match.index);
+  const effectPredicateIndex =
+    effect.index + effect[0].indexOf(`if(!${active})`) + "if(!".length;
+  const dependencyIndex =
+    dependencies.index + dependencies[0].indexOf(`,${active},`) + 1;
+  const allowedActiveOccurrences = new Set([
+    pickerReady.index,
+    effectPredicateIndex,
+    dependencyIndex,
+  ]);
+  // Compiler-cache reads are allowed only when the very next token is one the
+  // signed bundle uses after them. Listing the allowed tokens (instead of the
+  // forbidden ones) rejects assignments, updates, comments, and line breaks.
+  const cacheReadSuffix = "(?=,|\\|\\|(?!=)|\\?(?![?.=]))";
+  for (const match of auditedScope.matchAll(
+    new RegExp(
+      `${IDENT}\\[\\d+\\](?:!==|=)(${escapeRegExp(active)})${cacheReadSuffix}`,
+      "gu",
+    ),
+  )) {
+    allowedActiveOccurrences.add(
+      match.index + match[0].length - active.length,
+    );
+  }
+  if (
+    pickerReady.index >= effect.index ||
+    activeOccurrences.length !== allowedActiveOccurrences.size ||
+    activeOccurrences.some((index) => !allowedActiveOccurrences.has(index))
+  ) {
+    return "drifted";
+  }
+  return "current";
+}
+
+function upstreamResetEffectAssetMatch(source, _assetName, context = {}) {
+  return normalizePresets(context).length > 0 &&
+    upstreamResetEffectContract(source) === "current";
+}
+
 function sliderPatchContract(source) {
   const markerCount = source.split(SLIDER_PATCH_MARKER).length - 1;
   const sliderSection = sliderResolverSection(source);
@@ -674,20 +881,17 @@ function localComposerRuntime(config) {
     "let codexLinuxAvailable=codexLinuxSelections.filter(({id:codexLinuxId})=>codexLinuxLocalDefaultPresetIds.has(codexLinuxId));" +
     "return codexLinuxAvailable.find(({id:codexLinuxId})=>codexLinuxId===codexLinuxLocalDefaultPresetConfig.codexLinuxDefaultPresetId)??codexLinuxAvailable[0]??null}" +
     "function codexLinuxLocalDefaultPresetFallback(codexLinuxEnabled,codexLinuxSelections,codexLinuxUpstreamDefault){" +
-    "return codexLinuxEnabled?codexLinuxLocalDefaultPresetSelection(codexLinuxSelections)?.id??codexLinuxUpstreamDefault:codexLinuxUpstreamDefault}" +
-    "function codexLinuxLocalDefaultPresetOptions(codexLinuxEnabled,codexLinuxDraft,codexLinuxModel,codexLinuxEffort,codexLinuxOptions){" +
-    "return codexLinuxOptions??(codexLinuxEnabled&&codexLinuxDraft&&codexLinuxLocalDefaultPresetIds.has(`${codexLinuxModel}:${codexLinuxEffort}`)?{persistAsDefault:!1}:void 0)}"
+    "return codexLinuxEnabled?codexLinuxLocalDefaultPresetSelection(codexLinuxSelections)?.id??codexLinuxUpstreamDefault:codexLinuxUpstreamDefault}"
   );
 }
 
 const LOCAL_COMPOSER_FALLBACK_PATTERN =
   /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)==null\?void 0:`\$\{\4\.model\}:\$\{\4\.defaultReasoningEffort\}`\)/gu;
 const LOCAL_COMPOSER_SELECTION_PATTERN = new RegExp(
-  `(?<handler>[A-Za-z_$][\\w$]*)=function\\((?<model>[A-Za-z_$][\\w$]*),(?<effort>[A-Za-z_$][\\w$]*),` +
-    `(?<options>[A-Za-z_$][\\w$]*)\\)\\{[\\s\\S]{0,500}?return (?<delegate>[A-Za-z_$][\\w$]*)==null\\?` +
-    `(?<base>[A-Za-z_$][\\w$]*)\\((?<normalizer>[A-Za-z_$][\\w$]*)\\(\\k<model>\\),\\k<effort>,` +
-    `(?<callback>[A-Za-z_$][\\w$]*),\\k<options>\\):\\k<delegate>\\.selectModelAndReasoningEffort\\(` +
-    `\\k<normalizer>\\(\\k<model>\\),\\k<effort>,\\k<callback>\\)\\}`,
+  `async function (?<handler>[A-Za-z_$][\\w$]*)\\((?<model>[A-Za-z_$][\\w$]*),(?<effort>[A-Za-z_$][\\w$]*)\\)\\{` +
+    `let (?<normalized>[A-Za-z_$][\\w$]*)=(?<normalizer>[A-Za-z_$][\\w$]*)\\(\\k<model>\\);` +
+    `await\\((?<delegate>[A-Za-z_$][\\w$]*)==null\\?(?<base>[A-Za-z_$][\\w$]*)\\(\\k<normalized>,\\k<effort>\\):` +
+    `\\k<delegate>\\.setModelAndReasoningEffort\\(\\k<normalized>,\\k<effort>\\)\\)\\}`,
   "gu",
 );
 
@@ -704,9 +908,8 @@ function localComposerResetContext(section) {
 
 function localComposerConfigContract(source) {
   const markerCount = source.split(LOCAL_COMPOSER_CONFIG_MARKER).length - 1;
-  const draftMarkerCount = source.split(LOCAL_DRAFT_SELECTION_MARKER).length - 1;
   const section = localComposerSection(source);
-  if (markerCount === 0 && draftMarkerCount === 0) {
+  if (markerCount === 0) {
     if (section == null) return "drifted";
     const configMatches = section.source.match(/sliderModelsConfig:[A-Za-z_$][\w$]*/g) ?? [];
     const fallbackMatches = section.source.match(LOCAL_COMPOSER_FALLBACK_PATTERN) ?? [];
@@ -720,12 +923,11 @@ function localComposerConfigContract(source) {
   }
   if (
     markerCount === 1 &&
-    draftMarkerCount === 1 &&
     section != null &&
     section.source.includes(":codexLinuxLocalDefaultPresetConfig") &&
     (section.source.match(/codexLinuxLocalDefaultPresetFallback\(/g) ?? []).length === 2 &&
-    (section.source.match(/codexLinuxLocalDefaultPresetSelection\(/g) ?? []).length === 1 &&
-    section.source.includes(`/*${LOCAL_DRAFT_SELECTION_MARKER}*/`)
+    (section.source.match(/codexLinuxLocalDefaultPresetSelection\(/g) ?? []).length === 0 &&
+    (section.source.match(LOCAL_COMPOSER_SELECTION_PATTERN) ?? []).length === 1
   ) {
     return "applied";
   }
@@ -862,25 +1064,16 @@ function applyLocalComposerConfigPatch(source, context = {}) {
   const configMatch = /sliderModelsConfig:([A-Za-z_$][\w$]*)/u.exec(section.source);
   const fallbackMatches = [...section.source.matchAll(LOCAL_COMPOSER_FALLBACK_PATTERN)];
   const selectionMatches = [...section.source.matchAll(LOCAL_COMPOSER_SELECTION_PATTERN)];
-  const selectionMatch = selectionMatches.length === 1 ? selectionMatches[0] : null;
   const resetContext = localComposerResetContext(section);
-  const reactAlias = /\(0,([A-Za-z_$][\w$]*)\.useRef\)\(/u.exec(section.source)?.[1];
   if (
     configMatch == null ||
     fallbackMatches.length !== 2 ||
-    selectionMatch == null ||
-    resetContext == null ||
-    reactAlias == null
+    selectionMatches.length !== 1 ||
+    resetContext == null
   ) {
     return source;
   }
   const configVariable = configMatch[1];
-  const defaultSelectionsVariable = fallbackMatches[1][3];
-  const {
-    conversation: conversationVariable,
-    cwdOwner: cwdOwnerExpression,
-    hostId: hostIdExpression,
-  } = resetContext;
   let patchedSection = section.source.replace(
     configMatch[0],
     `sliderModelsConfig:${configVariable}==null?${configVariable}:codexLinuxLocalDefaultPresetConfig`,
@@ -888,29 +1081,6 @@ function applyLocalComposerConfigPatch(source, context = {}) {
   patchedSection = patchedSection.replace(
     LOCAL_COMPOSER_FALLBACK_PATTERN,
     `$1=$2($3,codexLinuxLocalDefaultPresetFallback(${configVariable}!=null,$3,$4==null?void 0:\`${"${$4.model}:${$4.defaultReasoningEffort}"}\`))`,
-  );
-  const patchedSelectionMatches = [...patchedSection.matchAll(LOCAL_COMPOSER_SELECTION_PATTERN)];
-  if (patchedSelectionMatches.length !== 1) return source;
-  const currentSelection = patchedSelectionMatches[0];
-  const selectionGroups = currentSelection.groups;
-  const patchedSelection = currentSelection[0]
-    .replace(
-      "return ",
-      "codexLinuxLocalDraftDefaultRef.current=codexLinuxLocalDraftDefaultScope;return ",
-    )
-    .replace(
-      `,${selectionGroups.options}):${selectionGroups.delegate}`,
-      `,codexLinuxLocalDefaultPresetOptions(${configVariable}!=null,${conversationVariable}==null,${selectionGroups.model},${selectionGroups.effort},${selectionGroups.options})):${selectionGroups.delegate}`,
-    );
-  const draftRuntime =
-    `/*${LOCAL_DRAFT_SELECTION_MARKER}*/;let codexLinuxLocalDraftDefaultRef=(0,${reactAlias}.useRef)(null),` +
-    `codexLinuxLocalDraftDefaultScope=${conversationVariable}==null?JSON.stringify([${hostIdExpression},${cwdOwnerExpression}.cwd]):null,` +
-    `codexLinuxLocalDraftDefaultSelection=${configVariable}==null?null:codexLinuxLocalDefaultPresetSelection(${defaultSelectionsVariable});` +
-    `(0,${reactAlias}.useEffect)(()=>{if(codexLinuxLocalDraftDefaultScope==null){codexLinuxLocalDraftDefaultRef.current=null;return}codexLinuxLocalDraftDefaultSelection==null||codexLinuxLocalDraftDefaultRef.current===codexLinuxLocalDraftDefaultScope||(codexLinuxLocalDraftDefaultRef.current=codexLinuxLocalDraftDefaultScope,` +
-    `${selectionGroups.handler}(codexLinuxLocalDraftDefaultSelection.model,codexLinuxLocalDraftDefaultSelection.reasoningEffort,{persistAsDefault:!1}))},[codexLinuxLocalDraftDefaultScope,codexLinuxLocalDraftDefaultSelection?.id]);`;
-  patchedSection = patchedSection.replace(
-    currentSelection[0],
-    patchedSelection + draftRuntime,
   );
   const patchedSource =
     source.slice(0, section.start) +
@@ -947,6 +1117,18 @@ const descriptors = [
     assetMatch: upstreamDefaultSelectionAssetMatch,
     missingDescription: "upstream merged model picker Default-selection bundle",
     skipDescription: "model picker upstream Default-selection compatibility audit",
+    apply: (source) => source,
+  },
+  {
+    id: "model-picker-default-presets-upstream-reset-effect",
+    phase: "webview-asset",
+    order: 20_797.5,
+    ciPolicy: "optional",
+    pattern: JS_ASSET_PATTERN,
+    enabled: (context = {}) => normalizePresets(context).length > 0,
+    assetMatch: upstreamResetEffectAssetMatch,
+    missingDescription: "upstream model picker reset-effect bundle",
+    skipDescription: "model picker upstream reset-effect compatibility audit",
     apply: (source) => source,
   },
   {
@@ -1021,7 +1203,6 @@ module.exports = {
   EXISTING_CHAT_OPTIMISTIC_MARKER,
   LOCAL_COMPOSER_CONFIG_MARKER,
   LOCAL_COMPOSER_RESOLVER_MARKER,
-  LOCAL_DRAFT_SELECTION_MARKER,
   LOCAL_DEFAULT_PATCH_MARKER,
   THINKING_EFFORT_TO_EFFORT,
   JS_ASSET_PATTERN,
@@ -1043,4 +1224,6 @@ module.exports = {
   sliderAssetMatch,
   sliderPatchContract,
   upstreamDefaultSelectionAssetMatch,
+  upstreamResetEffectAssetMatch,
+  upstreamResetEffectContract,
 };
