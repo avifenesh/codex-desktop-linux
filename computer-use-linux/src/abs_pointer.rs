@@ -165,11 +165,12 @@ impl AbsPointer {
             return Err(self.release_after_error(code, error.into()));
         }
         sleep(Duration::from_millis(40));
-        let _end_landing = match self.move_to(end.0, end.1) {
-            Ok(landing) => landing,
-            Err(error) => return Err(self.release_after_error(code, error)),
-        };
-        sleep(Duration::from_millis(40));
+        for (x, y) in crate::pointer_path::drag_points(start, end) {
+            if let Err(error) = self.move_to(x, y) {
+                return Err(self.release_after_error(code, error));
+            }
+            sleep(crate::pointer_path::DRAG_STEP_DELAY);
+        }
         if let Err(error) = self.release_button(code) {
             return Err(self.release_after_error(code, error));
         }

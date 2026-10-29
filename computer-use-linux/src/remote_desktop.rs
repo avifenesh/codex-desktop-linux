@@ -67,6 +67,8 @@ pub struct PortalPointerSession {
     session_handle: OwnedObjectPath,
     streams: Vec<PortalStream>,
     desktop_layout: Option<Vec<LogicalMonitor>>,
+    /// Revalidate against KWin only, so a transient KWin failure cannot swap in kscreen.
+    layout_from_kwin: bool,
     input_lock: Arc<AsyncMutex<()>>,
     valid: Arc<AtomicBool>,
 }
@@ -105,13 +107,13 @@ struct PortalStream {
     pixel_scale: f64,
 }
 
-#[derive(Debug, Clone)]
-struct LogicalMonitor {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    scale: f64,
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LogicalMonitor {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+    pub(crate) scale: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,7 +196,12 @@ pub async fn start_portal_pointer_session() -> Result<PortalPointerSession> {
         bail!("remote desktop portal session started without any monitor streams");
     }
 
-    let desktop_layout = logical_desktop_layout().await;
+    let kwin_layout = kwin_desktop_layout().await;
+    let layout_from_kwin = kwin_layout.is_some();
+    let desktop_layout = match kwin_layout {
+        Some(layout) => Some(layout),
+        None => logical_desktop_layout().await,
+    };
     let mut streams = streams;
     if env_token_contains("XDG_CURRENT_DESKTOP", "gnome")
         && mutter_stage_views_scaled(&connection).await
@@ -224,6 +231,7 @@ pub async fn start_portal_pointer_session() -> Result<PortalPointerSession> {
         session_handle,
         streams,
         desktop_layout,
+        layout_from_kwin,
         input_lock: portal_input_lock(),
         valid: Arc::new(AtomicBool::new(true)),
     })
@@ -263,6 +271,15 @@ pub async fn start_portal_keyboard_session() -> Result<PortalKeyboardSession> {
 fn portal_input_lock() -> Arc<AsyncMutex<()>> {
     static INPUT_LOCK: OnceLock<Arc<AsyncMutex<()>>> = OnceLock::new();
     Arc::clone(INPUT_LOCK.get_or_init(|| Arc::new(AsyncMutex::new(()))))
+}
+
+async fn kwin_desktop_layout() -> Option<Vec<LogicalMonitor>> {
+    if !env_token_contains("XDG_CURRENT_DESKTOP", "kde")
+        && !env_token_contains("XDG_CURRENT_DESKTOP", "plasma")
+    {
+        return None;
+    }
+    crate::windowing::backends::kwin::output_layout().await.ok()
 }
 
 async fn logical_desktop_layout() -> Option<Vec<LogicalMonitor>> {
@@ -765,8 +782,17 @@ pub(crate) async fn drag(
     )
     .await?;
     let mut release_guard = PointerReleaseGuard::new(session, input_guard, operation_guard);
+    let start = (start_x, start_y);
     let (start_stream, start_x, start_y) = session.map_absolute_point(start_x, start_y)?;
-    let (end_stream, end_x, end_y) = session.map_absolute_point(end_x, end_y)?;
+    // Endpoints must be shared. Intermediate motion may cross a monitor gap;
+    // project it onto the nearest shared stream instead of cancelling consent.
+    session.map_absolute_point(end_x, end_y)?;
+    let points = crate::pointer_path::drag_points(start, (end_x, end_y))
+        .map(|point| {
+            drag_point_on_shared_stream(&session.streams, point)
+                .context("remote desktop portal has no usable stream for drag motion")
+        })
+        .collect::<Result<Vec<_>>>()?;
     notify_pointer_motion_absolute(
         &proxy,
         &session.session_handle,
@@ -784,9 +810,10 @@ pub(crate) async fn drag(
     )
     .await?;
     tokio::time::sleep(Duration::from_millis(35)).await;
-    notify_pointer_motion_absolute(&proxy, &session.session_handle, end_stream, end_x, end_y)
-        .await?;
-    tokio::time::sleep(Duration::from_millis(35)).await;
+    for (stream, x, y) in points {
+        notify_pointer_motion_absolute(&proxy, &session.session_handle, stream, x, y).await?;
+        tokio::time::sleep(crate::pointer_path::DRAG_STEP_DELAY).await;
+    }
     notify_pointer_button(
         &proxy,
         &session.session_handle,
@@ -1054,9 +1081,12 @@ impl PortalPointerSession {
             .desktop_layout
             .as_deref()
             .context("remote desktop portal session has no authoritative monitor layout")?;
-        let current = logical_desktop_layout()
-            .await
-            .context("could not revalidate the current monitor layout")?;
+        let current = if self.layout_from_kwin {
+            kwin_desktop_layout().await
+        } else {
+            logical_desktop_layout().await
+        }
+        .context("could not revalidate the current monitor layout")?;
         if !same_monitor_layout(expected, &current) {
             self.invalidate_and_close();
             bail!("desktop monitor layout changed after the remote desktop portal session started");
@@ -1235,6 +1265,33 @@ fn map_capture_axis(value: i32, capture_size: u32, target_origin: i64, target_si
         .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
+fn drag_point_on_shared_stream(
+    streams: &[PortalStream],
+    point: (i32, i32),
+) -> Option<(u32, f64, f64)> {
+    streams
+        .iter()
+        .filter_map(|stream| {
+            let (x, y) = stream.position?;
+            let (width, height) = stream.size?;
+            if width <= 0 || height <= 0 {
+                return None;
+            }
+            let projected = (
+                i64::from(point.0).clamp(i64::from(x), i64::from(x) + i64::from(width) - 1) as i32,
+                i64::from(point.1).clamp(i64::from(y), i64::from(y) + i64::from(height) - 1) as i32,
+            );
+            let dx = i128::from(point.0) - i128::from(projected.0);
+            let dy = i128::from(point.1) - i128::from(projected.1);
+            Some((
+                dx * dx + dy * dy,
+                stream.relative_point(projected.0, projected.1),
+            ))
+        })
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, point)| point)
+}
+
 impl PortalStream {
     fn contains_global_point(&self, x: i32, y: i32) -> bool {
         let Some((stream_x, stream_y)) = self.position else {
@@ -1243,7 +1300,12 @@ impl PortalStream {
         let Some((width, height)) = self.size else {
             return false;
         };
-        x >= stream_x && y >= stream_y && x < stream_x + width && y < stream_y + height
+        width > 0
+            && height > 0
+            && x >= stream_x
+            && y >= stream_y
+            && i64::from(x) < i64::from(stream_x) + i64::from(width)
+            && i64::from(y) < i64::from(stream_y) + i64::from(height)
     }
 
     fn relative_point(&self, x: i32, y: i32) -> (u32, f64, f64) {
@@ -2696,6 +2758,66 @@ mod tests {
         assert_eq!(
             map_capture_point_to_stream_layout(&streams, &layout, 1280, 800, 2560, 1600),
             Some((960, 600))
+        );
+    }
+
+    #[test]
+    fn drag_motion_crosses_monitor_gaps_without_leaving_shared_streams() {
+        let streams = [
+            PortalStream {
+                node_id: 1,
+                position: Some((0, 0)),
+                size: Some((1920, 1080)),
+                pixel_scale: 1.0,
+            },
+            PortalStream {
+                node_id: 2,
+                position: Some((1920, 0)),
+                size: Some((2560, 1440)),
+                pixel_scale: 1.0,
+            },
+        ];
+        let points: Vec<_> = crate::pointer_path::drag_points((100, 1000), (3000, 1400))
+            .map(|point| drag_point_on_shared_stream(&streams, point).unwrap())
+            .collect();
+        assert_eq!(points.last(), Some(&(2, 1080.0, 1400.0)));
+        assert!(points.iter().any(|(id, _, y)| *id == 1 && *y == 1079.0));
+        for (id, x, y) in points {
+            let stream = streams.iter().find(|stream| stream.node_id == id).unwrap();
+            let (width, height) = stream.size.unwrap();
+            assert!(x >= 0.0 && x < f64::from(width));
+            assert!(y >= 0.0 && y < f64::from(height));
+        }
+    }
+
+    #[test]
+    fn kwin_layout_maps_nested_scale_two_capture() {
+        // Recorded in the alpine-kde webtop at SELKIES_SCALING_DPI=192: kscreen-doctor
+        // reports 2128x1152 at scale 1, while KWin and the portal stream are 1064x576.
+        let streams = [PortalStream {
+            node_id: 46,
+            position: Some((0, 0)),
+            size: Some((1064, 576)),
+            pixel_scale: 1.0,
+        }];
+        let layout = crate::windowing::backends::kwin::kwin_output_layout(
+            r#"{"desktopGeometry":{"x":0,"y":0,"width":1064,"height":576},"outputs":[{"name":"WL-0","geometry":{"x":0,"y":0,"width":1064,"height":576},"devicePixelRatio":2}],"windows":[]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            map_capture_point_to_stream_layout(&streams, &layout, 386, 1092, 2128, 1152),
+            Some((193, 546))
+        );
+
+        // The kscreen view of the same session cannot be mapped: this is why KWin is preferred.
+        let kscreen = parse_kscreen_monitor_layout(
+            br#"{"outputs":[{"name":"WL-0","pos":{"x":0,"y":0},"size":{"height":1152,"width":2128},"scale":1,"connected":true,"enabled":true,"replicationSource":0}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            map_capture_point_to_stream_layout(&streams, &kscreen, 386, 1092, 2128, 1152),
+            None
         );
     }
 
