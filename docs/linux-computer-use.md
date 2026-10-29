@@ -19,7 +19,7 @@ It supports:
 - app listing and accessibility trees through AT-SPI
 - screenshots through GNOME Shell DBus, the Codex GNOME Shell extension, or XDG Desktop Portal
 - window listing and focusing on GNOME, KWin/Plasma 5 and 6, Hyprland, Niri,
-  COSMIC, i3, and generic X11/EWMH window managers; GNOME extension and X11
+  COSMIC, i3, labwc with Selkies IPC, and generic X11/EWMH window managers; GNOME extension and X11
   windows can also be moved and resized
 - keyboard, text, click, scroll, and drag input through `/dev/uinput`, XDG
   RemoteDesktop portal, `xdotool` on X11, or `ydotool`
@@ -218,15 +218,17 @@ sudo usermod -a -G input "$USER"
 Then log out and back in.
 
 On X11, install `xdotool` for layout-correct XTEST keyboard/text input and
-coordinate clicks, scrolls and MCP drags, and `wmctrl` plus `xprop` for generic EWMH window listing,
+coordinate clicks, scrolls and MCP drags, and `wmctrl` plus `xprop` for generic
+EWMH window listing,
 focus, move, and resize. `xdotool` is preferred only with a nonempty `DISPLAY`;
 pointer input reports an error when xdotool is unavailable or fails, without
-using a system-wide input fallback. Keyboard input keeps its existing fallback. Override
+using a system-wide input fallback. Keyboard input keeps its existing fallback.
+Override
 keyboard selection with `COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD=1` or
 `CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD=1`; the corresponding
 `*_FORCE_XDOTOOL_KEYBOARD=1` names force XTEST when available. Set
 `COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER=1` or
-`CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER=1` to skip native-X11 xdotool clicks
+`CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER=1` to skip native-X11 xdotool clicks,
 scrolls and MCP drags. Native X11 scroll sends XTEST wheel buttons (4 up, 5 down, 6 left,
 7 right) through xdotool, because GTK 3 drops the single wheel event that
 follows ydotool's absolute move.
