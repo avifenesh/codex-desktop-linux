@@ -60,7 +60,7 @@ jobs:
       - name: Install private D-Bus test session
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends dbus
+          sudo apt-get install -y --no-install-recommends dbus python3-gi
       - name: Test embedded Computer Use in isolation
         env:
           CARGO_BUILD_JOBS: '2'
