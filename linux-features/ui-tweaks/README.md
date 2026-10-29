@@ -126,9 +126,11 @@ cleanup, by design.
 
 Raises the official app's hard-coded UI font-size maximum from 16 px. The same
 upstream limit feeds both the numeric input and the persisted-setting schema.
-That registry is compiled into two main-process support and two webview bundles, so the
-patch requires and updates all four copies atomically instead of
-bypassing only the visible control. Code font sizing is unchanged.
+That registry is compiled into two renderer assets (as a limits object) and into
+the main-process `early-bootstrap.js` entry and `worker.js` (as module-local
+constants bound to the `sansFontSize`/`codeFontSize` schemas), so the patch
+requires and updates all four copies atomically instead of bypassing only the
+visible control. Code font sizing is unchanged.
 
 This tweak is independently disabled by default. Its default extended maximum
 is 24 px and can be configured from 17 through 64 px:
@@ -227,7 +229,9 @@ the upstream setting as the user's runtime on/off control after the feature is
 built into the app.
 
 The current official package keeps the renderer feature-sync bridge in
-`app-initial`, normal Home in `app-primary`, and Work Home in its `page` bundle.
+`app-runtime`, normal Home in `app-primary`, and Work Home in its `page` bundle.
+The main-process eligibility check lives in an rspack `early-bootstrap-*`
+chunk.
 Each bundle has its own semantic contract so a future filename hash change does
 not silently select an unrelated asset.
 

@@ -20,10 +20,12 @@ const {
 
 const emptyConfig = path.join(__dirname, "..", "..", "linux-features", "features.example.json");
 const officialQuitBundle =
-  "function qrt({isWindows:e,quitState:r,windows:i}){" +
-  "let S=!1;l.app.on(`before-quit`,o=>{if(e||r.canQuitWithoutPrompt()){S=!0,i.markAppQuitting();return}" +
-  "if(l.dialog.showMessageBoxSync({message:`Quit?`,buttons:[{messageId:`desktop.quitConfirmation.quit`},`Cancel`]})!==0){o.preventDefault();return}" +
-  "r.markQuitApproved(),S=!0,i.markAppQuitting()})}function next(){}";
+  "let qrt=function({isWindows:e,disableQuitConfirmationPrompt:d,quitState:r,windows:i,settingsStore:x}){" +
+  "let S=!1;l.app.on(\"before-quit\",o=>{if(e||r.canQuitWithoutPrompt()||d){S=!0,i.markAppQuitting();return}" +
+  "let c={formatMessage:e=>e.defaultMessage};0!==l.dialog.showMessageBoxSync({type:\"warning\",message:\"Quit?\"," +
+  "buttons:[c.formatMessage({messageId:\"desktop.quitConfirmation.quit\",defaultMessage:\"Quit\"}),\"Cancel\"]," +
+  "detail:function({answer:e}){return e}({answer:\"Stop chats?\"})})?o.preventDefault():" +
+  "(r.markQuitApproved(),S=!0,i.markAppQuitting())})};function next(){}";
 
 function linuxTarget(id, versionId, desktop) {
   return detectLinuxTargetContext({
@@ -99,7 +101,7 @@ test("the default core registry repairs Quit and shell startup without changing 
     fs.writeFileSync(main, officialQuitBundle);
     const shell = path.join(mainDir, "shell-env-fixture.js");
     fs.writeFileSync(shell, "async function load(a,b){let start=Date.now();e.app.isPackaged||clean();" +
-      "let abort=new AbortController;log(`Failed to load shell env`,{resultSource:`load`})}");
+      "let abort=new AbortController;log(\"Failed to load shell env\",{resultSource:\"load\"})}");
     fs.writeFileSync(webview, "official-webview\n");
     const report = createPatchReport();
     patchExtractedApp(root, {
@@ -128,7 +130,7 @@ test("portable artifacts include the shell repair when built on Ubuntu GNOME", (
     const main = path.join(mainDir, "main.js");
     const shell = path.join(mainDir, "shell-env-fixture.js");
     const shellSource = "async function load(a,b){let start=Date.now();e.app.isPackaged||clean();" +
-      "let abort=new AbortController;log(`Failed to load shell env`,{resultSource:`load`})}";
+      "let abort=new AbortController;log(\"Failed to load shell env\",{resultSource:\"load\"})}";
     fs.writeFileSync(main, officialQuitBundle);
     fs.writeFileSync(shell, shellSource);
     const report = createPatchReport();
@@ -173,4 +175,35 @@ test("missing main bundle records enabled feature drift", (t) => {
     enabledFeatureFailuresFromReport(report).some((failure) => failure.name === entry.name),
     true,
   );
+});
+
+test("main-process chunks are the rspack early-bootstrap entry and its numbered chunks", () => {
+  const { findMainProcessChunks } = require("./lib/assets.js");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runner-rspack-chunks-"));
+  try {
+    const buildDir = path.join(root, ".vite", "build");
+    fs.mkdirSync(buildDir, { recursive: true });
+    for (const name of [
+      "early-bootstrap.js",
+      "early-bootstrap-916-2f6483d5bfd826f1.js",
+      "early-bootstrap-87-929aa7e5d829f2a8.js",
+      "worker.js",
+      "worker-904-f6f849be9d0ea1f7.js",
+      "preload.js",
+      "main-legacy.js",
+    ]) {
+      fs.writeFileSync(path.join(buildDir, name), "");
+    }
+    assert.deepEqual(findMainProcessChunks(root), {
+      buildDir,
+      chunks: [
+        "early-bootstrap-87-929aa7e5d829f2a8.js",
+        "early-bootstrap-916-2f6483d5bfd826f1.js",
+        "early-bootstrap.js",
+      ],
+    });
+    assert.equal(findMainProcessChunks(path.join(root, "missing")), null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
