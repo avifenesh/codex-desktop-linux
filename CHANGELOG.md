@@ -7,6 +7,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Synchronize the embedded Computer Use backend to standalone v0.7.32. Add
+  Selkies labwc window listing and activation, fix Konsole terminal paste and
+  KWin logical output geometry, and repair GNOME capture acknowledgement.
+  Native X11 pointer input now requires `xdotool`: clicks, scrolls and drags
+  use XTEST on the selected display and fail without a system-wide fallback
+  when `xdotool` is missing. Pace drag motion, preserve portal drags across
+  monitor gaps, and attempt button release after press or motion failures.
+- Synchronize the embedded Computer Use backend to standalone v0.7.31. Use
+  per-monitor COSMIC portal coordinates and wait for EIS input readiness.
+  Preserve and verify the target's focus across portal consent, read COSMIC
+  window and output geometry, and avoid opening the GNOME overview when
+  checking existing app focus.
+- Synchronize the embedded Computer Use backend to standalone v0.7.30. Wake
+  command readers when subprocesses finish instead of polling every 10 ms.
+- Synchronize the embedded Computer Use backend to standalone v0.7.29. Cache
+  desktop diagnostics for repeated `get_app_state` calls while rechecking
+  accessibility each time. Refresh diagnostics for verbose requests,
+  observation failures, failed actions and setup changes.
+- Synchronize the embedded Computer Use backend to standalone v0.7.28. Report
+  failed window lookup or activation as backend `unavailable` instead of
+  incorrectly identifying GNOME Shell Introspect.
+- Synchronize the embedded Computer Use backend to standalone v0.7.27. Bound
+  large accessibility-tree tool results to 32,000 bytes, spill the complete
+  compacted tree to a private file, and add `get_tree_page` for hosts that
+  cannot read spill files. Preserve element indices across pages.
+- Synchronize the embedded Computer Use backend to standalone v0.7.26. Find
+  focused Chromium contenteditable editors, return partial trees when
+  snapshots reach their deadline, and allow `max_nodes` up to 10000.
+- Synchronize the embedded Computer Use backend to standalone v0.7.25. Accept
+  explicit AT-SPI logical pointer coordinates through verified KWin geometry,
+  reject ambiguous same-process window ownership, and capture through an
+  already-running desktop portal without requiring a D-Bus activation file.
+
 - Synchronize the embedded Computer Use backend to standalone v0.7.24. Carry scoped semantic recovery, exact Unicode editable-text verification, Qt native actions, KWin fractional-scale and dialog targeting, and X11 dispatch monitoring. Preserve Codex identities, Chrome integration, avatar feedback and cancellation guards.
 
 - Synchronize the embedded Computer Use backend from v0.4.9 to standalone
