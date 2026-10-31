@@ -91,8 +91,11 @@ sockets, literal IP addresses, and `localhost` need no resolver helper. A remote
 hostname in `DISPLAY` requires `getent ahosts` for bounded name resolution;
 missing or failed resolution reports the X11 route as unavailable.
 
-Element-targeted `click` and `scroll` refuse an `element_index` from another
-app's `get_app_state` snapshot and ask for a snapshot of the target. On GNOME
+Element-targeted `click`, `scroll`, `perform_action` and `set_value` refuse an
+`element_index` or `element_identifier` from another app or window and ask for
+a snapshot of the target. `window_id` values are integers up to 2^53-1, which
+JavaScript clients carry exactly; a larger value is refused with a prompt to
+re-run `list_windows`. On GNOME
 Wayland with a scaled monitor, portal pointer input multiplies the stream point
 by the monitor scale, matching mutter's logical layout mode. After targeted
 typing, focus feedback reports an incomplete search or an app without an AT-SPI
@@ -118,6 +121,15 @@ with Ctrl-C or SIGTERM before disabling accessibility. Stop cancels pending
 work and releases the listener without disabling other clients or restoring
 an old setting. Applications launched during a reset/reassertion interval may
 still need restarting.
+
+`get_app_state` returns compact tree nodes by default: null, empty and default
+fields are left out and actions are listed by name. `verbose=true` returns full
+nodes and the full diagnostics dump. `interactive_only=true` keeps only nodes
+with an action, editable text or a value, plus headings, status and live
+regions, windows and dialogs, with the same `element_index` values as the full
+tree. A `title` or `window_id` target narrows an app with several windows under
+one AT-SPI root (Chromium) to that window's subtree, keeping its popups and
+dialogs.
 
 Scope `get_app_state` with `app_name_or_bundle_identifier` or a window target
 (`window_id`, `pid`, `app_id`, `wm_class`, `title`). Without one it returns the
