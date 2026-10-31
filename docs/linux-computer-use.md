@@ -44,6 +44,8 @@ The embedded backend tracks Computer Use 0.7.34. WebKitGTK AT-SPI socket childre
 
 Explicit `x/y` clicks use screenshot capture pixels by default. On KWin Wayland, `coordinate_space: "atspi"` accepts a global AT-SPI screen point together with `element_index` or a semantic selector. Unsupported backends and ambiguous window ownership return an error before pointer input. An already-running desktop portal does not need an activation service file.
 
+On Hyprland, `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1` lets targeted `type_text`, `press_key`, `get_app_state` and `screenshot` work on a window without focusing it, including one on a hidden workspace: keys go through `send_key_state` on the control socket (never in a process's arguments) and the window is captured alone with `grim -T`. The indicator shows the input, masked unless the target field is confirmed non-secret. Text must be printable US-layout ASCII, tab or newline, and the active keymap must be US; anything else is refused before anything is sent. An unfocused Chromium ignores browser accelerators.
+
 MCP discovery probes are supported before initialization, including metadata-bearing discovery requests. Agent activity appears through the native GNOME indicator or the Wayland overlay helper. Captures hide the indicator before reading the screen. Portal captures clean new Pictures files and preserve existing images. Set `CODEX_COMPUTER_USE_INDICATOR=0` to disable action indicators; capture exclusion remains active. GNOME extension version 3 supports Shell 45 through 51. Existing Shell sessions need a logout and login to load refreshed extension files.
 
 ## Runtime Dependencies

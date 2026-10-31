@@ -19,6 +19,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Refuse an unfocused targeted `get_app_state` screenshot before capturing
   anything, instead of grabbing the desktop and raising a portal prompt only
   to discard the image.
+- Hyprland background mode: with `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1`,
+  targeted keyboard input goes through `send_key_state` on the control
+  socket without focusing the window, and unfocused targets are captured
+  with `grim -T`, including windows on hidden workspaces. Keys never appear
+  in process arguments, the indicator shows the input (masked unless the
+  field is confirmed non-secret), and delivery errors say how many presses
+  were confirmed so the caller sends only the remainder.
 - Synchronize the embedded Computer Use backend to standalone v0.7.32. Add
   Selkies labwc window listing and activation, fix Konsole terminal paste and
   KWin logical output geometry, and repair GNOME capture acknowledgement.
