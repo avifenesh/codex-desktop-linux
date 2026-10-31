@@ -100,7 +100,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Connect the pixelflux client to the configured loopback host instead of
   always dialing 127.0.0.1, so `[::1]:PORT` reaches an IPv6-only server. Read
   screenshot dimensions from the PNG header instead of fully decoding the
-  image, and cap the typing request timeout at two minutes.
+  image, cap the typing request timeout at two minutes, and refuse text past
+  the timeout budget before anything is sent instead of timing out mid-typing.
 
 ### Changed
 
