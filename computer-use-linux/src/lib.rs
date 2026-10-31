@@ -18,6 +18,7 @@ pub mod remote_desktop;
 pub mod screenshot;
 pub mod server;
 pub mod terminal;
+pub(crate) mod tree_encoding;
 pub(crate) mod tree_spill;
 pub mod windowing;
 pub mod windows;
