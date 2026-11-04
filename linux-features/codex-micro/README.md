@@ -9,7 +9,10 @@ calls, one settings-visibility call, and one debug-panel call. All four bundles
 must match before any override is written.
 
 It retains only the locally useful feature-gate override, the narrow Linux
-hot-plug watcher, and the udev policy. Native packages install
+hot-plug watcher, and the udev policy. The gate override finds every renderer
+chunk that reads the Codex Micro gate by content (rspack may duplicate a module
+into several lazily loaded chunks) and fails closed when any reader is not one
+of the known app-shell, sidebar, dictation, composer, or settings owners. Native packages install
 `/usr/lib/udev/rules.d/70-codex-micro.rules`; source and AppImage users can
 install the staged copy from
 `.codex-linux/features/codex-micro/70-codex-micro.rules` and then reload udev.
