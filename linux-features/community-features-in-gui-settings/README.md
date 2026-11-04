@@ -3,15 +3,28 @@
 The optional `community-features-in-gui-settings` feature adds a separate
 **Community features** section at the top of **Settings → General**, above the
 existing General section. Expand its catalog to browse an explorer-style tree.
+All root features appear together, without separate dependency/independent
+folders. Every sibling list, including each subfeature/dependent group, sorts by
+the displayed name in the active catalog language: Chinese uses pinyin order,
+and English uses natural alphabetical order (for example, Item 2 before Item 10).
+Sorting ignores case and uses the feature ID as a deterministic tie-breaker for
+equivalent names. Subfeature declaration order does not control display order.
+Feature branches start collapsed.
 A prerequisite is the parent of its dependents; internal subfeatures appear
-under their owning feature and are marked **Subfeature**. Leaf items
-have their own **Installed** / **Not installed** build status. A feature with
-subfeatures instead shows its installed/total count, such as **1/9 installed**,
-in both the collapsed tree row and selected detail row. This counts only its own
-subfeatures, not dependent features; **0/9**, **1/9** and **9/9** distinguish none,
-some and all installed. Zero-installed parents are not marked green. Installed is green
-in both light and dark themes. Independent features
-start in a collapsed folder. Select a feature to see its manifest description,
+under their owning feature's **Subfeatures** section. Individual rows show their
+name and installation status without a repeated **Subfeature** badge.
+Every feature with subfeatures has a separate **Subfeatures (y)** section when
+expanded, even when it has no dependent features. The section header shows its
+installed/total count on the right, such as **1/9 installed**, and its accessible
+label includes the count. Dependent features appear in a separate **Features
+requiring this** section when both kinds of children exist. For example,
+Chronicle's **Subfeatures (2)** header shows **0/2 installed** or **2/2 installed**;
+Record & Replay belongs to the separate dependency section and is excluded.
+Feature rows, subfeature rows and selected detail rows show their own
+**Installed** / **Not installed** build status. Ratios appear only on the
+subfeature section header; **0/9**, **1/9** and **9/9** distinguish none,
+some and all installed. Zero-installed section counts are not marked green. Installed is green
+in both light and dark themes. Select a feature to see its manifest description,
 ID, requirements and conflicts below the tree. All public repository
 features are included, even when disabled. Local features appear only when
 explicitly enabled; internal build plumbing is hidden.
@@ -35,6 +48,38 @@ make install-native
 
 The feature is disabled in committed defaults. Removing its ID and rebuilding
 removes the section. It creates no user data and needs no cleanup.
+
+### Gentoo
+
+Gentoo uses the existing `make bootstrap-native` / `make install-native` path
+with `PACKAGE_WITH_UPDATER=0`. This feature adds no bootstrap, Portage build,
+runtime or merge dependencies, no launcher hook, and no OpenRC/systemd service.
+Its Node.js code runs only in the regular-user builder, which already needs
+Node.js for ASAR patching; the installed view runs inside upstream Electron.
+
+The catalog is embedded in `resources/app.asar` and Portage installs that accepted
+ASAR unchanged. Gentoo has no minimal update-builder, so the deb/RPM/pacman
+snapshot hook is deliberately **not** registered for `ebuild`. It would have
+nothing to preserve and does not justify a Node.js runtime dependency.
+`make update-native` fast-forwards the source checkout and rebuilds the catalog
+from that checkout's manifests and current feature configuration before
+repackaging/reinstalling through Portage. No catalog snapshot or feature source
+needs to be persisted outside the ASAR for this manual update path. This differs
+from the updater's partial source tree described below.
+
+Validation on amd64 OpenRC includes a signed official-bundle build with this
+feature alone, plus a real Portage installation and same-version remerge in an
+isolated ROOT. The second full-source build enabled UI Tweaks and its custom-font
+subfeature; the installed ASAR remained byte-identical to the accepted build and
+the embedded catalog reflected the new selection. The empty test ROOT used
+`--nodeps`, so its expected unresolved-soname warnings are not a dependency-closure
+audit or evidence of a fresh Gentoo installation working.
+
+A temporary native Wayland launch of the rebuilt application was checked by the
+user in Settings → General: the catalog, installed states and font subfeature
+were visible. This did not replace the host package or local feature choices.
+Keyboard navigation, theme switching, a host-root upgrade, Gentoo ARM64 and
+systemd runtime acceptance are not claimed by these checks.
 
 ## UI and data
 
@@ -111,8 +156,7 @@ Declared `requires` relationships define dependency branches; declarative
 not invent parentage. Each internal subfeature counts as one supported item;
 its grouping parent does not add another item. A feature without internal
 subfeatures counts as one, including when other features depend on it.
-Shared dependency nodes are counted once. Folder counts and the summary use
-the same rule. Missing catalog entries have an
+Shared dependency nodes are counted once in the summary. Missing catalog entries have an
 unknown status. Cycle references remain visible but do not expand recursively.
 
 Native deb/RPM/pacman package hooks write a generated `catalog.json` into this
@@ -226,3 +270,9 @@ feature alone against the current signed stable official bundle. On the built
 app, open **Settings → General**, expand/collapse branches, select features,
 and check dark/light themes and keyboard navigation. No feature selection changes
 when browsing.
+
+Gentoo regressions additionally cover default-off selection, empty dependency
+phases, unchanged amd64/arm64 ebuilds and other native hooks, the updater and
+unaudited-feature guards, and full-source catalog refresh without a builder
+snapshot. The fixture tests do not perform a host Portage merge or live GUI
+interaction.

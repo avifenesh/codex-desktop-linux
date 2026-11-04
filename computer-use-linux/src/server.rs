@@ -540,9 +540,25 @@ impl ComputerUseLinux {
             .resolve_accessibility_app_filter(&params, window_context.as_ref(), window_enumerated)
             .await;
         let mut screenshot_captured = None;
+        let mut capture_note = None;
         let (screenshot, screenshot_error) = if include_screenshot {
             let result: Result<ScreenshotCapture> = async {
                 let _pipeline = crate::screenshot::screenshot_pipeline_permit().await?;
+                if let Some(window) = window_context.as_ref() {
+                    if let Some(capture) = self.hyprland_background_capture(window).await {
+                        let (raw, note) = capture?;
+                        screenshot_captured = Some(true);
+                        capture_note = note;
+                        return crate::screenshot::run_image_task(move || {
+                            prepare_screenshot_payload(raw, screenshot_options)
+                        })
+                        .await;
+                    }
+                    // Refuse an unfocused target before capturing: the call must
+                    // not grab the desktop (and raise a portal prompt) only to
+                    // discard it.
+                    ensure_readonly_screenshot_target_is_visible(window)?;
+                }
                 let raw = {
                     let _hold = self.indicator.hold_for_capture().await?;
                     capture_screenshot_raw().await
@@ -551,7 +567,6 @@ impl ComputerUseLinux {
                 let raw = raw?;
                 self.cache_desktop_size(raw.width, raw.height);
                 let crop = if let Some(window) = window_context.as_ref() {
-                    ensure_readonly_screenshot_target_is_visible(window)?;
                     Some(self.window_crop_rect_for_capture(window, &raw).await?)
                 } else {
                     None
@@ -717,6 +732,10 @@ impl ComputerUseLinux {
         } else if let Some(error) = &window_error {
             message.push_str(&format!(" Window target resolution failed: {error}"));
         }
+        if let Some(note) = capture_note {
+            message.push(' ');
+            message.push_str(&note);
+        }
         if let Some(warning) = unscoped_accessibility_tree_warning(
             tree_scoped,
             accessibility_error.is_none(),
@@ -812,9 +831,65 @@ impl ComputerUseLinux {
         result
     }
 
+    /// Background mode for the screenshot tool: an unfocused Hyprland target is
+    /// captured with `grim -T` and never raised.
+    async fn hyprland_background_screenshot(
+        &self,
+        target: &WindowTarget,
+        params: &ScreenshotParams,
+    ) -> Option<Result<CallToolResult>> {
+        if !crate::hyprland_input::background_enabled() {
+            return None;
+        }
+        let windows = list_windows().await.ok()?;
+        let window = resolve_window_target(&windows, target).ok()?.clone();
+        let (raw, note) = match self.hyprland_background_capture(&window).await? {
+            Ok(capture) => capture,
+            Err(error) => return Some(Err(error.context("targeted screenshot failed"))),
+        };
+        let options = params.screenshot_options();
+        let capture = match crate::screenshot::run_image_task(move || {
+            prepare_screenshot_payload(raw, options)
+        })
+        .await
+        {
+            Ok(capture) => capture,
+            Err(error) => return Some(Err(error.context("screenshot resize failed"))),
+        };
+        let mut caption = serde_json::json!({
+            "width": capture.width,
+            "height": capture.height,
+            "coordinate_width": capture.coordinate_width,
+            "coordinate_height": capture.coordinate_height,
+            "scale": capture.scale,
+            "resized": capture.resized,
+            "bytes": capture.bytes,
+            "original_bytes": capture.original_bytes,
+            "max_bytes": capture.max_bytes,
+            "format": capture.format,
+            "quality": capture.quality,
+            "source": capture.source,
+            "cropped_to_window": true,
+            "window_title": window.title,
+            "window_raised": false,
+        });
+        if let Some(note) = note {
+            caption["hidden_workspace_note"] = serde_json::json!(note);
+        }
+        Some(Ok(CallToolResult::success(vec![
+            ContentBlock::image(data_url_payload(&capture.data_url), capture.mime_type),
+            ContentBlock::text(caption.to_string()),
+        ])))
+    }
+
     async fn capture_screenshot(&self, params: ScreenshotParams) -> Result<CallToolResult> {
         let _pipeline = crate::screenshot::screenshot_pipeline_permit().await?;
         let target = params.window_target();
+        if let (Some(target), false) = (target.as_ref(), params.full_screen.unwrap_or(false)) {
+            if let Some(result) = self.hyprland_background_screenshot(target, &params).await {
+                return result;
+            }
+        }
         let target_window = match target.as_ref() {
             Some(target) => Some(
                 self.resolve_screenshot_window(target, params.raise_window.unwrap_or(true))
@@ -2424,6 +2499,22 @@ impl ComputerUseLinux {
         let input_guard =
             InputOperationGuard::new(Arc::clone(&self.input_operation_lock).lock_owned().await);
         let window_target = params.window_target();
+        if let Some(output) = self
+            .hyprland_background_input(
+                "press_key",
+                &params.window_target(),
+                &params.key,
+                crate::hyprland_input::chord_to_key_press(&params.key)
+                    .map(|press| vec![press])
+                    .ok_or_else(|| {
+                        "Unsupported key. Use names like Enter, Escape, Tab, ArrowLeft, Super, Ctrl+L, or a single US keyboard letter/digit.".to_string()
+                    }),
+                received.clone(),
+            )
+            .await
+        {
+            return Json(output);
+        }
         let focus = match self.focus_target_for_input(&window_target).await {
             Ok(focus) => focus,
             Err(message) => {
@@ -2649,6 +2740,18 @@ impl ComputerUseLinux {
         let input_guard =
             InputOperationGuard::new(Arc::clone(&self.input_operation_lock).lock_owned().await);
         let window_target = params.window_target();
+        if let Some(output) = self
+            .hyprland_background_input(
+                "type_text",
+                &window_target,
+                &params.text,
+                crate::hyprland_input::text_to_key_presses(&params.text),
+                received.clone(),
+            )
+            .await
+        {
+            return Json(output);
+        }
         let focus = match self.focus_target_for_input(&window_target).await {
             Ok(focus) => focus,
             Err(message) => {
@@ -3006,7 +3109,7 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.7.34",
+    version = "0.7.35",
     instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send literal type_text through KDE clipboard integration on Plasma Wayland, wtype on compatible Wayland compositors, or portal keysyms on other Wayland sessions. Portal text startup or conversion failures return an error without replaying through ydotool. GNOME preflights the complete text against every configured keyboard layout group because the background reader cannot establish the active group; rejected text can use set_value on an editable field. Raw ydotool text is limited to printable ASCII, tab and newline, uses US physical key positions, and requires checking the resulting field contents under the active layout. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Mutating tools (click, type_text, press_key, scroll, drag, perform_action, set_value, activate_window, move_window, resize_window) accept optional screenshot_after (true, \"screen\", or \"window\") with format/quality/scale/max_width/max_height/max_bytes and optional include_tree=true to return post-action observation in the same tool call. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when a concrete non-terminal focus is not editable. Exact window focus alone does not suppress a missing-focus warning; only a complete scoped tree containing window/menu chrome without content makes it informational. Terminals accept keyboard input without an EditableText interface. On Hyprland, wtype uses a single literal argument after -- to avoid stdin keymap-refresh corruption; text is visible in process arguments, so confirmed password fields are rejected (use set_value). Terminals and ambiguous fields, with or without AT-SPI, use private stdin for at most 100 Unicode characters per call; split larger input into smaller calls or expose accessibility. Input classification has its own 1500 ms budget, independent of the 250 ms cosmetic indicator timeout. Other compatible compositors retain stdin. The wtype path rejects NUL and more than 131071 UTF-8 bytes before focus or indicators. X11 xdotool can silently substitute symbols under non-US XKB layouts (reported with br/ABNT2) or changing keymap state; inspect the text before pressing Enter or submitting it. A successful type_text result confirms dispatch only; every text backend leaves field contents unverified. Re-observe the target before retrying. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block and compact tree nodes (null, empty and default fields left out, actions listed by name) by default; pass verbose=true for the full diagnostics dump and full nodes. Pass interactive_only=true to get only nodes with an action, editable text or a value, plus headings, status/live regions, windows and dialogs; containers are collapsed and element_index values match the full tree. A title or window_id target narrows an app that exposes several windows under one AT-SPI application root (Chromium) to that window's subtree, keeping the app's popups and dialogs. Scope get_app_state with app_name_or_bundle_identifier or a window target (window_id, pid, app_id, wm_class, title); without one it returns the whole desktop AT-SPI tree, reports tree_scoped=false, and warns in message, which can flood context. accessibility_tree_truncated=true means the node, depth, read, or time budget stopped traversal with unread elements left; recover by scoping to a narrower app or window target and raising max_nodes or max_depth (hard caps 10000 and 64), not by lowering max_nodes. A compacted tree too large to return inline comes back as its leading nodes plus accessibility_tree_spill.path, a private JSON file with the whole tree and the same element_index values; search that file instead of requesting the tree again, or page through it with get_tree_page when files are not readable. Electron apps with only window/menu chrome may need --force-renderer-accessibility to expose renderer content. run_shell is absent unless CODEX_COMPUTER_USE_ENABLE_SHELL=1 or the standalone COMPUTER_USE_LINUX_ENABLE_SHELL=1 compatibility alias; when enabled it is same-user arbitrary host execution, not a sandbox, and hosts should require explicit approval."
 )]
 impl ServerHandler for ComputerUseLinux {}
@@ -5524,6 +5627,142 @@ impl ComputerUseLinux {
             return Some(UNMATCHABLE_ACCESSIBILITY_APP_FILTER.to_string());
         }
         candidates.into_iter().next()
+    }
+
+    /// Hyprland background capture: when opted in with
+    /// `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1` and the target is an
+    /// unfocused Hyprland window, capture just that window with `grim -T`
+    /// instead of raising it or grabbing the desktop through the portal.
+    /// Returns `None` to fall through to the regular capture path. The note
+    /// explains the repeated capture used for windows on hidden workspaces.
+    async fn hyprland_background_capture(
+        &self,
+        window: &WindowInfo,
+    ) -> Option<Result<(RawScreenshotCapture, Option<String>)>> {
+        if !crate::hyprland_input::background_enabled()
+            || window.backend != registry::HYPRLAND_BACKEND
+            || window.focused
+        {
+            return None;
+        }
+        Some(
+            async {
+                let capture =
+                    crate::windowing::backends::hyprland::capture_window(window.window_id).await?;
+                let note = capture.hidden_workspace.as_ref().map(|hidden| {
+                    let state = if hidden.settled {
+                        "the last two frames matched, so the image is current"
+                    } else {
+                        "frames were still changing (animation, caret or loading), so details may lag"
+                    };
+                    format!(
+                        "Window_id {} is on hidden workspace {}, which Hyprland does not repaint; it was captured {} times so the window drew current frames, and {state}. The accessibility tree stays authoritative.",
+                        window.window_id, hidden.workspace, hidden.captures
+                    )
+                });
+                let source = match &capture.hidden_workspace {
+                    Some(hidden) if hidden.settled => {
+                        "hyprland-grim-toplevel (hidden workspace, settled)"
+                    }
+                    Some(_) => "hyprland-grim-toplevel (hidden workspace, still changing)",
+                    None => "hyprland-grim-toplevel",
+                };
+                Ok((
+                    RawScreenshotCapture {
+                        mime_type: "image/png".to_string(),
+                        bytes: capture.png,
+                        source: source.to_string(),
+                        width: capture.width,
+                        height: capture.height,
+                    },
+                    note,
+                ))
+            }
+            .await,
+        )
+    }
+
+    /// Hyprland background input: when opted in with
+    /// `COMPUTER_USE_LINUX_HYPRLAND_BACKGROUND=1` and the call names a
+    /// target window, keys go to that window through `send_key_state` without
+    /// focusing it, so the user's focus, cursor and workspace stay put.
+    /// Returns `None` to fall through to the focus-then-type path.
+    async fn hyprland_background_input(
+        &self,
+        action: &str,
+        target: &WindowTarget,
+        shown: &str,
+        presses: std::result::Result<Vec<crate::hyprland_input::KeyPress>, String>,
+        received: Option<serde_json::Value>,
+    ) -> Option<ActionOutput> {
+        if !crate::hyprland_input::background_enabled()
+            || !target.has_target()
+            || !env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktop| {
+                desktop
+                    .split(':')
+                    .any(|part| part.eq_ignore_ascii_case("hyprland"))
+            })
+        {
+            return None;
+        }
+        let fail = |message: String| Some(action_result(action, Err(message), received.clone()));
+        let presses = match presses {
+            Ok(presses) => presses,
+            Err(message) => return fail(message),
+        };
+        let windows = match list_windows().await {
+            Ok(windows) => windows,
+            Err(error) => return fail(format!("Did not send input: {error:#}")),
+        };
+        let window = match resolve_window_target(&windows, target) {
+            Ok(window) => window.clone(),
+            Err(error) => return fail(format!("Did not send input: {error:#}")),
+        };
+        if window.backend != registry::HYPRLAND_BACKEND {
+            return None;
+        }
+        match crate::windowing::backends::hyprland::devices_json().await {
+            Ok(json) if crate::hyprland_input::keymap_is_us(&json) => {}
+            Ok(_) => {
+                return fail(
+                    "Did not send input: Hyprland background input maps keys for a US layout, and the active keymap is not US.".to_string(),
+                )
+            }
+            Err(error) => return fail(format!("Did not send input: {error:#}")),
+        }
+        // The target is not focused, so probe its own app. Anything that is
+        // not a confirmed non-secret field is masked on the indicator.
+        // Without a pid the probe would read the user's focused app instead.
+        let probe = match window.pid {
+            Some(pid) if self.indicator.enabled() => {
+                timeout(Duration::from_millis(250), probe_focused_element(Some(pid)))
+                    .await
+                    .ok()
+                    .and_then(|probe| probe.ok())
+            }
+            _ => None,
+        };
+        let secret = probe.as_ref().is_none_or(focus_requires_secret_protection);
+        if action == "press_key" {
+            self.indicator.keys(shown, secret).await;
+        } else {
+            self.indicator.text(action, shown, secret).await;
+        }
+        let result =
+            crate::windowing::backends::hyprland::send_key_events(window.window_id, &presses).await;
+        Some(match result {
+            Ok(()) => successful_action_with_focus(
+                action,
+                &format!(
+                    "Action sent through Hyprland send_key_state to window_id {} ({} key presses) without focusing it; focus, cursor and workspace were not changed.",
+                    window.window_id,
+                    presses.len()
+                ),
+                received,
+                None,
+            ),
+            Err(error) => action_result(action, Err(format!("{error:#}")), received),
+        })
     }
 
     async fn focus_target_for_input(
