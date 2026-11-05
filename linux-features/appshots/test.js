@@ -270,6 +270,8 @@ test("bare modifier monitor emits one transition from one XInput2 stream", () =>
         DISPLAY: ":99",
         APPSHOT_TEST_XINPUT_PID_FILE: path.join(tempDir, "producer.pid"),
         PATH: `${binDir}:${process.env.PATH}`,
+        // stdbuf (uutils) leaves an empty .tmpXXXXXX in TMPDIR; keep it in the fixture.
+        TMPDIR: tempDir,
       },
       timeout: 2_000,
     });
@@ -303,6 +305,8 @@ test("bare modifier monitor fails before ready when XInput2 exits during startup
         ...process.env,
         DISPLAY: ":99",
         PATH: `${binDir}:${process.env.PATH}`,
+        // stdbuf (uutils) leaves an empty .tmpXXXXXX in TMPDIR; keep it in the fixture.
+        TMPDIR: tempDir,
       },
       timeout: 2_000,
     });
