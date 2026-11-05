@@ -237,10 +237,19 @@ if command -v stdbuf >/dev/null 2>&1; then
     stdbuf_dir="$(mktemp -d "${TMPDIR:-/tmp}/codex-appshots-stdbuf.XXXXXX" 2>/dev/null)" || stdbuf_dir=""
 fi
 coproc APPSHOT_XINPUT { start_xinput; }
-monitor_pid="$APPSHOT_XINPUT_PID"
-# Bash closes its coprocess descriptor when the producer exits. Own a duplicate
-# so events already buffered in the pipe can still be consumed.
-exec {event_fd}<&"${APPSHOT_XINPUT[0]}"
+# Bash closes its coprocess descriptor and unsets these variables once the
+# producer exits, which a stream that fails at once can do before the next
+# line runs. Own a duplicate of the descriptor so events already buffered in
+# the pipe can still be consumed; without one, the stream already died.
+monitor_pid="${APPSHOT_XINPUT_PID:-}"
+stream_fd="${APPSHOT_XINPUT[0]:-}"
+if [ -n "$monitor_pid" ] && [ -n "$stream_fd" ]; then
+    { exec {event_fd}<&"$stream_fd"; } 2>/dev/null || event_fd=""
+fi
+if [ -z "$monitor_pid" ] || [ -z "$event_fd" ]; then
+    echo "permission-denied"
+    exit 1
+fi
 
 sleep 0.1
 if ! kill -0 "$monitor_pid" >/dev/null 2>&1; then
