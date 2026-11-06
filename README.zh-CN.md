@@ -234,7 +234,8 @@ Nix 用户应从 profile、Home Manager 配置或 NixOS module 中删除该包�
 | Nix flake | 手动构建 | `nix run github:ilysenko/codex-desktop-linux` |
 | 事务式更新管理器 | 原生包 | 除非设置 `PACKAGE_WITH_UPDATER=0` |
 | 官方 Browser 和 Chrome 集成 | 上游提供 | 直接复用官方 Linux 实现，不保留旧移植层 |
-| 可聚焦的退出确认框 | 始终启用 | 必要兼容性补丁在 Linux 上为上游确认框设置父窗口 |
+| 可靠的 shell 环境启动 | 始终启用 | 由已验证的上游 runtime 负责；不应用核心 shell 启动补丁 |
+| 可靠地完成已批准的退出 | 始终启用 | 必需的核心补丁在唯一的 `before-quit` owner 中消费上游退出批准，使清理流程能够到达 `will-quit` |
 | Linux 可选扩展框架 | 默认关闭 | 使用 `make setup-native` 配置 |
 | 独立桌面标识 | 始终启用 | **ChatGPT Community**、蓝色 `C` 图标、`codex-desktop` package identity |
 
@@ -263,6 +264,7 @@ Nix 用户应从 profile、Home Manager 配置或 NixOS module 中删除该包�
 | `computer-use-linux` | Linux desktop-control UI 与原生 MCP backend | [文档](linux-features/computer-use-linux/README.md) |
 | `copilot-reasoning-effort` | Copilot auth 的 reasoning-effort 默认值 | [文档](linux-features/copilot-reasoning-effort/README.md) |
 | `desktop-identity` | 通知与子进程使用 Community 桌面入口标识，以正确显示图标 | [文档](linux-features/desktop-identity/README.md) |
+| `desktop-new-window` | 在 ChatGPT Community 桌面启动器中添加“新建窗口”操作 | [文档](linux-features/desktop-new-window/README.md) |
 | `directory-only-working-tree-watch` | 有界 Watchbound 工作树监听 | [文档](linux-features/directory-only-working-tree-watch/README.md) |
 | `filesystem-root-follow-ups` | 允许工作目录为 `/` 的现有本地任务继续发送消息 | [文档](linux-features/filesystem-root-follow-ups/README.md) |
 | `flatpak-chrome-native-messaging` | 将官方 Chrome 扩展连接到 Flatpak Google Chrome | [文档](linux-features/flatpak-chrome-native-messaging/README.md) |
@@ -291,6 +293,7 @@ Nix 用户应从 profile、Home Manager 配置或 NixOS module 中删除该包�
 | `start-minimized-to-tray` | 在常规设置中添加默认关闭的启动到系统托盘选项，可选择每次启动或仅登录自动启动时隐藏窗口 | [文档](linux-features/start-minimized-to-tray/README.md) |
 | `thorium-chrome-plugin` | 为官方 Chrome integration 添加 Thorium | [文档](linux-features/thorium-chrome-plugin/README.md) |
 | `tray-usage` | 在 Linux 系统托盘菜单显示剩余用量 | [文档](linux-features/tray-usage/README.md) |
+| `usage-limit-send-attempt` | 登录账户用量耗尽时，仍允许在本地 Codex 对话中尝试发送消息 | [文档](linux-features/usage-limit-send-attempt/README.md) |
 | `ui-tweaks` | 可选 UI 与交互自定义 | [文档](linux-features/ui-tweaks/README.md) |
 
 若要在 GNOME Wayland 下听写时避免 RemoteDesktop 权限提示，请通过
