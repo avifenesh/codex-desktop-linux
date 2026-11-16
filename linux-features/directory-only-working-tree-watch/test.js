@@ -139,7 +139,7 @@ const CURRENT_GIT_ROUTE_PREFIX =
   "return{git:{getWatchIgnoreSources:s?void 0:" +
   "()=>({getEnvironment:async()=>(function(){let e=process.env.HOME;" +
   'return{defaultExcludesFile:null==e?null:`${e}/.config/git/ignore`,globalConfigFiles:[]}})(),' +
-  "getWatchTargets:Bee,pruneIgnoredDirectories:!0})," +
+  'getWatchTargets:Bee,pruneIgnoredDirectories:"darwin"===process.platform?"observed":"all"}),' +
   "createExecutionHost:h=>{if(h.id===e.id&&!isRemote(h))return e;" +
   'if(null==n)throw Error("Git hosts require a main RPC connection");' +
   "return new nde(n,h)},startMetadataWatch:(t,n)=>t.isLocal?" +
@@ -341,7 +341,7 @@ test("correlates minified aliases instead of pinning their spellings", () => {
   const gitRoutePrefix =
     "case\"git\":{let ignoreSource=getIgnoreSource(),localHost=new LocalHost(ignoreSource,event=>{notify(event)});return{git:{" +
     "getWatchIgnoreSources:ignoreSource?void 0:()=>({getEnvironment:async()=>(function(){return readIgnoreEnvironment()})()," +
-    "getWatchTargets:getWatchTargets,pruneIgnoredDirectories:!0}),createExecutionHost:executionOptions=>{" +
+    'getWatchTargets:getWatchTargets,pruneIgnoredDirectories:"darwin"===process.platform?"observed":"all"}),createExecutionHost:executionOptions=>{' +
     "if(executionOptions.id===localHost.id&&!isRemote(executionOptions))return localHost;" +
     "if(null==mainConnection)" +
     "throw Error(\"Git hosts require a main RPC connection\");" +
@@ -1579,6 +1579,39 @@ test("Watchbound staging prefers the copied app runtime over the upstream fallba
     node: "24.15.0",
     qualification: "signed-runtime-executable",
   });
+});
+
+test("Watchbound packages stage from read-only source directories", async (t) => {
+  const extractedDir = tempDirectory(t, "watchbound-extracted-app-");
+  writeExtractedAppRuntime(extractedDir);
+  const fixture = packageFixtureManifest(t);
+  // A Nix store source has no owner-write bit on its directories, and newer
+  // Node releases give cpSync destination directories the source mode.
+  const sourceDirs = [
+    "watchbound",
+    "@gadicc/watchbound-node",
+    "@gadicc/watchbound-node-linux-x64-gnu",
+  ].map((name) => fixture.packages.get(name));
+  for (const sourceDir of sourceDirs) fs.chmodSync(sourceDir, 0o555);
+
+  try {
+    const result = await stageWatchboundPackages(packageStageOptions(extractedDir, fixture, {
+      arch: "x64",
+      materializePackage: fixtureMaterializer(fixture),
+    }));
+    assert.equal(result.changed, true);
+  } finally {
+    for (const sourceDir of sourceDirs) fs.chmodSync(sourceDir, 0o755);
+  }
+
+  assert.equal(
+    fs.readFileSync(path.join(packageTarget(extractedDir, "watchbound"), "index.js"), "utf8"),
+    "export const fixture = true;\n",
+  );
+  assert.deepEqual(
+    fs.readdirSync(extractedDir).filter((name) => name.startsWith(".codex-watchbound-")),
+    [],
+  );
 });
 
 test("verified Watchbound packages stage idempotently into app node_modules", async (t) => {
