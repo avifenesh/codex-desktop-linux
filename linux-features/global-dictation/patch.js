@@ -87,7 +87,8 @@ function unsupportedPlatformCases(message) {
 function hotkeyRegistration(registerFunction, gesture, optionsPattern) {
   return new RegExp(
     `${escapeRegexLiteral(registerFunction)}\\((?<accelerator>${IDENT}),\\{(?<callbacks>(?:(?!\\},\\{(?:ownership:|bareModifierTrigger:))[\\s\\S]){0,1200}?` +
-      `shortcutGestures\\.press\\(${literal(gesture)},[\\s\\S]{0,300}?` +
+      // 26.1117 presses `this.hasSharedHotkey()?"shared":"primary"` for the hold hotkey.
+      `shortcutGestures\\.press\\((?:this\\.hasSharedHotkey\\(\\)\\?${literal("shared")}:)?${literal(gesture)},[\\s\\S]{0,300}?` +
       `shortcutGestures\\.release\\(${literal(gesture)}\\)[\\s\\S]{0,300}?` +
       `shortcutGestures\\.cancelPress\\(${literal(gesture)}\\)[\\s\\S]{0,120}?)\\},` +
       `\\{${optionsPattern}\\}\\)`,

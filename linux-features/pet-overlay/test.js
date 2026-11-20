@@ -94,6 +94,50 @@ function currentAvatarOverlayBundleFixture() {
     "function dragMessage(e,t,n){switch(n.type){case\"avatar-overlay-drag-start\":{let r=fL(n),i=r==null?{pointerWindowX:n.pointerWindowX,pointerWindowY:n.pointerWindowY}:{...r,pointerWindowX:n.pointerWindowX,pointerWindowY:n.pointerWindowY};e.startDrag(t.id,i,n.usesOrbPhysics);return}}}";
 }
 
+// Signed 26.1117.31558 shape: drag and focus methods resolve the caller's
+// window through getWindowForRenderer and the final pointer move joins the
+// endDrag completion condition.
+function callerWindowBundleFixture() {
+  const replaceOnce = (source, from, to) => {
+    assert.equal(source.split(from).length, 2, from);
+    return source.replace(from, to);
+  };
+  let source = currentAvatarOverlayBundleFixture();
+  source = replaceOnce(source, "isOpen(){", "getWindowForRenderer(e){let t=this.window;return null==t||t.isDestroyed()||t.webContents.id!==e?null:t}isOpen(){");
+  source = replaceOnce(source, "setKeyboardInteraction(e,t,n=!1){let r=this.window;if(null==r||r.isDestroyed()||r.webContents.id!==e||t&&",
+    "setKeyboardInteraction(e,t,n=!1){let r=this.getWindowForRenderer(e);if(null==r||t&&");
+  source = replaceOnce(source, "startDrag(e,t,n=!1){let r=this.window;if(r==null||r.isDestroyed()||r.webContents.id!==e)return;",
+    "startDrag(e,t,n=!1){let r=this.getWindowForRenderer(e);if(null==r)return;");
+  source = replaceOnce(source, "moveDrag(e,t){let n=this.window;if(n==null||n.isDestroyed()||n.webContents.id!==e||this.dragState==null)return;",
+    "moveDrag(e,t){let n=this.getWindowForRenderer(e);if(null==n||null==this.dragState)return;");
+  source = replaceOnce(source, "endDrag(e,t,n=!1,r=`released`){let i=this.window;if(i==null||i.isDestroyed()||i.webContents.id!==e||this.dragState==null)return;",
+    "endDrag(e,t,n=!1,r=`released`){var f;let i=this.getWindowForRenderer(e);if(null==i||null==this.dragState)return;");
+  const foldStart = source.indexOf("if(o)this.handleNativeWindowDragMove(i,c),");
+  const foldEnd = source.indexOf("if(this.suppressNextRendererThrow=", foldStart);
+  assert.ok(foldStart >= 0 && foldEnd > foldStart);
+  source = source.slice(0, foldStart) +
+    'if(o?(this.handleNativeWindowDragMove(i,c),this.logger().info("Native pet window drag finished",{safe:{reason:r}})):a.hasMovementIntent&&this.moveDragToPointer(i,h4(t)),' +
+    source.slice(foldEnd + "if(".length);
+  return source + "function h4(e){return{x:e?.pointerScreenX??0,y:e?.pointerScreenY??0}}";
+}
+
+test("caller-resolved window methods get the complete pet overlay patch", () => {
+  const source = callerWindowBundleFixture();
+  const { result: patched, warnings } = captureWarnings(() => applyPetOverlayPatch(source));
+  assert.deepEqual(warnings, []);
+  assert.notEqual(patched, source);
+  new vm.Script(patched);
+  assert.equal(captureWarnings(() => applyPetOverlayPatch(patched)).result, patched);
+  assert.match(patched, /this\.codexPetOverlayBeginCompositorDrag\(r,t\)\}/);
+  assert.match(patched, /this\.codexPetOverlayMoveCompositorDrag\(n,t\)\|\|this\.nativeWindowDragActive\)return;/);
+  assert.ok(patched.includes(':a.hasMovementIntent&&this.moveDragToPointer(i,h4(t));this.codexPetOverlayEndKWinDrag(i,()=>{if(this.suppressNextRendererThrow='));
+  assert.ok(patched.includes("return this.codexPetOverlayKWinKeyboard(r,t,()=>{"));
+  const foreign = source.replace("moveDrag(e,t){let n=this.getWindowForRenderer(e);", "moveDrag(e,t){let n=this.getWindowForRenderer(t);");
+  const drifted = captureWarnings(() => applyPetOverlayPatch(foreign));
+  assert.equal(drifted.result, foreign);
+  assert.ok(drifted.warnings.length > 0);
+});
+
 function retiredCompactDragCompletionBundleFixture() {
   const source = currentAvatarOverlayBundleFixture();
   const start = source.indexOf("endDrag(e,t,n=!1,r=`released`){");

@@ -474,9 +474,12 @@ test("UI font size discovery finds the signed official main and rspack webview r
   const root = process.env.CODEX_SIGNED_EXTRACTED_APP;
   const discovery = findUiFontSizeBundles(root);
   assert.equal(discovery.reason, null);
-  assert.equal(discovery.candidates.length, EXPECTED_FONT_SIZE_BUNDLE_COUNT);
+  assert.equal(discovery.candidates.length, 8);
   const relative = discovery.candidates.map(({ filePath }) => path.relative(root, filePath));
-  assert.equal(relative.filter((name) => name.startsWith(path.join(".vite", "build"))).length, 2);
+  assert.deepEqual(relative.filter((name) => name.startsWith(path.join(".vite", "build"))).sort(), [
+    "app-server-host.js", "chat-search-worker.js", "early-bootstrap.js",
+    "process-telemetry-worker.js", "sqlite-writer.js", "worker.js",
+  ].map((name) => path.join(".vite", "build", name)));
   assert.equal(relative.filter((name) => name.startsWith(path.join("webview", "assets", "async"))).length, 2);
   for (const { source, state } of discovery.candidates) {
     assert.equal(state, "current");
@@ -890,6 +893,52 @@ test("reasoning effort descriptor rejects missing, duplicate and mismatched loca
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  }
+});
+
+test("reasoning effort descriptor rewrites the 26.1117 gzip zh-CN catalog in place", () => {
+  const zlib = require("node:zlib");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ui-tweaks-zh-cn-gzip-"));
+  try {
+    const assetsDir = path.join(root, "webview", "assets");
+    fs.mkdirSync(path.join(assetsDir, "async"), { recursive: true });
+    fs.mkdirSync(path.join(assetsDir, "locales"), { recursive: true });
+    fs.writeFileSync(path.join(assetsDir, "async", "972521.8b15fff44b.js"),
+      "export const __rspack_esm_ids=[972521];export const __webpack_modules__={abcd(e,t,i){let n={" +
+      '"../locales/zh-CN.json":function(){return i.e(547807).then(i.bind(i,"F4or"))},' +
+      '"../locales/zh-TW.json":function(){return i.e(645427).then(i.bind(i,"nQdE"))}}}};');
+    const keysFile = "keys.f10c33ea71d5a779.json.codex-gzip";
+    const valuesFile = "zh-CN.keys.f10c33ea71d5a779.ea3e9265a7acd305.json.codex-gzip";
+    fs.writeFileSync(path.join(assetsDir, "async", "547807.2dd5264152.js"),
+      'export const __rspack_esm_ids=[547807];export const __webpack_modules__={F4or(e,a,o){o.a(e,async function(e,s){try{' +
+      'async function t(e){let a=await fetch(o.p+e);if(!a.ok)throw Error("Could not load locale catalog: "+a.status);' +
+      'return new Response(a.body.pipeThrough(new DecompressionStream("gzip"))).json()}o.r(a);' +
+      `let[e,c]=await Promise.all([t("assets/locales/${keysFile}"),t("assets/locales/${valuesFile}")]);` +
+      "a.default=Object.fromEntries(e.map((e,a)=>[e,c[a]])),s()}catch(e){s(e)}},1)}};");
+    const zhCn = { "/+SIoK": "升级至 Plus", ...Object.fromEntries(Object.keys(ENGLISH_REASONING_LABELS).map((key) => [key, "极高"])) };
+    const keys = Object.keys(zhCn);
+    fs.writeFileSync(path.join(assetsDir, "locales", keysFile), zlib.gzipSync(JSON.stringify(keys)));
+    fs.writeFileSync(path.join(assetsDir, "locales", valuesFile), zlib.gzipSync(JSON.stringify(Object.values(zhCn))));
+    const read = (name) => JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(assetsDir, "locales", name))));
+
+    const [descriptor] = reasoningLabelDescriptors;
+    assert.deepEqual(descriptor.apply(root, {}), {
+      matched: 1,
+      changed: 1,
+      targets: [path.join("webview", "assets", "locales", valuesFile)],
+    });
+    assert.deepEqual(read(keysFile), keys);
+    assert.deepEqual(read(valuesFile), ["升级至 Plus", ...Object.values(ENGLISH_REASONING_LABELS)]);
+    assert.equal(descriptor.apply(root, {}).changed, 0);
+
+    fs.writeFileSync(path.join(assetsDir, "locales", keysFile), zlib.gzipSync(JSON.stringify(keys.slice(1))));
+    const before = fs.readFileSync(path.join(assetsDir, "locales", valuesFile));
+    const { value, warnings } = withCapturedWarns(() => applyEnglishReasoningLabelsToApp(root, {}));
+    assert.equal(value.changed, 0);
+    assert.match(warnings[0], /does not pair one value with each unique key/);
+    assert.deepEqual(fs.readFileSync(path.join(assetsDir, "locales", valuesFile)), before);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

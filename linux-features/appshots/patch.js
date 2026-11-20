@@ -5,32 +5,48 @@ const APPSHOT_AVAILABILITY_MARKER = "codexLinuxAppshotsPlatformAvailable";
 const IDENT = "[A-Za-z_$][\\w$]*";
 // rspack/SWC shape of the renderer availability atom:
 // `...requirements?.allowAppshots!==!1}function y(e){return"macOS"===e||"windows"===e}`.
+// Current bundles close the atom and declare its derived atoms first:
+// `...allowAppshots!==!1}),c=(0,r.i1)(...),h=(0,r.un)(...);function f(e){...}`,
+// where the atom itself gates on `if(!f(platform)||...`.
+const APPSHOT_DERIVED_ATOMS = "(?:\\)[^;]{0,600};)?";
 const CURRENT_APPSHOT_AVAILABILITY = new RegExp(
-  `(requirements\\?\\.allowAppshots!==!1\\}function (${IDENT})\\((${IDENT})\\)\\{return)` +
+  `(requirements\\?\\.allowAppshots!==!1\\}${APPSHOT_DERIVED_ATOMS}function (${IDENT})\\((${IDENT})\\)\\{return)` +
     `"macOS"===\\3\\|\\|"windows"===\\3\\}`,
   "g",
 );
 const PATCHED_APPSHOT_AVAILABILITY = new RegExp(
-  `requirements\\?\\.allowAppshots!==!1\\}function ${IDENT}\\((${IDENT})\\)\\{return` +
-    `"linux"===\\1\\/\\*${APPSHOT_AVAILABILITY_MARKER}\\*\\/\\|\\|` +
-    `"macOS"===\\1\\|\\|"windows"===\\1\\}`,
+  `requirements\\?\\.allowAppshots!==!1\\}${APPSHOT_DERIVED_ATOMS}function (${IDENT})\\((${IDENT})\\)\\{return` +
+    `"linux"===\\2\\/\\*${APPSHOT_AVAILABILITY_MARKER}\\*\\/\\|\\|` +
+    `"macOS"===\\2\\|\\|"windows"===\\2\\}`,
+  "g",
 );
+
+// With derived atoms in between, the predicate must be the one the
+// allowAppshots atom gates on.
+function ownsAppshotAvailability(source, match, functionName) {
+  if (!match[0].startsWith("requirements?.allowAppshots!==!1})")) return true;
+  const before = source.slice(Math.max(0, match.index - 400), match.index);
+  return before.includes(`if(!${functionName}(`);
+}
+
+function availabilityMatches(source, pattern) {
+  return [...source.matchAll(pattern)].filter((match) => ownsAppshotAvailability(source, match, match[pattern === CURRENT_APPSHOT_AVAILABILITY ? 2 : 1]));
+}
 
 function warn(message, patchName) {
   console.warn(`WARN: ${message} - skipping ${patchName}`);
 }
 
 function applyLinuxAppshotAvailabilityPatch(currentSource) {
-  if (PATCHED_APPSHOT_AVAILABILITY.test(currentSource)) {
+  if (availabilityMatches(currentSource, PATCHED_APPSHOT_AVAILABILITY).length > 0) {
     return currentSource;
   }
-  const matches = [...currentSource.matchAll(CURRENT_APPSHOT_AVAILABILITY)];
+  const matches = availabilityMatches(currentSource, CURRENT_APPSHOT_AVAILABILITY);
   if (matches.length === 1) {
-    return currentSource.replace(
-      CURRENT_APPSHOT_AVAILABILITY,
-      (_match, prefix, _functionName, platformVar) =>
-        `${prefix}"linux"===${platformVar}/*${APPSHOT_AVAILABILITY_MARKER}*/||"macOS"===${platformVar}||"windows"===${platformVar}}`,
-    );
+    const [match, prefix, , platformVar] = matches[0];
+    return currentSource.slice(0, matches[0].index) +
+      `${prefix}"linux"===${platformVar}/*${APPSHOT_AVAILABILITY_MARKER}*/||"macOS"===${platformVar}||"windows"===${platformVar}}` +
+      currentSource.slice(matches[0].index + match.length);
   }
 
   warn("Could not find AppShots availability gate", "Linux AppShots availability patch");
@@ -38,9 +54,8 @@ function applyLinuxAppshotAvailabilityPatch(currentSource) {
 }
 
 function matchesLinuxAppshotAvailabilityContract(source) {
-  CURRENT_APPSHOT_AVAILABILITY.lastIndex = 0;
-  return [...source.matchAll(CURRENT_APPSHOT_AVAILABILITY)].length === 1 ||
-    PATCHED_APPSHOT_AVAILABILITY.test(source);
+  return availabilityMatches(source, CURRENT_APPSHOT_AVAILABILITY).length === 1 ||
+    availabilityMatches(source, PATCHED_APPSHOT_AVAILABILITY).length > 0;
 }
 
 function linuxAppshotWaylandHelperSource() {

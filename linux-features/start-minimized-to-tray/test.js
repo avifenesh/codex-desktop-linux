@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
+const zlib = require("node:zlib");
 const { spawnSync } = require("node:child_process");
 const { loadLinuxFeaturePatchDescriptors, stageEnabledLinuxFeatureInstall } = require("../../scripts/lib/linux-features.js");
 const {
@@ -983,15 +984,30 @@ test(
     const copied = [];
     for (const name of fs.readdirSync(path.join(signed, "async")).filter(file => file.endsWith(".js"))) {
       const source = fs.readFileSync(path.join(signed, "async", name), "utf8");
-      if (['"settings.general.macMenuBar.label"', '"../locales/', ".macMenuBarEnabled"].some(needle => source.includes(needle))) {
+      if (['"settings.general.macMenuBar.label"', '"../locales/', ".macMenuBarEnabled", '"assets/locales/'].some(needle => source.includes(needle))) {
         fs.writeFileSync(path.join(asyncDir, name), source);
         copied.push(name);
       }
     }
+    // Since 26.1117 catalogs are gzip key and value arrays in assets/locales.
+    const localesDir = path.join(root, "webview", "assets", "locales");
+    fs.cpSync(path.join(signed, "locales"), localesDir, { recursive: true });
+    const keyFiles = fs.readdirSync(localesDir).filter(name => name.startsWith("keys."));
     assert.deepEqual(applySettingsPatch(root), { changed: true });
     const changed = copied.filter(name =>
       fs.readFileSync(path.join(asyncDir, name), "utf8") !== fs.readFileSync(path.join(signed, "async", name), "utf8"));
-    assert.equal(changed.length, Object.keys(LABEL_TRANSLATIONS).length + 1);
+    const changedCatalogs = fs.readdirSync(localesDir).filter(name =>
+      !fs.readFileSync(path.join(localesDir, name)).equals(fs.readFileSync(path.join(signed, "locales", name))));
+    assert.equal(changed.length, 1);
+    assert.equal(changedCatalogs.length, Object.keys(LABEL_TRANSLATIONS).length + keyFiles.length);
+    const gunzip = name => JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(localesDir, name))).toString("utf8"));
+    for (const name of changedCatalogs.filter(entry => !entry.startsWith("keys."))) {
+      const [locale, rest] = name.split(".keys.");
+      const keys = gunzip(`keys.${rest.split(".")[0]}.json.codex-gzip`), values = gunzip(name);
+      assert.equal(keys.length, values.length, name);
+      assert.equal(values[keys.indexOf(LABEL_IDS[0])], LABEL_TRANSLATIONS[locale][0], name);
+      assert.equal(values[keys.indexOf(DESCRIPTION_IDS[1])], DESCRIPTION_TRANSLATIONS[locale][1], name);
+    }
     const settings = changed.map(name => fs.readFileSync(path.join(asyncDir, name), "utf8"))
       .filter(source => source.includes("function codexLinuxStartMinimizedSetting("));
     assert.equal(settings.length, 1);

@@ -1547,7 +1547,8 @@ const REF = `${IDENT}(?:\\.${IDENT})*`;
 function rspackModules(source) {
   const start = source.indexOf("__webpack_modules__={");
   if (start < 0) return [];
-  const header = new RegExp(`^,?("[^"]+"|${IDENT}|\\d+)\\(((?:${IDENT}(?:,${IDENT}){0,2})?)\\)\\{`, "u");
+  // Large chunks wrap factories as `id:(function(module,exports,require){...})`.
+  const header = new RegExp(`^\\)?,?("[^"]+"|${IDENT}|\\d+)(?::\\(function)?\\(((?:${IDENT}(?:,${IDENT}){0,2})?)\\)\\{`, "u");
   const modules = [];
   let index = start + "__webpack_modules__={".length;
   while (index < source.length) {
@@ -1590,7 +1591,7 @@ const SETTINGS_CONTRACTS = [
     select: (body) => body.includes('"local-environments":{id:"settings.nav.local-environments",'),
     patched: (body) => body.includes(`"${SETTINGS_SLUG}":{id:"settings.nav.${SETTINGS_SLUG}"`),
     apply(body) {
-      const label = uniqueMatch(body, /"local-environments":\{id:"settings\.nav\.local-environments",defaultMessage:"[^"]*",description:"[^"]*"\},/g);
+      const label = uniqueMatch(body, /"local-environments":\{id:"settings\.nav\.local-environments",defaultMessage:"[^"]*"(?:,description:"[^"]*")?\},/g);
       if (label == null) throw new Error("could not uniquely resolve current settings navigation label");
       return body.replace(label[0], () =>
         `${label[0]}"${SETTINGS_SLUG}":{id:"settings.nav.${SETTINGS_SLUG}",defaultMessage:${JSON.stringify(SETTINGS_TITLE)},description:${JSON.stringify(SETTINGS_DESCRIPTION)}},`);
@@ -1704,6 +1705,13 @@ const SETTINGS_CONTRACTS = [
     patched: (body) => body.includes(`"local-environments","${SETTINGS_SLUG}","worktrees","environments"`),
     apply: (body) => replaceOnce(body, '"local-environments","worktrees","environments"',
       `"local-environments","${SETTINGS_SLUG}","worktrees","environments"`, "settings slug catalog"),
+    // Current bundles dropped the separate slug enum: the one catalog items
+    // module owns the slug list and re-exports no other module's bindings.
+    absent: (assets) => {
+      const items = assets.flatMap(({ source, modules }) => modules.map((module) => source.slice(module.start, module.end)))
+        .filter((body) => new RegExp(`\\{slug:"local-environments"\\},(?:\\{slug:"${SETTINGS_SLUG}"\\},)?\\{slug:"worktrees"\\}`).test(body));
+      return items.length === 1 && /\.d\([\w$]+,\{\},\{[\w$]+:\[\{slug:"general-settings"\}/.test(items[0]);
+    },
   },
   {
     name: "catalogItems",
@@ -1765,6 +1773,7 @@ function collectAgentWorkspaceSettingsPatches(extractedDir) {
         if (contract.select(body)) owners.push({ asset, module, body });
       }
     }
+    if (owners.length === 0 && contract.absent?.(assets)) continue;
     if (owners.length === 0 || (contract.copies === "one" && owners.length !== 1)) {
       throw new Error(`could not uniquely resolve webview settings semantic owners (${contract.name}=${owners.length})`);
     }

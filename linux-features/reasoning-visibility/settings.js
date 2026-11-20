@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const zlib = require("node:zlib");
 const { findMatchingBrace, escapeRegExp } = require("../../scripts/patches/lib/minified-js.js");
 const { listWebviewScriptAssets } = require("../../scripts/patches/lib/assets.js");
 const { patchBreaksJavaScriptSyntax } = require("../../scripts/patches/lib/javascript-syntax.js");
@@ -62,7 +63,9 @@ function settingsContract(source) {
   const end = findMatchingBrace(source, source.indexOf("{", owner.index));
   if (end < 0 || end > factory.end) return null;
   const body = source.slice(owner.index, end + 1);
-  const row = unique(body, new RegExp(`\\(0,(${ID})\\.jsx\\)\\((${MEMBER}),\\{label:${ID},description:${ID},control:${ID}\\}`, "g"));
+  // 26.1117 rows take a settings-search entry instead of a label:
+  // `(0,n.jsx)(F.GC,{entry:L.$j.menuBar,description:t,control:l})`.
+  const row = unique(body, new RegExp(`\\(0,(${ID})\\.jsx\\)\\((${MEMBER}),\\{(?:label:${ID}|(entry):${MEMBER}),description:${ID},control:${ID}\\}`, "g"));
   const toggle = unique(body, new RegExp(`\\(0,${ID}\\.jsx\\)\\((${MEMBER}),\\{checked:${ID},onChange:${ID},ariaLabel:${ID}\\}`, "g"));
   const intlUse = unique(body, new RegExp(`(${ID})\\.formatMessage\\(\\{id:"settings\\.general\\.macMenuBar\\.ariaLabel"`, "g"));
   const intl = intlUse && unique(body, new RegExp(`(?<![\\w$.])${escapeRegExp(intlUse[1])}=(${CALLEE})\\(\\)`, "g"));
@@ -77,23 +80,24 @@ function settingsContract(source) {
     .map((match) => factory.open + match.index);
   if (renders.length === 0) return null;
   return {
-    row: row[2], toggle: toggle[1], react: [...reactModules.values()][0], platformHook: owner[4], jsx: row[1],
+    row: row[2], entryRow: row[3] != null, toggle: toggle[1], react: [...reactModules.values()][0], platformHook: owner[4], jsx: row[1],
     intlHook: intl[1], ownerEnd: end + 1, renders,
   };
 }
 
-function settingComponent({ row, toggle, react, platformHook, jsx, intlHook }) {
+function settingComponent({ row, entryRow = false, toggle, react, platformHook, jsx, intlHook }) {
   const key = JSON.stringify(STORAGE_KEY);
   const message = (index) => `intl.formatMessage({id:${JSON.stringify(MESSAGE_IDS[index])},defaultMessage:${JSON.stringify(translations.en[index])}})`;
-  return `function ${UI}(){let React=${react},{platform}=${platformHook}(),[enabled,setEnabled]=React.useState(()=>{try{return localStorage.getItem(${key})==="1"}catch{return!1}}),[error,setError]=React.useState(null),intl=${intlHook}(),label=${message(0)},description=${message(1)};React.useEffect(()=>{let update=e=>{if(e.key===${key}||e.key===null){try{setEnabled(localStorage.getItem(${key})==="1")}catch{}}};window.addEventListener("storage",update);return()=>window.removeEventListener("storage",update)},[]);if(platform!=="linux")return null;let change=value=>{try{localStorage.setItem(${key},value===!0?"1":"0");setEnabled(value===!0);setError(null)}catch{setError(${message(2)})}};return(0,${jsx}.jsx)(${row},{label,description:error??description,control:(0,${jsx}.jsx)(${toggle},{checked:enabled,onChange:change,ariaLabel:label})})}`;
+  return `function ${UI}(){let React=${react},{platform}=${platformHook}(),[enabled,setEnabled]=React.useState(()=>{try{return localStorage.getItem(${key})==="1"}catch{return!1}}),[error,setError]=React.useState(null),intl=${intlHook}(),label=${message(0)},description=${message(1)};React.useEffect(()=>{let update=e=>{if(e.key===${key}||e.key===null){try{setEnabled(localStorage.getItem(${key})==="1")}catch{}}};window.addEventListener("storage",update);return()=>window.removeEventListener("storage",update)},[]);if(platform!=="linux")return null;let change=value=>{try{localStorage.setItem(${key},value===!0?"1":"0");setEnabled(value===!0);setError(null)}catch{setError(${message(2)})}};return(0,${jsx}.jsx)(${row},{${entryRow ? "entry:{title:{localizedText:label}},anchored:!1" : "label"},description:error??description,control:(0,${jsx}.jsx)(${toggle},{checked:enabled,onChange:change,ariaLabel:label})})}`;
 }
 
 // Locale catalogs are lazily loaded JSON modules. The loader map names each
 // locale with its chunk id and module key:
 // `"../locales/pl-PL.json":function(){return r.e(507233).then(r.t.bind(r,"AbCd",19))}`.
+// 26.1117 loads an async module instead: `.then(r.bind(r,"AbCd"))`.
 function localeCatalogs(loaderSource) {
-  const entries = [...loaderSource.matchAll(new RegExp(`"\\.\\./locales/([\\w-]+)\\.json":function\\(\\)\\{return (${ID})\\.e\\((\\d+)\\)\\.then\\(\\2\\.t\\.bind\\(\\2,"([^"]+)",\\d+\\)\\)\\}`, "g"))];
-  return entries.map(([, locale, , chunkId, moduleKey]) => ({ locale, chunkId, moduleKey }));
+  const entries = [...loaderSource.matchAll(new RegExp(`"\\.\\./locales/([\\w-]+)\\.json":function\\(\\)\\{return (${ID})\\.e\\((\\d+)\\)\\.then\\(\\2(?:\\.t\\.bind\\(\\2,"([^"]+)",\\d+\\)|\\.bind\\(\\2,"([^"]+)"\\))\\)\\}`, "g"))];
+  return entries.map(([, locale, , chunkId, jsonKey, asyncKey]) => ({ locale, chunkId, moduleKey: jsonKey ?? asyncKey }));
 }
 
 const jsSingleQuoted = (text) => text.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
@@ -105,6 +109,49 @@ function singleQuotedEnd(source, open) {
     else if (source[index] === "\n") return -1;
   }
   return -1;
+}
+
+// 26.1117 catalog module: an async module that fetches gzip key and value
+// arrays and zips them:
+// `let[e,c]=await Promise.all([t("assets/locales/keys.H.json.codex-gzip"),t("assets/locales/pl-PL.keys.H.V.json.codex-gzip")]);a.default=Object.fromEntries(e.map((e,a)=>[e,c[a]])),s()`.
+// The shared key files stay untouched; the messages join the module's default
+// export after the upstream entries.
+function gzipCatalogPatch(assetsDir, source, locale, moduleKey, messages) {
+  const head = unique(source, new RegExp(`[{,]${escapeRegExp(moduleKey)}\\((${ID}),(${ID}),(${ID})\\)\\{\\3\\.a\\(\\1,async function\\(`, "g"));
+  if (!head) return null;
+  const open = head.index + head[0].indexOf("{", head[0].indexOf(")"));
+  const close = findMatchingBrace(source, open);
+  if (close < 0) return null;
+  const body = source.slice(open, close + 1);
+  const exportsName = escapeRegExp(head[2]);
+  const load = unique(body, new RegExp(
+    `let\\[(${ID}),(${ID})\\]=await Promise\\.all\\(\\[(${ID})\\("(assets/locales/keys\\.[\\w.-]+\\.json\\.codex-gzip)"\\),\\3\\("(assets/locales/${escapeRegExp(locale)}\\.keys\\.[\\w.-]+\\.json\\.codex-gzip)"\\)\\]\\);` +
+      `${exportsName}\\.default=(?:\\{\\.\\.\\.)?(Object\\.fromEntries\\(\\1\\.map\\(\\((${ID}),(${ID})\\)=>\\[\\7,\\2\\[\\8\\]\\]\\)\\))`, "g"));
+  if (!load) return null;
+  const read = (relative) => {
+    try {
+      const value = JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(assetsDir, "..", relative))).toString("utf8"));
+      return Array.isArray(value) ? value : null;
+    } catch {
+      return null;
+    }
+  };
+  const keys = read(load[4]);
+  const values = read(load[5]);
+  if (!keys || !values || keys.length !== values.length || !keys.includes("settings.general.macMenuBar.label") ||
+      MESSAGE_IDS.some((id) => keys.includes(id))) return null;
+  const upstream = load[6];
+  const addition = MESSAGE_IDS.map((id, index) => `${JSON.stringify(id)}:${JSON.stringify(messages[index])}`).join(",");
+  const exportStart = open + load.index + load[0].indexOf(`${head[2]}.default=`) + head[2].length + ".default=".length;
+  const patchedValue = `{...${upstream},${addition}}`;
+  if (source.startsWith(patchedValue, exportStart)) return { source, changed: false };
+  if (MESSAGE_IDS.some((id) => source.includes(JSON.stringify(id))) || !source.startsWith(`${upstream},`, exportStart)) {
+    throw Error(`reasoning-visibility: incomplete or inconsistent ${locale} translations`);
+  }
+  return {
+    source: source.slice(0, exportStart) + patchedValue + source.slice(exportStart + upstream.length),
+    changed: true,
+  };
 }
 
 function catalogPatches(assetsDir, assetNames, loaderSource) {
@@ -119,6 +166,11 @@ function catalogPatches(assetsDir, assetNames, loaderSource) {
     }
     const names = assetNames.filter((name) => path.basename(name).startsWith(`${chunkId}.`));
     const source = names.length === 1 ? fs.readFileSync(path.join(assetsDir, names[0]), "utf8") : "";
+    const gzip = gzipCatalogPatch(assetsDir, source, locale, moduleKey, messages);
+    if (gzip) {
+      if (gzip.changed) patches.push({ target: path.join(assetsDir, names[0]), source: gzip.source });
+      continue;
+    }
     const module = unique(source, new RegExp(`[{,]${escapeRegExp(moduleKey)}\\((${ID})\\)\\{\\1\\.exports=JSON\\.parse\\('`, "g"));
     const open = module ? module.index + module[0].length - 1 : -1;
     const close = open < 0 ? -1 : singleQuotedEnd(source, open);

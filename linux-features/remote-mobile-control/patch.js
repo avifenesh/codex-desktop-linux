@@ -588,18 +588,36 @@ function validateLinuxRemoteControlAutoConnectContract(extractedDir) {
   return { matched: true, changed: false };
 }
 
-function matchesLinuxRemoteControlLoadGateContract(source) {
-  return [...source.matchAll(REMOTE_CONTROL_LOAD_GATE_NEEDLE)].length +
-    [...source.matchAll(REMOTE_CONTROL_LOAD_GATE_PATCHED)].length +
-    [...source.matchAll(REMOTE_CONTROL_LOAD_GATE_PATCHED_INLINE)].length === 1;
+// 26.1117 hoists the gate id into a module constant read by an export getter:
+// `let h="1042620455",…;…mC:function(){return(0,l.Zj)(h)}`. rspack copies that
+// module into every async chunk that uses it, so each copy is patched.
+const REMOTE_CONTROL_LOAD_GATE_HOISTED =
+  /(?<prefix>[A-Za-z_$][\w$]*:function)\(\)\{return\(0,(?<gateHook>[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\)\((?<constant>[A-Za-z_$][\w$]*)\)\}/gu;
+const REMOTE_CONTROL_LOAD_GATE_HOISTED_PATCHED =
+  /(?<prefix>[A-Za-z_$][\w$]*:function)\(\)\{return codexLinuxRemoteControlLoadGateEnabled\(\)\|\|\(0,(?<gateHook>[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\)\((?<constant>[A-Za-z_$][\w$]*)\);function codexLinuxRemoteControlLoadGateEnabled\(\)\{/gu;
+const REMOTE_CONTROL_LOAD_GATE_CONSTANT_WINDOW = 3000;
+
+function hoistedLoadGateMatches(source, pattern) {
+  return [...source.matchAll(pattern)].filter((match) => {
+    const before = source.slice(Math.max(0, match.index - REMOTE_CONTROL_LOAD_GATE_CONSTANT_WINDOW), match.index);
+    const constant = match.groups.constant.replace(/[$]/g, "\\$");
+    return [...before.matchAll(new RegExp(`(?:let |,)${constant}="1042620455"[,;]`, "g"))].length === 1;
+  });
+}
+
+function remoteControlLoadGateMatches(source) {
+  return {
+    pristine: [...source.matchAll(REMOTE_CONTROL_LOAD_GATE_NEEDLE), ...hoistedLoadGateMatches(source, REMOTE_CONTROL_LOAD_GATE_HOISTED)],
+    patched: [
+      ...source.matchAll(REMOTE_CONTROL_LOAD_GATE_PATCHED),
+      ...source.matchAll(REMOTE_CONTROL_LOAD_GATE_PATCHED_INLINE),
+      ...hoistedLoadGateMatches(source, REMOTE_CONTROL_LOAD_GATE_HOISTED_PATCHED),
+    ],
+  };
 }
 
 function applyLinuxRemoteControlLoadGatePatch(source) {
-  const pristine = [...source.matchAll(REMOTE_CONTROL_LOAD_GATE_NEEDLE)];
-  const patched = [
-    ...source.matchAll(REMOTE_CONTROL_LOAD_GATE_PATCHED),
-    ...source.matchAll(REMOTE_CONTROL_LOAD_GATE_PATCHED_INLINE),
-  ];
+  const { pristine, patched } = remoteControlLoadGateMatches(source);
   const markers = source.split(REMOTE_CONTROL_LOAD_GATE_MARKER).length - 1;
   if (pristine.length === 0 && patched.length === 1 && markers === 2) return source;
   if (pristine.length !== 1 || patched.length !== 0 || markers !== 0) {
@@ -607,12 +625,13 @@ function applyLinuxRemoteControlLoadGatePatch(source) {
     return source;
   }
   const [match] = pristine;
-  const { prefix, functionName, gateHook } = match.groups;
+  const { prefix, functionName, gateHook, constant } = match.groups;
+  const gate = constant ?? '"1042620455"';
   const declaration = `${prefix}${functionName == null ? "" : ` ${functionName}`}`;
   const helper = `function ${REMOTE_CONTROL_LOAD_GATE_MARKER}(){return"undefined"!=typeof navigator&&navigator.userAgent.includes("Linux")}`;
   const replacement = functionName == null
-    ? `${declaration}(){return ${REMOTE_CONTROL_LOAD_GATE_MARKER}()||(0,${gateHook})("1042620455");${helper}}`
-    : `${declaration}(){return ${REMOTE_CONTROL_LOAD_GATE_MARKER}()||(0,${gateHook})("1042620455")}${helper}`;
+    ? `${declaration}(){return ${REMOTE_CONTROL_LOAD_GATE_MARKER}()||(0,${gateHook})(${gate});${helper}}`
+    : `${declaration}(){return ${REMOTE_CONTROL_LOAD_GATE_MARKER}()||(0,${gateHook})(${gate})}${helper}`;
   return source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
 }
 
@@ -751,12 +770,33 @@ function applyLinuxRemoteControlSettingsUxPatch(source) {
   return patched;
 }
 
+// 26.1117 imports the gate id from the remote connections module:
+// `tN=(0,B.Zj)(eI.K0)` with `eI=n("kTQn")` and `kTQn(e,t,n){…let f="782640499",…n.d(t,{},{…K0:f…})}`.
+function importedOutboundTabGates(source) {
+  const ident = "[A-Za-z_$][\\w$]*";
+  return [...source.matchAll(new RegExp(`(${ident})=\\(0,${ident}\\.${ident}\\)\\((${ident})\\.(${ident})\\)`, "gu"))]
+    .filter(([, , namespace, exportName]) => {
+      const bindings = [...source.matchAll(new RegExp(`(?<![\\w$.])${escapeRegExp(namespace)}=${ident}\\("([^"]+)"\\)`, "gu"))];
+      if (bindings.length !== 1) return false;
+      const modules = [...source.matchAll(new RegExp(`[{,]${escapeRegExp(bindings[0][1])}\\(${ident}(?:,${ident}){0,2}\\)\\{`, "gu"))];
+      if (modules.length !== 1) return false;
+      const open = modules[0].index + modules[0][0].length - 1;
+      const close = findMatchingBrace(source, open);
+      if (close < 0) return false;
+      const body = source.slice(open, close + 1);
+      const constants = [...body.matchAll(new RegExp(`(?:let |,)(${ident})="782640499"[,;]`, "gu"))];
+      return constants.length === 1 &&
+        new RegExp(`[{,]${escapeRegExp(exportName)}:${escapeRegExp(constants[0][1])}[,}]`, "u").test(body);
+    });
+}
+
 function applyLinuxRemoteControlOutboundTabGatePatch(source) {
   if (source.includes(REMOTE_CONTROL_OUTBOUND_TAB_GATE_MARKER)) {
     return source;
   }
 
-  const gates = [...source.matchAll(/([A-Za-z_$][\w$]*)=\(0,[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\)\("782640499"\)/gu)];
+  const literalGates = [...source.matchAll(/([A-Za-z_$][\w$]*)=\(0,[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\)\("782640499"\)/gu)];
+  const gates = [...literalGates, ...importedOutboundTabGates(source)];
   if (gates.length !== 1) {
     console.warn("WARN: Could not find unique remote-control outbound tab gate - skipping Linux outbound tab gate patch");
     return source;
@@ -832,7 +872,8 @@ function applyLinuxRemoteConnectionsRefreshPatch(source) {
 function moduleFactoryAt(source, index) {
   const objectStart = source.indexOf("__webpack_modules__={");
   if (objectStart === -1) return null;
-  const header = /([A-Za-z0-9_$]+|"[^"]*")\(([A-Za-z_$][\w$]*(?:,[A-Za-z_$][\w$]*){0,2})?\)\{/y;
+  // 26.1117 also emits wrapped factories: `kaKF:(function(e,t){…})`.
+  const header = /([A-Za-z0-9_$]+|"[^"]*")(\(|:\(function\()([A-Za-z_$][\w$]*(?:,[A-Za-z_$][\w$]*){0,2})?\)\{/y;
   let cursor = objectStart + "__webpack_modules__={".length;
   while (cursor < source.length) {
     header.lastIndex = cursor;
@@ -842,9 +883,13 @@ function moduleFactoryAt(source, index) {
     const end = findMatchingBrace(source, open);
     if (end === -1) return null;
     if (index > open && index < end) {
-      return { bodyStart: open + 1, end, require: (match[2] ?? "").split(",")[2] ?? null };
+      return { bodyStart: open + 1, end, require: (match[3] ?? "").split(",")[2] ?? null };
     }
     cursor = end + 1;
+    if (match[2] !== "(") {
+      if (source[cursor] !== ")") return null;
+      cursor += 1;
+    }
     if (source[cursor] !== ",") return null;
     cursor += 1;
   }
@@ -1093,15 +1138,27 @@ function applyLinuxRemoteControlEnableForHostParamsPatch(source) {
 const REMOTE_MOBILE_ACTIVE_STATUS_PATTERN =
   /function\(\{latestTurnStatus:([A-Za-z_$][\w$]*),resumeState:([A-Za-z_$][\w$]*),streamRole:([A-Za-z_$][\w$]*),threadRuntimeStatus:([A-Za-z_$][\w$]*)\}\)\{return null==\3\?"needs_resume"===\2\?"needs-resume":"read-only":"follower"===\3\.role\?"follower":\4\?\.type==="active"\|\|"inProgress"===\1\?"active":"inactive"\}/gu;
 
+// 26.1117 keys the status on attached history instead of a stream role:
+// `return n?a?.type==="active"||"inProgress"===e?"active":"inactive":"needs_resume"===t?"needs-resume":"read-only"`.
+const REMOTE_MOBILE_HISTORY_ACTIVE_STATUS_PATTERN =
+  /function\(\{latestTurnStatus:([A-Za-z_$][\w$]*),resumeState:([A-Za-z_$][\w$]*),historyAttached:([A-Za-z_$][\w$]*),threadRuntimeStatus:([A-Za-z_$][\w$]*)\}\)\{return \3\?\4\?\.type==="active"\|\|"inProgress"===\1\?"active":"inactive":"needs_resume"===\2\?"needs-resume":"read-only"\}/gu;
+
 // Mobile-started turns on the local host have no stream role yet; report them
 // as active from the runtime status instead of "needs resume"/"read-only".
 function applyLinuxRemoteMobileActiveStatusPatch(source) {
   const markers = source.split(REMOTE_MOBILE_ACTIVE_STATUS_MARKER).length - 1;
   const matches = [...source.matchAll(REMOTE_MOBILE_ACTIVE_STATUS_PATTERN)];
-  if (markers === 1 && matches.length === 0) return source;
-  if (markers !== 0 || matches.length !== 1) {
+  const historyMatches = [...source.matchAll(REMOTE_MOBILE_HISTORY_ACTIVE_STATUS_PATTERN)];
+  if (markers === 1 && matches.length + historyMatches.length === 0) return source;
+  if (markers !== 0 || matches.length + historyMatches.length !== 1) {
     console.warn("WARN: Could not find unique active-status renderer - skipping remote mobile active-status patch");
     return source;
+  }
+  if (historyMatches.length === 1) {
+    return source.replace(
+      REMOTE_MOBILE_HISTORY_ACTIVE_STATUS_PATTERN,
+      `function({latestTurnStatus:$1,resumeState:$2,historyAttached:$3,threadRuntimeStatus:$4}){/*${REMOTE_MOBILE_ACTIVE_STATUS_MARKER}*/return $4?.type==="active"||"inProgress"===$1?"active":$3?"inactive":"needs_resume"===$2?"needs-resume":"read-only"}`,
+    );
   }
   return source.replace(
     REMOTE_MOBILE_ACTIVE_STATUS_PATTERN,
@@ -1392,7 +1449,6 @@ module.exports = [
     id: "linux-remote-control-load-gate",
     phase: "webview-asset",
     assetNeedles: ['"1042620455"', '"features.remote_connections"'],
-    assetMatch: matchesLinuxRemoteControlLoadGateContract,
     order: 20_118,
     ciPolicy: "optional",
     missingDescription: "remote-control loader gate bundle",
@@ -1421,7 +1477,8 @@ module.exports = [
     // The remote connections settings page and the mobile setup dialog.
     id: "linux-remote-control-copy",
     phase: "webview-asset",
-    assetNeedles: ['this Mac",description:"'],
+    // 26.1117 drops message descriptions: `defaultMessage:"Keep this Mac awake"}`.
+    assetNeedles: ['this Mac"'],
     order: 20_130,
     ciPolicy: "optional",
     missingDescription: "remote-control settings or mobile setup bundle",
@@ -1542,7 +1599,7 @@ module.exports = [
   {
     id: "linux-remote-mobile-active-status",
     phase: "webview-asset",
-    assetNeedles: ['"Read-only snapshot"', "streamRole:"],
+    assetNeedles: ['"Read-only snapshot"', "threadRuntimeStatus:"],
     order: 20_160,
     ciPolicy: "optional",
     missingDescription: "app main bundle",

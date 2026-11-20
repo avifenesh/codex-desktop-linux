@@ -63,9 +63,9 @@ CODEX_SIGNED_EXTRACTED_APP=/path/to/extracted/app.asar \
   node --test linux-features/reasoning-visibility/test.js
 ```
 
-Six semantic ASAR contracts cover activity classification, collapsed-turn
-persistence, transcript projection, summary requests, the native disclosure,
-and the General setting with translations.
+Five semantic ASAR contracts cover activity classification, collapsed-turn
+persistence, summary requests, the native disclosure, and the General setting
+with translations.
 The official webview is an rspack build, so chunks are found by distinctive
 content, never by file name, chunk id, or module id. When rspack copies a module
 into several lazily loaded chunks, every copy is patched. The General setting

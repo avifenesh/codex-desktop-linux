@@ -11,6 +11,7 @@ const { loadLinuxFeaturePatchDescriptors } = require("../../scripts/lib/linux-fe
 const {
   applyUsageLimitSendAttemptPatch,
   applyUsageLimitSendAttemptAppPatch,
+  applySharedUsageReasonsPatch,
   descriptors,
 } = require("./patch.js");
 
@@ -21,6 +22,58 @@ const composer = 'let{agentMode:os,permissionProfileId:ol,shouldSendPermissionOv
   'let oN=void 0!==tm&&tm&&"caller-disabled",oE=ou&&"provider-blocked",oQ=op&&"usage-limit";' +
   'cacheChanged?(e0=[oN,oE,oQ].filter(Boolean),cache=e0):e0=cache;' +
   'let oT=e0.join(",");return{usageBanner:R.U,submitDisabledReasons:oT,onSubmitLocal:of}';
+
+// Reduced fixture of the 26.1117 layout: the local usage gate lives in a shared
+// rspack module and the composer reads its joined reasons atom.
+const sharedReasons = ',a6kU:(function(e,t,n){var r=n("qmMi"),a=n("OWtl"),l=n("eLmE");' +
+  'let c=(0,r.un)(a.u,({get:e})=>{let t=e(l.PO);return!(null==t||t.allowed)}),' +
+  'p=(0,r.i1)(a.u,(e,{get:t})=>[t(l.F9,e)&&"reserve-limit","local"===e&&t(c)&&"usage-limit"].filter(Boolean).join(","));' +
+  'n.d(t,{},{U:c,o:p})}),EU9a:(function(e,t,n){})';
+const sharedComposer = 'var P=n("a6kU");let{agentMode:od,permissionProfileId:oc,shouldSendPermissionOverrides:ou}=(0,e$.Ap)(H),' +
+  'nW=(0,i._U)(P.o,n$),oN=void 0!==tm&&tm&&"caller-disabled";eY=[oN,nW].filter(Boolean);' +
+  'let oO=eY.join(",");return{usageBanner:(0,i._U)(P.U),submitDisabledReasons:oO}';
+
+test("shared local usage reasons drop only the local usage gate", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "usage-limit-send-attempt-shared-"));
+  const assets = path.join(directory, "webview", "assets", "async");
+  try {
+    fs.mkdirSync(assets, { recursive: true });
+    fs.writeFileSync(path.join(assets, "shared.js"), sharedReasons);
+    fs.writeFileSync(path.join(assets, "composer.js"), sharedComposer);
+    const result = applyUsageLimitSendAttemptAppPatch(directory);
+    assert.equal(result.changed, 1);
+    const patched = fs.readFileSync(path.join(assets, "shared.js"), "utf8");
+    assert.equal(patched, sharedReasons.replace('"local"===e&&t(c)', "!1/*codexLinuxUsageLimitSendAttempt*/"));
+    assert.match(patched, /t\(l\.F9,e\)&&"reserve-limit"/);
+    assert.match(patched, /n\.d\(t,\{\},\{U:c,o:p\}\)/);
+    assert.equal(fs.readFileSync(path.join(assets, "composer.js"), "utf8"), sharedComposer);
+    assert.equal(applySharedUsageReasonsPatch(patched), patched);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("drifted shared usage reasons or a disconnected composer stay unchanged", () => {
+  for (const [shared, composer] of [
+    [sharedReasons.replace('"local"===e', '"remote"===e'), sharedComposer],
+    [sharedReasons.replace("o:p", "o:x"), sharedComposer],
+    [sharedReasons, sharedComposer.replace("(P.o,", "(P.other,")],
+    [sharedReasons, sharedComposer.replace('n("a6kU")', 'n("b7lV")')],
+    [sharedReasons + sharedReasons, sharedComposer],
+  ]) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "usage-limit-send-attempt-shared-drift-"));
+    const assets = path.join(directory, "webview", "assets", "async");
+    try {
+      fs.mkdirSync(assets, { recursive: true });
+      fs.writeFileSync(path.join(assets, "shared.js"), shared);
+      fs.writeFileSync(path.join(assets, "composer.js"), composer);
+      assert.equal(applyUsageLimitSendAttemptAppPatch(directory).changed, 0);
+      assert.equal(fs.readFileSync(path.join(assets, "shared.js"), "utf8"), shared);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
 
 test("feature is disabled by default and registered when enabled", () => {
   const previous = process.env.CODEX_LINUX_FEATURES_CONFIG;
@@ -113,15 +166,22 @@ test(
     const copied = [];
     for (const name of fs.readdirSync(signed).filter(file => file.endsWith(".js"))) {
       const source = fs.readFileSync(path.join(signed, name), "utf8");
-      if (!source.includes("shouldSendPermissionOverrides:") ||
-          !source.includes("submitDisabledReasons:") || !source.includes('&&"usage-limit"')) continue;
+      const shared = source.includes('&&"usage-limit"].filter(Boolean).join(",")');
+      if (!shared && (!source.includes("shouldSendPermissionOverrides:") ||
+          !source.includes("submitDisabledReasons:"))) continue;
       fs.writeFileSync(path.join(assets, name), source);
-      copied.push(name);
+      copied.push({ name, shared, source });
     }
     const result = applyUsageLimitSendAttemptAppPatch(directory);
-    assert.equal(result.changed, copied.length);
-    assert.equal(result.changed, 2);
-    for (const name of copied) {
+    // 26.1117: one shared reasons module; the composers read it unchanged.
+    assert.equal(result.changed, 1);
+    assert.deepEqual(result.targets.map((target) => path.basename(target)),
+      copied.filter(({ shared }) => shared).map(({ name }) => name));
+    for (const { name, shared, source } of copied) {
+      if (!shared) {
+        assert.equal(fs.readFileSync(path.join(assets, name), "utf8"), source);
+        continue;
+      }
       const patched = fs.readFileSync(path.join(assets, name), "utf8");
       assert.equal(patched.split("codexLinuxUsageLimitSendAttempt").length, 2);
       const check = spawnSync(process.execPath, ["--input-type=module", "--check"], {

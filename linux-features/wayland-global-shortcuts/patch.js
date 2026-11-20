@@ -1,6 +1,9 @@
 "use strict";
 const { IDENT, tagCommand, installPortalBackend } = require("../../scripts/patches/lib/global-shortcuts-portal.js");
 const PATCH_MARKER = "codex-linux-wayland-global-shortcuts-v1";
+// 26.1117 removed the popout hotkey window (Spotlight replaced it). Its row is
+// required whenever any hotkey window code remains.
+const HOTKEY_WINDOW = /handleHotkeyWindow|hotkeyWindowLifecycleManager/u;
 function applyWaylandGlobalShortcutsPatch(source) {
   if (source.includes(PATCH_MARKER)) return source;
   try {
@@ -12,6 +15,7 @@ function applyWaylandGlobalShortcutsPatch(source) {
       ["realtimeVoice", IDENT, `onPressed:\\(\\)=>\\{"locked"!==${IDENT}\\.powerMonitor\\.getSystemIdleState\\(1\\)&&${IDENT}\\(\\)\\}`],
       ["meetings", IDENT, `onPressed:\\(\\)=>\\{${IDENT}===${IDENT}&&"locked"!==${IDENT}\\.powerMonitor\\.getSystemIdleState\\(1\\)&&${IDENT}\\(\\)\\}`],
     ]) {
+      if (id === "hotkeyWindow" && !HOTKEY_WINDOW.test(source)) continue;
       patched = tagCommand(patched, id, key, callback);
     }
     return installPortalBackend(`var codexLinuxWaylandGlobalShortcutsPatch=${JSON.stringify(PATCH_MARKER)};${patched}`);

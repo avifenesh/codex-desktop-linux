@@ -32,6 +32,20 @@ for (const dictation of [false, true]) {
   }
 }
 
+test("bundles without a hotkey window tag the remaining app shortcuts", () => {
+  const source = mainBundleFixture()
+    .replace("hotkeyWindowLifecycleManager:a,", "")
+    .replaceAll("a.dispose(),o.dispose(),", "o.dispose(),")
+    .replace("registerHotkeyWindowHotkeyOrThrow(e,t){return eA(e,{onPressed:()=>{this.handleHotkeyWindowHotkeyPressed()}},{ownership:t})}", "");
+  assert.doesNotMatch(source, /[Hh]otkeyWindow/);
+  const patched = applyFeatures(source, { dictation: false, shortcuts: true });
+  assert.doesNotThrow(() => new vm.Script(patched));
+  assert.equal(applyFeatures(patched, { dictation: false, shortcuts: true }), patched);
+  assert.deepEqual(Array.from(patched.matchAll(/linuxCommandId:"([^"]+)"/g), (m) => m[1]).sort(),
+    ["appshots", "meetings", "openAvatarOverlay", "realtimeVoice"]);
+  assert.match(patched, /codexLinuxGlobalShortcutsQuitStopped=codexLinuxGlobalShortcutsPortalShutdown\(\),o\.dispose\(\),Promise\.allSettled\(\[codexLinuxGlobalShortcutsQuitStopped,/);
+});
+
 test("app shortcut drift leaves its input unchanged", () => {
   const source = mainBundleFixture().replace("this.handleHotkeyWindowHotkeyPressed()", "this.unknownPopoutHandler()");
   assert.equal(applyFeatures(source, { dictation: false, shortcuts: true }), source);
@@ -57,7 +71,8 @@ test("signed main-process chunks route every app shortcut through one chunk", { 
   assert.equal(applyWaylandGlobalShortcutsPatch(patched), patched);
   assert.doesNotThrow(() => new vm.Script(patched));
   assert.deepEqual(Array.from(patched.matchAll(/linuxCommandId:"([^"]+)"/g), (m) => m[1]).sort(),
-    ["appshots", "hotkeyWindow", "meetings", "openAvatarOverlay", "realtimeVoice"]);
+    ["appshots", "hotkeyWindow", "meetings", "openAvatarOverlay", "realtimeVoice"]
+      .filter((id) => id !== "hotkeyWindow" || /handleHotkeyWindow|hotkeyWindowLifecycleManager/.test(source)));
   const both = applyFeatures(source, { dictation: true, shortcuts: true });
   assert.notEqual(both, source);
   assert.equal((both.match(/codexLinuxGlobalShortcutsPortalQueue=Promise.resolve\(\)/g) ?? []).length, 1);

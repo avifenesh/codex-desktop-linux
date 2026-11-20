@@ -4,7 +4,9 @@ const { escapeRegExp, findMatchingBrace } = require("../../scripts/patches/lib/m
 
 const identifier = String.raw`[A-Za-z_$][\w$]*`;
 const order = String.raw`(?:\(0,${identifier}\.${identifier}\)|${identifier})`;
-const groupsArgument = String.raw`groups:${identifier}\(\{groups:${identifier},items:(?<items>${identifier})\}\)`;
+// 26.1117 filters hidden pinned tasks instead of passing the items:
+// `groups:(0,C.N1)({groups:ee,hiddenTaskKeys:et})`, where et is built from the items.
+const groupsArgument = String.raw`groups:${order}\(\{groups:${identifier},(?:items:(?<items>${identifier})|hiddenTaskKeys:(?<hidden>${identifier}))\}\)`;
 const projectOrderArgument = String.raw`projectOrder:${order}\(${identifier},${identifier}\.${identifier}\.PROJECT_ORDER\)`;
 // Upstream compiles the unpinned project-group sorter inline:
 // `groups=function({groups:e,projectOrder:t}){return order(e,t)}({groups:filter({…,items}),projectOrder:read(get,keys.PROJECT_ORDER)})`.
@@ -23,6 +25,14 @@ const projectlessSorterStart = new RegExp(
 );
 const MODE_LOOKBEHIND = 3000;
 
+// The hidden-task set must be the pinned keys of exactly one item list.
+function hiddenTaskItems(prefix, hidden) {
+  const sets = [...prefix.matchAll(new RegExp(
+    String.raw`(?<![\w$])${escapeRegExp(hidden)}=new Set\((${identifier})\.filter\((${identifier})=>\2\.isPinned\)\.map\((${identifier})=>\3\.key\)\)`, "g",
+  ))];
+  return sets.length === 1 ? sets[0][1] : null;
+}
+
 function allMatches(source, pattern) {
   return [...source.matchAll(new RegExp(pattern.source, pattern.flags))];
 }
@@ -38,10 +48,12 @@ function callContext(source, match) {
   const tailStart = match.index + match[0].length;
   const start = source.slice(tailStart, tailStart + 400).match(projectlessSorterStart);
   if (modes.length !== 1 || start == null) return null;
+  const items = match.groups.items ?? hiddenTaskItems(prefix, match.groups.hidden);
+  if (items == null) return null;
   const close = findMatchingBrace(source, tailStart + start[0].length - 1);
   if (close < 0) return null;
   const resolver = source.slice(close + 1, close + 400).match(new RegExp(
-    String.raw`^\(\{explicitChatThreadKeys:${identifier},getRecencyAt:(${identifier}),items:${escapeRegExp(match.groups.items)},projectGroups:${identifier},projectlessThreadIds:new Set\(${identifier}\?\?\[\]\)\}\)`,
+    String.raw`^\(\{explicitChatThreadKeys:${identifier},getRecencyAt:(${identifier}),items:${escapeRegExp(items)},projectGroups:${identifier},projectlessThreadIds:new Set\(${identifier}\?\?\[\]\)\}\)`,
   ));
   return resolver ? { mode: modes[0][1], recency: resolver[1] } : null;
 }

@@ -186,7 +186,8 @@ function enclosingModuleFactory(source, index) {
   const registry = "__webpack_modules__={";
   const registryStart = source.indexOf(registry);
   if (registryStart < 0 || source.indexOf(registry, registryStart + 1) >= 0) return null;
-  const entry = /(?:"[^"\\]*"|[\w$]+)\([^()]*\)\{/y;
+  // 26.1117 wraps each factory as `id:(function(e,t,n){...})`.
+  const entry = /(?:"[^"\\]*"|[\w$]+)(?<wrapped>:\(function)?\([^()]*\)\{/y;
   let cursor = registryStart + registry.length;
   while (cursor < source.length && source[cursor] !== "}") {
     entry.lastIndex = cursor;
@@ -204,6 +205,10 @@ function enclosingModuleFactory(source, index) {
       };
     }
     cursor = close + 1;
+    if (match.groups.wrapped != null) {
+      if (source[cursor] !== ")") return null;
+      cursor += 1;
+    }
     if (source[cursor] === ",") cursor += 1;
   }
   return null;
@@ -946,16 +951,20 @@ function localComposerRuntime(config) {
   );
 }
 
+// 26.1117 also returns the reset fallback directly: `return(0,x.Pd)(...)`.
 const LOCAL_COMPOSER_FALLBACK_PATTERN =
-  /([A-Za-z_$][\w$]*)=(\(0,[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\))\(([A-Za-z_$][\w$]*),null==([A-Za-z_$][\w$]*)\?void 0:`\$\{\4\.model\}:\$\{\4\.defaultReasoningEffort\}`\)/gu;
+  /([A-Za-z_$][\w$]*=|return)(\(0,[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\))\(([A-Za-z_$][\w$]*),null==([A-Za-z_$][\w$]*)\?void 0:`\$\{\4\.model\}:\$\{\4\.defaultReasoningEffort\}`\)/gu;
 // The composer picks the slider config from one of two ChatGPT-gated sources.
 const LOCAL_COMPOSER_CONFIG_PATTERN =
   /sliderModelsConfig:([A-Za-z_$][\w$]*\?[A-Za-z_$][\w$]*:[A-Za-z_$][\w$]*)(?=[,}])/gu;
 const LOCAL_COMPOSER_SELECTION_PATTERN = new RegExp(
   `async function(?: (?<handler>[A-Za-z_$][\\w$]*))?\\((?<model>[A-Za-z_$][\\w$]*),(?<effort>[A-Za-z_$][\\w$]*)\\)\\{` +
     `[\\s\\S]{0,240}?let (?<normalized>[A-Za-z_$][\\w$]*)=(?<normalizer>[A-Za-z_$][\\w$]*)\\(\\k<model>\\);` +
-    `await ?\\(null==(?<delegate>[A-Za-z_$][\\w$]*)\\?(?<base>[A-Za-z_$][\\w$]*)\\(\\k<normalized>,\\k<effort>\\):` +
-    `\\k<delegate>\\.setModelAndReasoningEffort\\(\\k<normalized>,\\k<effort>\\)\\)\\}`,
+    `await ?\\((?:null==(?<delegate>[A-Za-z_$][\\w$]*)\\?(?<base>[A-Za-z_$][\\w$]*)\\(\\k<normalized>,\\k<effort>\\):` +
+    `\\k<delegate>\\.setModelAndReasoningEffort\\(\\k<normalized>,\\k<effort>\\)` +
+    // 26.1117: `await (d?.isAeon?d.setModelAndReasoningEffort(n,e):base(n,e,source))`.
+    `|(?<aeon>[A-Za-z_$][\\w$]*)\\?\\.isAeon\\?\\k<aeon>\\.setModelAndReasoningEffort\\(\\k<normalized>,\\k<effort>\\):` +
+    `(?<aeonBase>[A-Za-z_$][\\w$]*)\\(\\k<normalized>,\\k<effort>(?:,[A-Za-z_$][\\w$]*)?\\))\\)\\}`,
   "gu",
 );
 
@@ -1148,7 +1157,7 @@ function applyLocalComposerConfigPatch(source, context = {}) {
   patchedSection = patchedSection.replace(
     LOCAL_COMPOSER_FALLBACK_PATTERN,
     (_match, result, resolver, selections, upstreamDefault) =>
-      `${result}=${resolver}(${selections},codexLinuxLocalDefaultPresetFallback(` +
+      `${result}${resolver}(${selections},codexLinuxLocalDefaultPresetFallback(` +
       `${configExpression}!=null,${selections},null==${upstreamDefault}?void 0:` +
       `\`\${${upstreamDefault}.model}:\${${upstreamDefault}.defaultReasoningEffort}\`))`,
   );

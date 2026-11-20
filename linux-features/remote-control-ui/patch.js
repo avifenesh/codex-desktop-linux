@@ -13,14 +13,45 @@ function warn(message, patchName) {
 const REMOTE_CONNECTIONS_GATE_PATTERN =
   /([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?),"4114442250"\)(?!\|\|navigator\.userAgent\.includes\(`Linux`\))/g;
 const PATCHED_REMOTE_CONNECTIONS_GATE = `"4114442250")||${LINUX_GATE})`;
+// 26.1117 hoists the gate id into a module constant and resolves it as the
+// fallback of the config check: `let h="1042620455",p="4114442250",...;return f(n?.config,e(c.JW,p))`.
+const REMOTE_CONNECTIONS_GATE_CONSTANT_PATTERN = /(?:let |,)([A-Za-z_$][\w$]*)="4114442250"(?=[,;])/g;
+const GATE_CONSTANT_WINDOW = 2000;
+
+function patchRemoteConnectionsGateConstants(source) {
+  let output = "";
+  let cursor = 0;
+  let found = false;
+  // Every hoisted gate constant must feed one recognised config fallback.
+  for (const declaration of source.matchAll(REMOTE_CONNECTIONS_GATE_CONSTANT_PATTERN)) {
+    const start = declaration.index + declaration[0].length;
+    if (start < cursor) return null;
+    const constant = declaration[1].replace(/[$]/g, "\\$");
+    const end = Math.min(source.length, start + GATE_CONSTANT_WINDOW);
+    const window = source.slice(start, end);
+    const uses = new RegExp(
+      `\\?\\.config,([A-Za-z_$][\\w$]*)\\(([A-Za-z_$][\\w$]*\\.[A-Za-z_$][\\w$]*),${constant}\\)\\)`, "g",
+    );
+    const patchedWindow = window.replace(uses, (_match, getter, gate) =>
+      `?.config,(${getter}(${gate},${declaration[1]})||${LINUX_GATE}))`);
+    if (patchedWindow === window && !window.includes(`,${declaration[1]})||${LINUX_GATE}))`)) return null;
+    found = true;
+    output += source.slice(cursor, start) + patchedWindow;
+    cursor = end;
+  }
+  return found ? output + source.slice(cursor) : null;
+}
 
 function applyRemoteConnectionsVisibilityPatch(source) {
-  const patched = source.replace(
+  const replaced = source.replace(
     REMOTE_CONNECTIONS_GATE_PATTERN,
     (_match, getter, gate) => `(${getter}(${gate},"4114442250")||${LINUX_GATE})`,
   );
-  if (patched !== source || source.includes(PATCHED_REMOTE_CONNECTIONS_GATE)) {
-    return patched;
+  const inlineFound = replaced !== source || source.includes(PATCHED_REMOTE_CONNECTIONS_GATE);
+  const patched = patchRemoteConnectionsGateConstants(replaced);
+  if (patched != null) return patched;
+  if (inlineFound) {
+    return replaced;
   }
   warn("Could not find remote connections Statsig gate", "remote control UI remote connections visibility patch");
   return source;

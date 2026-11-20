@@ -8,14 +8,18 @@ const API_KEY_ACCESS = "{fast:!0,ultrafast:!1}";
 // rspack chunks have no stable filenames, so every owner is found by content.
 // The speed-mode access hook is copied into every chunk that renders a speed
 // control; each copy is patched independently.
-const GATE_NEEDLES = ["serviceTierAccess:", 'authMethod==="personalAccessToken"'];
+// The amazonBedrock check separates the hook owner from consumers that only
+// read serviceTierAccess next to unrelated personal-access-token checks.
+const GATE_NEEDLES = ["serviceTierAccess:", 'authMethod==="personalAccessToken"', 'authMethod==="amazonBedrock"'];
 const MODEL_NEEDLES = [
   "hasModelSupportingUltraReasoningEffort",
   "apiKeyDaybreakSupported",
   "codex-auto-review",
 ];
 const RESOLVER_NEEDLES = ["serviceTiers?.find(", "supportsIndependentSpeedModes"];
-const FALLBACK_NEEDLES = ["Description for the Ultrafast service tier", "serviceTiers"];
+// The option builder's Standard entry carries speedMultiplier; current bundles
+// no longer ship message descriptions.
+const FALLBACK_NEEDLES = ["speedMultiplier:", "serviceTiers"];
 
 const FALLBACK_FAST_TIER_HELPER =
   `function ${PATCH_MARKER}(e){return null==e||e.serviceTiers?.length||` +

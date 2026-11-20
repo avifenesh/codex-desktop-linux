@@ -15,7 +15,9 @@ Desktop owns one selected Codex CLI child running `app-server --listen
 unix://PATH`. Desktop connects through the CLI's stock `app-server proxy --sock
 PATH` byte tunnel and its existing WebSocket transport. Other local clients use
 the same stock proxy command to attach to the Unix socket and receive the normal
-WebSocket `/rpc` byte stream. Closing Desktop stops the authority.
+WebSocket `/rpc` byte stream. The authority belongs to Desktop's app-server host
+utility process: when that process exits or receives SIGTERM, including when
+Desktop quits, it stops the authority and releases its socket and lock.
 
 Only the host whose ID is `local` uses the shared authority. The upstream
 `durable` cloud host also has local kind metadata, but retains its own transport
@@ -67,7 +69,10 @@ ownership lock. The lock owner, socket inode, listener identity, command line,
 and process start identities are rechecked before signaling it. Unknown
 listeners, live Desktop owners, changed identities, and pathnames with multiple
 live listener inodes remain untouched. The same cleanup runs after Electron exits
-and before a later cold start.
+and before a later cold start. When Desktop restarts a crashed app-server host,
+the new host runs the same staged cleanup before it claims the lock, so it takes
+over from the dead host instead of refusing; any check that fails still leaves
+the authority untouched and the new host refuses.
 
 ## Attached CLI
 
@@ -173,9 +178,11 @@ Set `CODEX_CLI_PATH` to include the stock authority/socket/proxy lifecycle test:
 CODEX_CLI_PATH="/absolute/path/to/real/codex" node --test linux-features/shared-app-server-socket/test.js
 ```
 
-The feature depends on upstream's current local transport factory, WebSocket
-adapter, configuration-override callback, and `app-server proxy` command. The
-descriptor leaves an unknown bundle byte-identical and reports a warning. When
+The feature depends on upstream's current app-server host stdio transport, the
+SSH WebSocket adapter in its lazily loaded host chunk, the configuration-override
+callback, and the `app-server proxy` command. The shared transport runs in the
+app-server host utility process, which Desktop can restart within one session;
+that process owns the lock and the authority. The descriptor leaves an unknown bundle byte-identical and reports a warning. When
 the feature is enabled, candidate acceptance treats that warning as a failure
 and rejects the build instead of installing a partial patch.
 

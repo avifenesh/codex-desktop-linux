@@ -121,7 +121,7 @@ function patchedMainContract(source) {
     `var ${dockIconPatchMarker}=1`,
     `function ${dockIconResourceHelper}(`,
     '"linux"===process.platform?codexLinuxDockIconResourcePath(',
-    '"linux"===process.platform)return',
+    '{if("linux"===process.platform)return ',
     "globalThis.codexLinuxDockIconImage=",
     'codexLinuxDockIconResourcePath("sync-desktop-icon.sh")',
     '"linux"===process.platform&&globalThis.codexLinuxDockIconImage',

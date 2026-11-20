@@ -28,7 +28,7 @@ function rspackModuleRange(source, offset) {
   const start = source.indexOf("__webpack_modules__={");
   if (start < 0) return null;
   let index = start + "__webpack_modules__={".length;
-  const header = new RegExp(`^,?(?:"[^"]+"|${ID}|\\d+)\\((?:${ID}(?:,${ID}){0,2})?\\)\\{`, "u");
+  const header = new RegExp(`^,?(?:"[^"]+"|${ID}|\\d+)(?:\\(|:\\(function\\()(?:${ID}(?:,${ID}){0,2})?\\)\\{`, "u");
   while (index < source.length) {
     const match = header.exec(source.slice(index, index + 200));
     if (match == null) return null;
@@ -37,6 +37,7 @@ function rspackModuleRange(source, offset) {
     if (close < 0) return null;
     if (open < offset && offset < close) return { start: open, end: close + 1 };
     index = close + 1;
+    if (source[index] === ")") index += 1;
   }
   return null;
 }

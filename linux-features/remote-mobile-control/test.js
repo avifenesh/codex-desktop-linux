@@ -1117,17 +1117,13 @@ test("remote mobile control feature exposes opt-in main-bundle and webview patch
     }
     const byId = (id) => descriptors.find((descriptor) => descriptor.id === `feature:remote-mobile-control:${id}`);
     // Modules duplicated across chunks are patched in every copy.
-    for (const id of ["linux-remote-control-visibility", "linux-remote-control-enable-for-host-params", "linux-remote-control-copy"]) {
+    for (const id of ["linux-remote-control-load-gate", "linux-remote-control-visibility", "linux-remote-control-enable-for-host-params", "linux-remote-control-copy"]) {
       assert.equal(byId(id).assetMatch, undefined, id);
     }
     const hydration = byId("linux-remote-mobile-conversation-hydration");
     const hydrationOwner = syntheticCurrentConversationHydrationBundle();
     assert.equal(hydration.assetMatch(applyLinuxRemoteMobileConversationHydrationPatch(hydrationOwner)), true);
     assert.equal(hydration.assetMatch(hydrationOwner + hydrationOwner), false);
-    const loadGate = byId("linux-remote-control-load-gate");
-    const loadGateOwner = syntheticRemoteConnectionVisibilityBundle();
-    assert.equal(loadGate.assetMatch(applyLinuxRemoteControlLoadGatePatch(loadGateOwner)), true);
-    assert.equal(loadGate.assetMatch(loadGateOwner + loadGateOwner), false);
     const revoke = byId("linux-remote-control-client-revoke-setup-reset");
     const revokeOwner = syntheticCurrentRevokeSetupResetBundle();
     assert.equal(revoke.assetMatch(applyLinuxRemoteControlClientRevokeSetupResetPatch(revokeOwner)), true);
@@ -2036,6 +2032,29 @@ test("Linux remote-control load gate rejects non-current and ambiguous shapes", 
   }
 });
 
+// Signed 26.1117.31558 shape: the gate id is a hoisted module constant read by
+// an export getter, and every chunk carries its own copy of the module.
+function syntheticHoistedRemoteControlLoadGateBundle() {
+  return rspackChunk(11154, 'PIwo(e,t,n){var o=n("statsig");let h="1042620455",p="4114442250",d={key:"features.remote_connections"};n.d(t,{},{Ik:function(){return!0},i2:h,mC:function(){return(0,o.Zj)(h)}})}');
+}
+
+test("Linux remote-control load gate patches the hoisted gate constant getter", () => {
+  const source = syntheticHoistedRemoteControlLoadGateBundle();
+  const patched = applyLinuxRemoteControlLoadGatePatch(source);
+  assert.notEqual(patched, source);
+  assert.match(patched, /mC:function\(\)\{return codexLinuxRemoteControlLoadGateEnabled\(\)\|\|\(0,o\.Zj\)\(h\);function codexLinuxRemoteControlLoadGateEnabled\(\)\{/);
+  assert.equal(applyLinuxRemoteControlLoadGatePatch(patched), patched);
+  execFileSyncForModuleCheck(patched, "hoisted load gate");
+  for (const drifted of [
+    source.replace('let h="1042620455",', 'let h="1042620456",'),
+    source.replace("mC:function(){return(0,o.Zj)(h)}", "mC:function(){return(0,o.Zj)(h)},mD:function(){return(0,o.Zj)(h)}"),
+  ]) {
+    const { result, warnings } = captureWarnings(() => applyLinuxRemoteControlLoadGatePatch(drifted));
+    assert.equal(result, drifted);
+    assert.match(warnings.join("\n"), /unique remote-control loader rollout gate/);
+  }
+});
+
 test("Linux remote-control feature sync enables remote_control for the local app server only", async () => {
   const source = syntheticAppMainFeatureSyncBundle();
   const patched = applyLinuxRemoteControlFeatureSyncPatch(source);
@@ -2596,6 +2615,62 @@ test("remote mobile feature patch report records feature metadata", () => {
       fs.rmSync(tempApp, { recursive: true, force: true });
     }
   });
+});
+
+const byFeatureDescriptor = (id) => remoteMobilePatchDescriptors.find((descriptor) => descriptor.id === id);
+
+// Signed 26.1117.31558 shapes for the copy, outbound tab gate, wrapped module
+// factories and the history-keyed active status.
+test("Linux remote-control copy selects description-less message chunks", () => {
+  const copy = byFeatureDescriptor("linux-remote-control-copy");
+  const source = 'let a=(0,l.jsx)(A.A,{id:"codexMobile.setupDialog.connected.keepAwake.title",defaultMessage:"Keep this Mac awake"}),b=(0,l.jsx)(A.A,{id:"codexMobile.setupPage.initial.heading",defaultMessage:"Connect your phone to this Mac"});';
+  assert.ok(copy.assetNeedles.every((needle) => source.includes(needle)));
+  const patched = applyPatchTwice(copy.apply, source);
+  assert.match(patched, /defaultMessage:"Keep this Linux desktop awake"\}/);
+  assert.match(patched, /defaultMessage:"Connect your phone to this Linux desktop"\}/);
+  assert.equal(copy.assetNeedles.every((needle) => 'defaultMessage:"Play a sound on this Mac during Start."'.includes(needle)), false);
+});
+
+test("Linux outbound tab gate follows the gate id imported from the remote connections module", () => {
+  const gateModule = 'kTQn(e,t,n){var s=n("qmMi");let f="782640499",C={thisMac:"Control this Mac"};n.d(t,{},{CL:p,K0:f,V4:x})}';
+  const page = 'Sett(e,t,n){var B=n("statsig"),eI=n("kTQn");function Uo(){let tN=(0,B.Zj)(eI.K0),tE=(0,B.Zj)(I.Qg),nk=Ge(),nT=!tN,nH=null==tL,nz=null==tO;return nT&&nk}}';
+  const source = rspackChunk(178725, [page, gateModule].join(","));
+  const patched = applyPatchTwice(applyLinuxRemoteControlSettingsUxPatch, source);
+  assert.match(patched, /nT=\/\*codexLinuxRemoteControlOutboundTabGate\*\/\(typeof navigator!=\x60undefined\x60&&navigator\.userAgent\.includes\(\x60Linux\x60\)\|\|!tN\)/);
+  for (const drifted of [source.replace('K0:f,', 'K0:g,'), source.replace('let f="782640499"', 'let f="782640498"'), source.replace('eI=n("kTQn")', 'eI=n("other")')]) {
+    const { result, warnings } = captureWarnings(() => applyLinuxRemoteControlSettingsUxPatch(drifted));
+    assert.equal(result.includes("codexLinuxRemoteControlOutboundTabGate"), false);
+    assert.match(warnings.join("\n"), /unique remote-control outbound tab gate/);
+  }
+});
+
+test("Linux remote terminal status recovery declares helpers in wrapped module factories", () => {
+  const source = syntheticRemoteTerminalStatusBundle()
+    .replace("EU9a(e,t,n){", "EU9a:(function(e,t,n){").replace(",e9KY(e,t,n){", "),e9KY:(function(e,t,n){")
+    .replace(",sZJm(e,t,n){", "),sZJm:(function(e,t,n){").replace(/\}\};$/, "})};");
+  execFileSyncForModuleCheck(source, "wrapped terminal status fixture");
+  const patched = applyPatchTwice(applyLinuxRemoteTerminalStatusRecoveryPatch, source);
+  for (const moduleId of ["EU9a", "e9KY", "sZJm"]) {
+    assert.ok(patched.includes(`${moduleId}:(function(e,t,n){function codexLinuxRemoteHasUserInputRequest(e){`), moduleId);
+  }
+  execFileSyncForModuleCheck(patched, "wrapped terminal status");
+});
+
+test("Linux remote mobile active-status patch keys the history-attached status on runtime activity", () => {
+  const source = 'let o={active:"Subscribed: active",inactive:"Subscribed: idle","needs-resume":"Needs resume","read-only":"Read-only snapshot"};' +
+    'function ei(e){return o[function({latestTurnStatus:e,resumeState:t,historyAttached:n,threadRuntimeStatus:a}){return n?a?.type==="active"||"inProgress"===e?"active":"inactive":"needs_resume"===t?"needs-resume":"read-only"}(e)]}';
+  const descriptor = byFeatureDescriptor("linux-remote-mobile-active-status");
+  assert.ok(descriptor.assetNeedles.every((needle) => source.includes(needle)));
+  const patched = applyPatchTwice(applyLinuxRemoteMobileActiveStatusPatch, source);
+  const context = { module: { exports: {} } };
+  vm.runInNewContext(`${patched};module.exports=ei;`, context);
+  const status = (args) => context.module.exports(args);
+  const active = { type: "active" };
+  assert.equal(status({ latestTurnStatus: "completed", resumeState: "needs_resume", historyAttached: false, threadRuntimeStatus: active }), "Subscribed: active");
+  assert.equal(status({ latestTurnStatus: "inProgress", resumeState: null, historyAttached: false, threadRuntimeStatus: null }), "Subscribed: active");
+  assert.equal(status({ latestTurnStatus: "completed", resumeState: "needs_resume", historyAttached: false, threadRuntimeStatus: { type: "notLoaded" } }), "Needs resume");
+  assert.equal(status({ latestTurnStatus: "completed", resumeState: null, historyAttached: false, threadRuntimeStatus: null }), "Read-only snapshot");
+  assert.equal(status({ latestTurnStatus: "completed", resumeState: null, historyAttached: true, threadRuntimeStatus: null }), "Subscribed: idle");
 });
 
 test("Linux remote mobile active-status patch treats active thread status as active without stream role", () => {

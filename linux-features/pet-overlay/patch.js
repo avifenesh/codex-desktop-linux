@@ -160,6 +160,20 @@ function firstMethodArgument(methodText, methodName, index) {
   return rawArg.match(/^([A-Za-z_$][\w$]*)/)?.[1] ?? null;
 }
 
+// The window local of an avatar overlay method. 26.1117 resolves it through
+// the caller instead of reading this.window:
+// `startDrag(e,t,r=!1){let n=this.getWindowForRenderer(e);if(null==n)return;`.
+function avatarMethodWindow(method, methodName) {
+  const legacy = method.text.match(/let ([A-Za-z_$][\w$]*)=this\.window;/);
+  if (legacy != null) return legacy[1];
+  const caller = firstMethodArgument(method.match[0], methodName, 0);
+  // Hoisted temporaries and earlier Linux guards such as the drag lock may
+  // lead the method body.
+  const body = method.text.slice(method.match[0].length).replace(/^(?:if\(this\.codexPetOverlay[A-Za-z]+\([^()]*\)\)return;|var [A-Za-z_$][\w$]*(?:,[A-Za-z_$][\w$]*)*;)*/, "");
+  const current = body.match(/^let ([A-Za-z_$][\w$]*)=this\.getWindowForRenderer\(([A-Za-z_$][\w$]*)\);if\(null==\1(?=[|)])/);
+  return current != null && current[2] === caller ? current[1] : null;
+}
+
 function codexPetOverlayKWinCall(path, iface, method, ...args) {
   if (this.codexPetOverlayKWinGeometryUnavailable) return null;
   try {
@@ -1119,16 +1133,16 @@ function patchCompositorDragLifecycle(source) {
     return patched;
   }
   if (!startMethod.text.includes("codexPetOverlayBeginCompositorDrag(")) {
-    const windowMatch = startMethod.text.match(/let ([A-Za-z_$][\w$]*)=this\.window;/);
+    const windowVar = avatarMethodWindow(startMethod, "startDrag");
     const eventArg = firstMethodArgument(startMethod.match[0], "startDrag", 1);
-    if (windowMatch == null || eventArg == null || !startMethod.text.includes("this.dragState=")) {
+    if (windowVar == null || eventArg == null || !startMethod.text.includes("this.dragState=")) {
       console.warn("WARN: Could not identify current avatar overlay drag start shape - skipping compositor transport hook");
       return patched;
     }
     patched = replaceMethodText(
       patched,
       startMethod,
-      `${startMethod.text.slice(0, -1)},this.codexPetOverlayIsNativeKWin()&&Object.assign(this.dragState,{codexPetOverlayGestureId:${eventArg}.codexPetOverlayGestureId,codexPetOverlayWindow:${windowMatch[1]},codexPetOverlaySequence:this.windowVisibilitySequence}),this.codexPetOverlayBeginCompositorDrag(${windowMatch[1]},${eventArg})}`,
+      `${startMethod.text.slice(0, -1)},this.codexPetOverlayIsNativeKWin()&&Object.assign(this.dragState,{codexPetOverlayGestureId:${eventArg}.codexPetOverlayGestureId,codexPetOverlayWindow:${windowVar},codexPetOverlaySequence:this.windowVisibilitySequence}),this.codexPetOverlayBeginCompositorDrag(${windowVar},${eventArg})}`,
     );
   }
 
@@ -1138,20 +1152,21 @@ function patchCompositorDragLifecycle(source) {
     return patched;
   }
   if (!moveMethod.text.includes("codexPetOverlayMoveCompositorDrag(")) {
-    const windowMatch = moveMethod.text.match(/let ([A-Za-z_$][\w$]*)=this\.window;/);
+    const windowVar = avatarMethodWindow(moveMethod, "moveDrag");
     const eventArg = firstMethodArgument(moveMethod.match[0], "moveDrag", 1);
+    // 26.1117 keeps the drag state as a plain object: `n.hasMovementIntent=!0`.
     const movementIntentMatch = moveMethod.text.match(
-      /([A-Za-z_$][\w$]*)\.recordMovementIntent\(\)/,
+      /([A-Za-z_$][\w$]*)\.(?:recordMovementIntent\(\)|hasMovementIntent=!0)/,
     );
     const nativeDragBoundary = ",this.nativeWindowDragActive)return;";
     if (
-      windowMatch == null || eventArg == null || movementIntentMatch == null ||
+      windowVar == null || eventArg == null || movementIntentMatch == null ||
       moveMethod.text.split(nativeDragBoundary).length !== 2
     ) {
       console.warn("WARN: Could not identify current avatar overlay drag move shape - skipping compositor transport hook");
       return patched;
     }
-    const replacement = `,this.codexPetOverlayMoveCompositorDrag(${windowMatch[1]},${eventArg})||this.nativeWindowDragActive)return;`;
+    const replacement = `,this.codexPetOverlayMoveCompositorDrag(${windowVar},${eventArg})||this.nativeWindowDragActive)return;`;
     patched = replaceMethodText(
       patched,
       moveMethod,
@@ -1159,7 +1174,7 @@ function patchCompositorDragLifecycle(source) {
     );
   }
 
-  const endMethod = findAvatarOverlayMethod(patched, /endDrag\([^)]*\)\{/);
+  let endMethod = findAvatarOverlayMethod(patched, /endDrag\([^)]*\)\{/);
   if (endMethod == null) {
     console.warn("WARN: Could not find avatar overlay endDrag for compositor transport - skipping pet overlay patch");
     return patched;
@@ -1170,11 +1185,12 @@ function patchCompositorDragLifecycle(source) {
   ) {
     return patched;
   }
-  const windowMatch = endMethod.text.match(/let ([A-Za-z_$][\w$]*)=this\.window;/u);
+  const windowVar = avatarMethodWindow(endMethod, "endDrag");
   const eventArg = firstMethodArgument(endMethod.match[0], "endDrag", 1);
   const nativeBoundsMatch = endMethod.text.match(
     /let [A-Za-z_$][\w$]*=this\.dragState,([A-Za-z_$][\w$]*)=this\.nativeWindowDragActive,([A-Za-z_$][\w$]*)=\1\?([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\):null,([A-Za-z_$][\w$]*)=\2\?\.bounds,([A-Za-z_$][\w$]*)=\1\?\2\?\.altKey===!0:([A-Za-z_$][\w$]*);/,
   );
+  if (nativeBoundsMatch != null) endMethod = splitDragCompletion(endMethod, nativeBoundsMatch);
   const completionBoundary = "this.nativeWindowDragStart=null,";
   const boundaryIndex = endMethod.text.indexOf(completionBoundary);
   const completionStart = endMethod.text.lastIndexOf(
@@ -1182,7 +1198,7 @@ function patchCompositorDragLifecycle(source) {
     boundaryIndex,
   );
   if (
-    windowMatch == null || eventArg == null || nativeBoundsMatch == null ||
+    windowVar == null || eventArg == null || nativeBoundsMatch == null ||
     boundaryIndex === -1 || completionStart === -1
   ) {
     console.warn("WARN: Could not identify current avatar overlay drag completion shape - skipping compositor transport hook");
@@ -1197,7 +1213,6 @@ function patchCompositorDragLifecycle(source) {
     console.warn("WARN: Could not identify current avatar overlay drag completion shape - skipping compositor transport hook");
     return patched;
   }
-  const windowVar = windowMatch[1];
   const caller = firstMethodArgument(endMethod.match[0], "endDrag", 0);
   const third = firstMethodArgument(endMethod.match[0], "endDrag", 2);
   const fourth = firstMethodArgument(endMethod.match[0], "endDrag", 3);
@@ -1223,6 +1238,30 @@ function patchCompositorDragLifecycle(source) {
       `this.codexPetOverlayEndKWinDrag(${windowVar},()=>{${completionNeedle}})||this.codexPetOverlayEndNiriDrag(${windowVar},${eventArg},()=>{${niriCompletion}})||(()=>{${completionNeedle}})()` +
       "}",
   );
+}
+
+// 26.1117 folds the final pointer move into the completion condition:
+// `if(l?(this.handleNativeWindowDragMove(a,d),this.logger().info(…)):o.hasMovementIntent&&this.moveDragToPointer(a,h4(t)),this.suppressNextRendererThrow=l,…`.
+// Splitting the move into its own statement restores the upstream completion
+// boundary `if(this.suppressNextRendererThrow=` without changing evaluation order.
+function splitDragCompletion(method, nativeBoundsMatch) {
+  if (method.text.includes("if(this.suppressNextRendererThrow=")) return method;
+  const [, nativeActive, , , stateWindow, nativeBounds] = nativeBoundsMatch;
+  const id = String.raw`[A-Za-z_$][\w$]*`;
+  const state = method.text.slice(nativeBoundsMatch.index).match(/^let ([A-Za-z_$][\w$]*)=this\.dragState,/)?.[1];
+  const event = firstMethodArgument(method.match[0], "endDrag", 1);
+  if (state == null || event == null) return method;
+  const escape = value => value.replace(/[$]/g, "\\$");
+  const fold = new RegExp(
+    `if\\(${escape(nativeActive)}\\?\\(this\\.handleNativeWindowDragMove\\(${escape(stateWindow)},${escape(nativeBounds)}\\),this\\.logger\\(\\)\\.info\\("Native pet window drag finished",\\{safe:\\{reason:${id}\\}\\}\\)\\):` +
+      `${escape(state)}\\.hasMovementIntent&&this\\.moveDragToPointer\\(${escape(stateWindow)},${id}\\(${escape(event)}\\)\\),this\\.suppressNextRendererThrow=`,
+    "g",
+  );
+  const folds = [...method.text.matchAll(fold)];
+  if (folds.length !== 1) return method;
+  const [folded] = folds;
+  const split = folded[0].slice(3, -",this.suppressNextRendererThrow=".length) + ";if(this.suppressNextRendererThrow=";
+  return { ...method, text: method.text.slice(0, folded.index) + split + method.text.slice(folded.index + folded[0].length) };
 }
 
 function patchKWinGeometry(source) {
@@ -1399,7 +1438,7 @@ function patchHiddenQuickChatFocus(source) {
 function patchKWinKeyboardFocus(source) {
   const method = findAvatarOverlayMethod(source, /(?<![\w$.])setKeyboardInteraction\([^{}]*\)\{/);
   if (method?.text.includes("this.codexPetOverlayActivateKWin(")) return source;
-  const window = method?.text.match(/\{let ([A-Za-z_$][\w$]*)=this\.window;/)?.[1];
+  const window = method && avatarMethodWindow(method, "setKeyboardInteraction");
   const enabled = method && firstMethodArgument(method.match[0], "setKeyboardInteraction", 1);
   const focus = window && `${window}.focus(),${window}.webContents.focus()`;
   // The disabled path is the false branch of `enabled?(...):...` and runs to

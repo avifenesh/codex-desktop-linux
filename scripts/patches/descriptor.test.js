@@ -242,6 +242,39 @@ test("main-process chunk misses are not printed once the descriptor applies", ()
   assert.deepEqual(printed, []);
 });
 
+test("main-process descriptors read sibling chunks through the context", () => {
+  const { applyMainProcessChunkPatchDescriptors } = require("./engine.js");
+  const context = {};
+  const seen = [];
+  const chunks = applyMainProcessChunkPatchDescriptors(
+    [
+      { name: "app-server-host.js", source: "HOST" },
+      { name: "app-server-host-611-0123456789abcdef.js", source: "lazy 42" },
+    ],
+    normalizePatchDescriptors([mainBundlePatch({
+      id: "sibling",
+      apply(source, applyContext) {
+        seen.push(applyContext.mainProcessChunks.map(({ name }) => name));
+        assert.throws(() => applyContext.mainProcessChunks.push({}), TypeError);
+        if (source !== "HOST") {
+          console.warn("WARN: not the host chunk - skipping sibling patch");
+          return source;
+        }
+        const lazy = applyContext.mainProcessChunks.find(({ name }) => name.startsWith("app-server-host-611-"));
+        return `HOST uses ${lazy.source.split(" ")[1]}`;
+      },
+    })]),
+    context,
+    createPatchReport(),
+  );
+  assert.deepEqual(chunks.map(({ source }) => source), ["HOST uses 42", "lazy 42"]);
+  assert.deepEqual(seen, [
+    ["app-server-host.js", "app-server-host-611-0123456789abcdef.js"],
+    ["app-server-host.js", "app-server-host-611-0123456789abcdef.js"],
+  ]);
+  assert.equal("mainProcessChunks" in context, false);
+});
+
 test("webview descriptors find rspack async chunks by content needles", () => {
   const fs = require("node:fs");
   const os = require("node:os");

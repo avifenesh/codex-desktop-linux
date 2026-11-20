@@ -35,6 +35,11 @@ const currentProjectSource = sidebarSource(
 const officialLinuxProjectSource = sidebarSource(
   "ec=function({groups:e,projectOrder:t}){return A6i(e,t)}({groups:q({groups:eu,items:V}),projectOrder:(0,o.F6)(t,i.Q2Y.PROJECT_ORDER)})",
 );
+// Signed 26.1117.31558 shape: pinned task keys are hidden from the groups,
+// and the hidden set is built from the same items the projectless sorter reads.
+const hiddenTaskProjectSource = sidebarSource(
+  "ec=function({groups:e,projectOrder:t}){return(0,a.n)(e,t)}({groups:(0,y.N1)({groups:eu,hiddenTaskKeys:eh}),projectOrder:(0,o.F6)(t,i.Q2Y.PROJECT_ORDER)})",
+).replace("ed=q({groups:el,items:V}),", "eh=new Set(V.filter(e=>e.isPinned).map(e=>e.key)),ed=(0,y.N1)({groups:el,hiddenTaskKeys:eh}),");
 const chunk = (body) => "export const __rspack_esm_id=24191;export const __rspack_esm_ids=[24191];" +
   `export const __webpack_modules__={uSdb(e,t,n){var a=n("PORD");function U(e,t){${body}return ec}n.d(t,{U:()=>U})}};`;
 
@@ -206,6 +211,24 @@ test("patch matches the current official project sorter semantically", () => {
     patched,
     /\}\(\{groups:q\(\{groups:eu,items:V\}\),projectOrder:\(0,o\.F6\)\(t,i\.Q2Y\.PROJECT_ORDER\),getRecencyAt:J,sortMode:Q\}\),ep=function/,
   );
+});
+
+test("hidden-task sidebar shape binds the items behind the hidden set", () => {
+  const patched = applyPatchTwice(hiddenTaskProjectSource);
+  assert.ok(patched.includes("hiddenTaskKeys:eh}),projectOrder:(0,o.F6)(t,i.Q2Y.PROJECT_ORDER),getRecencyAt:J,sortMode:Q})"));
+  const sort = evaluateGroupSorter(patched);
+  const groups = [{ projectId: "old", threadKeys: ["old"] }, { projectId: "new", threadKeys: ["new"] }];
+  const timestamps = new Map([["old", 1], ["new", 9]]);
+  assert.deepEqual(Array.from(sort({ groups, getRecencyAt: key => timestamps.get(key), sortMode: "updated_at" }), group => group.projectId), ["new", "old"]);
+  for (const source of [
+    hiddenTaskProjectSource.replace("eh=new Set(V.filter", "eh=new Set(W.filter"),
+    hiddenTaskProjectSource.replace("e=>e.isPinned", "e=>e.isHidden"),
+    hiddenTaskProjectSource.replace("eh=new Set(V.filter", "eh=new Set(V.filter(e=>e.isPinned).map(e=>e.key)),eh=new Set(V.filter"),
+  ]) {
+    const { value, warnings } = captureWarns(() => applyProjectGroupLastUpdatedSortPatch(source));
+    assert.equal(value, source);
+    assert.equal(warnings.length, 1);
+  }
 });
 
 test("drift leaves the asset byte-identical", () => {

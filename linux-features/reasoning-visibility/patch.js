@@ -45,21 +45,15 @@ const standalone = recipe(
   ['case"worktree-init":return ', '"standalone");case"reasoning":'],
 );
 
+// 26.1117 moved the item check into its own predicate, shared by the
+// persistent partition and the keep role:
+// `function h(e,t){var n,i;let r;return"user-input-response"===e.type?!e.completed:"dynamic-tool-call"===e.type?t.isPersistentDynamicTool(e):…}`.
 const persistent = recipe(
   "persistent",
-  String.raw`(?<prefix>if\("standalone"!==(?<unit>${ident})\.kind\)return!1;let (?<item>${ident})=\k<unit>\.item\.item;return)(?: ${enabledPattern}&&"reasoning"===\k<item>\.type\?!0:${escape(marker("persistent"))})?(?<suffix>"user-input-response"===\k<item>\.type\?!\k<item>\.completed:)`,
+  String.raw`(?<prefix>(?:if\("standalone"!==(?<unit>${ident})\.kind\)return!1;let |function ${ident}\()(?<item>${ident})(?:=\k<unit>\.item\.item;|,(?<options>${ident})\)\{(?:var ${ident}(?:,${ident})*;)?(?:let ${ident}(?:,${ident})*;)?)return)(?: ${enabledPattern}&&"reasoning"===\k<item>\.type\?!0:${escape(marker("persistent"))})?(?<suffix>"user-input-response"===\k<item>\.type\?!\k<item>\.completed:(?=(?<dynamic>"dynamic-tool-call"===\k<item>\.type\?\k<options>\.isPersistentDynamicTool\(\k<item>\):)?))`,
   ({ prefix, item, suffix }) => `${prefix} ${enabled}&&"reasoning"===${item}.type?!0:${marker("persistent")}${suffix}`,
   ["collapsibleUnits:", "persistentUnits:"],
-);
-
-// The transcript projection has its own explicit reasoning grouping exception,
-// compiled as `if(classified?.grouping==="standalone"||persistent?.has(item)===!0){flush(),output.push(…)`.
-const transcript = recipe(
-  "transcript",
-  String.raw`(?<prefix>if\()(?:${enabledPattern}&&"reasoning"===(?<item>${ident})\.type\|\|${escape(marker("transcript"))})?(?<rest>(?<classified>${ident})\?\.grouping==="standalone"\|\|(?<persistent>${ident})\?\.has\((?<current>${ident})\)===!0\)\{(?<flush>${ident})\(\),(?<output>${ident})\.push\(\{type:"activity-item",key:\`transcript-activity-item-)(?=\$\{)`,
-  ({ prefix, rest, current }) => `${prefix}${enabled}&&"reasoning"===${current}.type||${marker("transcript")}${rest}`,
-  ["transcript-activity-item-", "collapseWhenPossible:"],
-  ({ item, current }) => item == null || item === current,
+  ({ unit, options, dynamic }) => unit != null ? options == null : options != null && dynamic != null,
 );
 
 const upstreamSummary = String.raw`!0===${ident}\.getDefaultFeatureOverride\("concurrent_reasoning_summaries"\)\|\|${ident}\?"detailed":null`;
@@ -107,7 +101,7 @@ function applyExpandedPatch(source) {
 
 module.exports = {
   reasoningComponent,
-  descriptors: [standalone, persistent, transcript, summaries, {
+  descriptors: [standalone, persistent, summaries, {
     id: "expanded",
     phase: "webview-asset",
     order: 20_746,

@@ -219,6 +219,41 @@ test("Codex Micro feature gate fails closed on an extra current callsite", (t) =
   );
 });
 
+// Signed 26.1117 shape: the sidebar bridge module no longer reads the gate; the
+// app shell renders the HUD and bridge behind its own second gate.
+function bridgeShellSource() {
+  return `${appShellSource()};const t=0,hud=gate1&&visible;render({showCodexMicroHud:hud})`;
+}
+
+test("Codex Micro sidebar gate may move into the app shell that gates the bridge", (t) => {
+  const { assets, root } = createExtractedApp(t);
+  fs.rmSync(path.join(assets, "async", "91641.sidebar.js"));
+  fs.writeFileSync(path.join(assets, "async", "2.route-only.js"), 'const r="/settings/codex-micro",s=D.appServices.codexMicro', "utf8");
+  fs.writeFileSync(path.join(assets, "async", "216127.shell.js"), bridgeShellSource(), "utf8");
+  const discovery = findCodexMicroFeatureGateAssets(root);
+  assert.equal(discovery.reason, null);
+  assert.equal(discovery.matches.some(({ expected }) => expected === sidebarContract), false);
+  const result = patchCodexMicroFeatureGateAssets(root);
+  assert.equal(result.matched, 1);
+  assert.equal(result.changed, Object.keys(GATE_FIXTURES).length - 1);
+  const shell = fs.readFileSync(path.join(assets, "async", "216127.shell.js"), "utf8");
+  assert.equal(shell.includes(CODEX_MICRO_GATE_ID), false);
+  assert.equal(patchCodexMicroFeatureGateAssets(root).changed, 0);
+});
+
+test("Codex Micro sidebar gate cannot disappear without the shell bridge gate", (t) => {
+  const { assets, root } = createExtractedApp(t);
+  fs.rmSync(path.join(assets, "async", "91641.sidebar.js"));
+  fs.writeFileSync(
+    path.join(assets, "async", "216127.shell.js"),
+    bridgeShellSource().replace("hud=gate1&&visible", "hud=other&&visible"),
+    "utf8",
+  );
+  const result = patchCodexMicroFeatureGateAssets(root);
+  assert.equal(result.matched, 0);
+  assert.match(result.reason, /Found 0 current Codex Micro sidebar settings entry gate bundles/);
+});
+
 test("Codex Micro feature gate fails closed when a semantic owner disappears", (t) => {
   const { assets, root } = createExtractedApp(t);
   fs.rmSync(path.join(assets, "async", "589850.composer.js"));
@@ -236,7 +271,11 @@ test(
     );
     assert.equal(discovery.reason, null);
     for (const expected of CODEX_MICRO_GATE_CONTRACTS) {
-      assert.ok(discovery.matches.some((match) => match.expected === expected));
+      assert.ok(
+        discovery.matches.some((match) => match.expected === expected)
+          || expected.ownerMovedTo?.(discovery.matches),
+        expected.description,
+      );
     }
     for (const match of discovery.matches) {
       assert.equal(match.contract.state, "unpatched");

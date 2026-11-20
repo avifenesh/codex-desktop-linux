@@ -202,15 +202,19 @@ test("current signed official fork placement advances only after the sidebar fal
   ))];
   assert.equal(placementMatches.length, 1);
   const placementSource = placementMatches[0].groups.placement;
-  const schemaNames = [...new Set([...placementSource.matchAll(new RegExp(
-    String.raw`(${ident})\.(?:safeParse|object)\(`, "g",
-  ))].map((match) => match[1]))];
+  // Older builds call `z.object({...})`; 26.1117 calls the object factory
+  // through a minified export (`tJ.Ikc({projectSortMode:IO.optional()})`).
+  const schemaCalls = [...placementSource.matchAll(new RegExp(
+    String.raw`(${ident})\.(safeParse|object|${ident}(?=\(\{${ident}:${ident}\.optional\(\)\}\)))\(`, "g",
+  ))];
+  const schemaNames = [...new Set(schemaCalls.map((match) => match[1]))];
   assert.equal(schemaNames.length, 2);
   const schema = {
     safeParse: (value) => ({ data: value }),
     optional: () => ({}),
     object: () => schema,
   };
+  for (const [, , method] of schemaCalls) schema[method] ??= () => schema;
   const readPlacement = Function(...schemaNames, `return (${placementSource})`)(...schemaNames.map(() => schema));
   for (const [candidate, expected] of [[source, "not-ready"], [patched, "ready"]]) {
     const readers = [...candidate.matchAll(readerPattern)];

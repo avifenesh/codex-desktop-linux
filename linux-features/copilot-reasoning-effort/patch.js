@@ -58,7 +58,8 @@ function matchesCopilotModelAndReasoningPersistenceContract(source) {
   );
   const currentWrappers = findAllMatches(
     ownerRegion,
-    new RegExp(`=>(${JS_IDENT})\\(${JS_IDENT},${JS_IDENT},"current",${JS_IDENT}\\)`),
+    // Newer builds route thread-scoped writes through `r?"conversation":"current"`.
+    new RegExp(`=>(${JS_IDENT})\\(${JS_IDENT},${JS_IDENT},(?:${JS_IDENT}\\?"conversation":)?"current",${JS_IDENT}\\)`),
   );
   return defaultWrites.length === 1 &&
     defaultWrappers.length === 1 &&

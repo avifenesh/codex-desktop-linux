@@ -580,6 +580,27 @@ test("semantic settings injection is module-scoped, self-contained, idempotent a
   assert.doesNotThrow(() => new vm.Script(component));
 });
 
+// Signed 26.1117 shape: the menu row renders through a settings-search entry
+// wrapper, the module renders the native row primitive with label props once,
+// and the page passes an overview before its title.
+const ENTRY_SETTINGS_MODULE = SETTINGS_MODULE
+  .replace('settings=a("RxZZ");', 'settings=a("RxZZ"),Entry=a("pO0d");')
+  .replace("return(0,j.jsx)(Ui.ic,{label:title,description:description,control:c})}", "return(0,j.jsx)(Entry.GC,{entry:keys.$j.menuBar,description:description,control:c})}function predictions(){return(0,j.jsx)(Ui.ic,{label:title,description:x,control:e=>e})}")
+  .replace("return(0,j.jsxs)(pageMod.P,{title:title,children:[n,i]})", "return(0,j.jsxs)(pageMod.P,{overview:x,title:title,children:[n,i]})");
+
+test("entry-wrapped menu rows bind the module's native row primitive", () => {
+  const source = settingsFixture(ENTRY_SETTINGS_MODULE);
+  assert.notEqual(source, settingsFixture());
+  const contract = settingsContract(source);
+  assert.ok(contract);
+  assert.equal(contract.row, "Ui.ic");
+  assert.ok(source.startsWith("n,i]", contract.renderInsertAt));
+  const twoPrimitives = ENTRY_SETTINGS_MODULE.replace("function predictions(){", "function more(){return(0,j.jsx)(Ui.ic,{label:x,description:x,control:x})}function predictions(){");
+  assert.equal(settingsContract(settingsFixture(twoPrimitives)), null);
+  const noWrapper = ENTRY_SETTINGS_MODULE.replace("Entry.GC,{entry:keys.$j.menuBar,", "Entry.GC,{");
+  assert.equal(settingsContract(settingsFixture(noWrapper)), null);
+});
+
 test("missing or ambiguous anchors fail before changing settings or writing a catalog", (t) => {
   const cases = [
     (s) => s.replace("U6S.macMenuBarEnabled", "U6S.changedPreference"),

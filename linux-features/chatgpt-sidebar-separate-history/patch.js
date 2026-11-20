@@ -15,11 +15,12 @@ const storagePattern = new RegExp(
 );
 
 // Lists the module factories of one rspack chunk
-// (`export const __webpack_modules__={id(e,t,n){…},…}`), or null.
+// (`export const __webpack_modules__={id(e,t,n){…},…}`, or the newer
+// `{id:(function(e,t,n){…}),…}` form), or null.
 function chunkModules(source) {
   const start = source.indexOf(MODULES_MARKER);
   if (start < 0) return null;
-  const header = /([A-Za-z0-9_$]+|"[^"\\]*")\(([A-Za-z_$][\w$]*(?:,[A-Za-z_$][\w$]*)*)?\)\{/y;
+  const header = /([A-Za-z0-9_$]+|"[^"\\]*")(:\(function)?\(([A-Za-z_$][\w$]*(?:,[A-Za-z_$][\w$]*)*)?\)\{/y;
   const modules = [];
   let index = start + MODULES_MARKER.length;
   while (source[index] !== "}") {
@@ -30,11 +31,15 @@ function chunkModules(source) {
     if (close < 0) return null;
     modules.push({
       id: match[1].replace(/^"|"$/g, ""),
-      params: match[2]?.split(",") ?? [],
+      params: match[3]?.split(",") ?? [],
       start: index,
       end: close + 1,
     });
     index = close + 1;
+    if (match[2] != null) {
+      if (source[index] !== ")") return null;
+      index += 1;
+    }
     if (source[index] === ",") index += 1;
   }
   return modules;

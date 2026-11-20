@@ -83,10 +83,26 @@ function applyUi(source) {
   const jsx = unique(source, new RegExp(
     `\\(0,(${IDENT})\\.jsx\\)\\((${IDENT}),\\{accountIcon:${IDENT},accountSwitcher:${IDENT},additionalItems:(${IDENT}),` +
       `[\\s\\S]{0,500}?onCloseMenu:(${IDENT}),`, "g"));
-  const settings = unique(source, new RegExp(
+  let settings = unique(source, new RegExp(
     `(${IDENT})=\\(0,${IDENT}\\.jsx\\)\\(${IDENT}\\.${IDENT},\\{id:"codex\\.profileDropdown\\.settingsPage",[^{}]{0,200}\\}\\)` +
       `[\\s\\S]{0,350}?(${IDENT})=\\(0,(${IDENT})\\.jsx\\)\\((${IDENT})\\.(${IDENT}),` +
       `\\{leftIconAsset:${IDENT}(?:\\.${IDENT})?,keyboardShortcut:${IDENT},onClick:${IDENT},children:\\1\\}\\)`, "g"));
+  if (settings == null) {
+    // Current bundles hoist the Settings row into a module-scope component
+    // that spreads its props onto the menu item; the menu renders it with the
+    // shortcut and click handler. Normalize to the inline groups above.
+    const component = unique(source, new RegExp(
+      `function (${IDENT})\\((${IDENT})\\)\\{[^{}]{0,200}?(${IDENT})=\\(0,${IDENT}\\.jsx\\)\\(${IDENT}\\.${IDENT},` +
+        `\\{id:"codex\\.profileDropdown\\.settingsPage",[^{}]{0,200}\\}\\)[^{}]{0,200}?` +
+        `(${IDENT})=\\(0,(${IDENT})\\.jsx\\)\\((${IDENT})\\.(${IDENT}),\\{leftIconAsset:${IDENT}(?:\\.${IDENT})?,\\.\\.\\.\\2,children:\\3\\}\\)`, "g"));
+    const item = component == null ? null : unique(source, new RegExp(
+      `(${IDENT})=\\(0,${component[5].replace(/\$/g, "\\$")}\\.jsx\\)\\(${component[1].replace(/\$/g, "\\$")},` +
+        `\\{keyboardShortcut:${IDENT},onClick:${IDENT}\\}\\)`, "g"));
+    if (component != null && item != null) {
+      settings = Object.assign([component[0], component[3], item[1], component[5], component[6], component[7]],
+        { index: component.index });
+    }
+  }
   const intl = unique(source, new RegExp(`(${IDENT})\\.formatMessage\\(\\{id:"codex\\.profileDropdown\\.copyUserIdForEmail"`, "g"));
   const regular = settings == null ? null : unique(source, new RegExp(
     `children:\\[(${IDENT}),(${IDENT}),null,${settings[2].replace(/\$/g, "\\$")}\\]`, "g"));

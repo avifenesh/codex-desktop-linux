@@ -22,6 +22,7 @@ const {
   descriptors,
   sharedTransportClassSource,
 } = require("./patch.js");
+const { findMainProcessChunks } = require("../../scripts/patches/lib/assets.js");
 
 const socketEnvHook = path.join(__dirname, "socket-env.sh");
 const orphanReaper = path.join(__dirname, "orphan-reaper.js");
@@ -85,58 +86,32 @@ function createProcessSnapshotFs(processesByPid) {
   };
 }
 
+function loadOrphanReaperModule({ fsImpl = fs, processImpl = {}, consoleImpl = console } = {}) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : null;
+  const module = { exports: {} };
+  const context = {
+    module,
+    exports: module.exports,
+    process: { getuid: () => uid, ...processImpl },
+    console: consoleImpl,
+    setTimeout,
+    require(id) {
+      if (id === "node:fs") return fsImpl;
+      if (id === "node:path") return path;
+      if (id === "./socket-path.js") return require("./socket-path.js");
+      throw new Error(`unexpected orphan reaper dependency: ${id}`);
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(orphanReaper, "utf8"), context, { filename: orphanReaper });
+  return module.exports;
+}
+
 function loadOrphanReaperVerifier(processesByPid) {
-  const source = fs.readFileSync(orphanReaper, "utf8");
-  const verifierSource = source.replace(
-    /reapOrphan\(\)\.catch\(\(error\) => \{[\s\S]*?\n\}\);\s*$/,
-    "globalThis.orphanReaperVerifier = { verifiedOrphanTargets };\n",
-  );
-  assert.notEqual(verifierSource, source, "orphan reaper entrypoint must remain replaceable");
-
-  const uid = typeof process.getuid === "function" ? process.getuid() : null;
-  const mockFs = createProcessSnapshotFs(processesByPid);
-  const context = {
-    process: {
-      argv: [process.execPath, orphanReaper, "/test/app-server.sock"],
-      getuid: () => uid,
-    },
-    require(id) {
-      if (id === "node:fs") return mockFs;
-      if (id === "node:path") return path;
-      if (id === "./socket-path.js") return require("./socket-path.js");
-      throw new Error(`unexpected orphan reaper dependency: ${id}`);
-    },
-  };
-  vm.runInNewContext(verifierSource, context, { filename: orphanReaper });
-  return context.orphanReaperVerifier.verifiedOrphanTargets;
+  const reaper = loadOrphanReaperModule({ fsImpl: createProcessSnapshotFs(processesByPid) });
+  return reaper.createOrphanReaper("/test/app-server.sock").verifiedOrphanTargets;
 }
 
-function loadOrphanReaperAdoptionPredicate() {
-  const source = fs.readFileSync(orphanReaper, "utf8");
-  const predicateSource = source.replace(
-    /reapOrphan\(\)\.catch\(\(error\) => \{[\s\S]*?\n\}\);\s*$/,
-    "globalThis.orphanReaperAdoption = { readProcess, hasExpectedOrphanAdoption };\n",
-  );
-  assert.notEqual(predicateSource, source, "orphan reaper entrypoint must remain replaceable");
-
-  const uid = typeof process.getuid === "function" ? process.getuid() : null;
-  const context = {
-    process: {
-      argv: [process.execPath, orphanReaper, "/test/app-server.sock"],
-      getuid: () => uid,
-    },
-    require(id) {
-      if (id === "node:fs") return fs;
-      if (id === "node:path") return path;
-      if (id === "./socket-path.js") return require("./socket-path.js");
-      throw new Error(`unexpected orphan reaper dependency: ${id}`);
-    },
-  };
-  vm.runInNewContext(predicateSource, context, { filename: orphanReaper });
-  return context.orphanReaperAdoption;
-}
-
-const orphanReaperAdoption = loadOrphanReaperAdoptionPredicate();
+const orphanReaperAdoption = loadOrphanReaperModule();
 
 function startOrphanReaperWithChangedAdopter() {
   const socketPath = "/test/app-server.sock";
@@ -209,31 +184,17 @@ function startOrphanReaperWithChangedAdopter() {
       throw new Error(`unexpected link read: ${filePath}`);
     },
   };
-  const source = fs.readFileSync(orphanReaper, "utf8");
-  const reaperSource = source.replace(
-    /reapOrphan\(\)\.catch\(\(error\) => \{[\s\S]*?\n\}\);\s*$/,
-    "globalThis.reaperPromise = reapOrphan();\n",
-  );
-  assert.notEqual(reaperSource, source, "orphan reaper entrypoint must remain replaceable");
-  const context = {
-    process: {
-      argv: [process.execPath, orphanReaper, socketPath],
-      getuid: () => uid,
+  const reaper = loadOrphanReaperModule({
+    fsImpl: mockFs,
+    processImpl: {
       kill(pid, signal) {
         signals.push({ pid, signal });
         return true;
       },
     },
-    console: { error() {} },
-    require(id) {
-      if (id === "node:fs") return mockFs;
-      if (id === "node:path") return path;
-      if (id === "./socket-path.js") return require("./socket-path.js");
-      throw new Error(`unexpected orphan reaper dependency: ${id}`);
-    },
-  };
-  vm.runInNewContext(reaperSource, context, { filename: orphanReaper });
-  return { reaperPromise: context.reaperPromise, signals };
+    consoleImpl: { error() {} },
+  });
+  return { reaperPromise: reaper.reapOrphan(socketPath), signals };
 }
 
 function authorityProcess({ pid, ppid }) {
@@ -654,7 +615,7 @@ function fakeChild() {
   return child;
 }
 
-function loadInjectedTransport({ spawnImpl, WebSocketImpl = null, fsImpl = fs, timeoutCapMs = null } = {}) {
+function loadInjectedTransport({ spawnImpl, WebSocketImpl = null, fsImpl = fs, timeoutCapMs = null, processImpl = process } = {}) {
   class DefaultWebSocket extends EventEmitter {
     constructor(_url, options) {
       super();
@@ -689,7 +650,7 @@ function loadInjectedTransport({ spawnImpl, WebSocketImpl = null, fsImpl = fs, t
   });
   const context = {
     n: namespace,
-    process,
+    process: processImpl,
     console,
     require(id) {
       if (id === "node:child_process") return { spawn: spawnImpl };
@@ -863,23 +824,45 @@ function stopOrphanAuthority(orphan) {
   }
 }
 
-// Mirrors the rspack/SWC-minified 26.1027 main-process chunk: double-quoted
-// strings, literal-first comparisons, `(0,ns.fn)(...)` calls, and handshake
-// constants inlined into the SSH method.
-function syntheticBundle() {
+// Mirrors the rspack/SWC-minified 26.1117 app-server host: the utility
+// process selects its stdio transport in app-server-host.js and loads the SSH
+// WebSocket transport, whose dependencies are module-local aliases, from a
+// lazy chunk. Chunks are joined with CHUNK_SEPARATOR; patchBundle applies the
+// descriptor to the host chunk with every chunk visible, as the engine does.
+const CHUNK_SEPARATOR = "\n//# chunk\n";
+
+function syntheticHostChunk() {
   return [
+    '(()=>{var e,t,r,n={93221(e,t,r){r.d(t,{Codec:()=>a,On:()=>o,Dn:()=>l,hd:()=>h,Lu0:()=>u,Ecy:()=>p})},38156(e,t,r){r.d(t,{},{kn:n})},',
+    '92183(e,t,r){"use strict";var lY=r(93221);let u_=new WeakMap;class uS{async open(e,t){let{transport:o}=await async function(e,t,n,i,s){switch(e.kind){case"websocket":break;',
+    'case"stdio":return{transport:function(e,t,r){let{isPackaged:n=!1,...i}=e.options;return new lY.Lu0({...i,hostConfig:t,getAppServerArgs:e=>[],',
+    'getConfigOverrides:async()=>{let{overrides:e,windowsFrameworkRoot:t}=await r();return(0,lY.Ecy)(t),e}})}(e,t,s)};',
+    'case"ssh":{let e,{SshWebsocketV0Transport:s,resolveSshWebsocketV0TransportOptions:a}=await r.e(611).then(r.bind(r,44046)),u=a(t);return{transport:new s(u)}}}}(t,{},0,0,()=>({}));return o}}}};})();',
+  ].join("");
+}
+
+function syntheticSshChunk() {
+  return [
+    '"use strict";exports.ids=[611],exports.modules={44046(e,t,r){r.d(t,{SshWebsocketV0Transport:()=>gC,resolveSshWebsocketV0TransportOptions:()=>ig});var i=r(5),n=r(93221),w=r(38156);',
     'class gC{options;kind="websocket";logger=(0,i.i)("AppServerTransportSshWebsocket");proxyStreams=new Set;hasConnected=!1;supportsReconnect(){return!0}',
     'async connectToRemoteAppServer(e,t){return this.runWithSshStartupGate(async()=>{let t={current:null},h=(0,n.hd)(),r=new w.kn("ws://codex-app-server/rpc",{perMessageDeflate:!1,headers:h,createConnection:()=>',
     "(t.current=this.createSshProxyStream(),t.current)}),o={current:null},a=e=>{o.current=o.current??e};r.on(\"error\",a);",
     'let s=64;r.once("upgrade",e=>{let t=Number(e.headers["frame-limit"]);Number.isSafeInteger(t)&&t>0&&(s=t)});let c=new n.Codec(r,null!=h);r.once("close",()=>{t.current?.destroy()});',
     "try{if(await opened(r),null!=o.current)throw o.current}catch(e){throw t.current?.destroy(),r.terminate(),e}",
     'let i=new n.On(r,void 0,s,c);return r.off("error",a),this.logger.info("app_server_connection.compression_negotiated",{safe:{compression:c.compression}}),(0,n.Dn)(r,{onPongTimeout:()=>{i.terminationReason="pong_timeout",r.terminate()}}),this.hasConnected=!0,i})}}',
-    'let v5=(0,i.i)("WindowContext");function b5(e){let t=_C(e.hostConfig);if(t)return v5.info("[ssh-websocket-v0] selected app-server transport"),new gC(t);',
-    'if("remote-control"===e.transportKind)return new Remote(e);',
-    'if((0,n.no)(e.hostConfig))return new hoe({hostConfig:e.hostConfig,repoRoot:e.repoRoot,resourcesPath:e.resourcesPath,defaultOriginator:e.defaultOriginator});',
-    'let r=x5(e.hostConfig);if(r){e.desktopAuthAppServerClient;let t=vbe(e.hostConfig,r);return new n.Tn({hostConfig:e.hostConfig,websocketUrl:r,getWebsocketProtocols:void 0,...null==t?{}:{socksProxyUrl:t}})}',
-    'return new n.Cn({hostConfig:e.hostConfig,repoRoot:e.repoRoot,resourcesPath:e.resourcesPath,defaultOriginator:e.defaultOriginator,getConfigOverrides:async()=>[...await Ope(e)]})}function afterFactory(){}',
+    "function ig(e){return e}}};",
   ].join("");
+}
+
+function syntheticBundle() {
+  return syntheticHostChunk() + CHUNK_SEPARATOR + syntheticSshChunk();
+}
+
+function patchBundle(bundle) {
+  const sources = bundle.split(CHUNK_SEPARATOR);
+  const mainProcessChunks = sources.map((source, index) => ({ name: `chunk-${index}.js`, source }));
+  const [host, ...siblings] = sources;
+  return [applySharedAppServerSocketPatch(host, { mainProcessChunks }), ...siblings].join(CHUNK_SEPARATOR);
 }
 
 test("shared-app-server-socket stays disabled until explicitly enabled", () => {
@@ -1751,22 +1734,22 @@ test("attached CLI verifier preserves stock exec and signals", async () => {
 
 test("patch selects the bridge only for the local host and is idempotent", () => {
   const source = syntheticBundle();
-  const patched = applySharedAppServerSocketPatch(source);
+  const patched = patchBundle(source);
   assert.notEqual(patched, source);
   const warnings = [];
   const originalWarn = console.warn;
   console.warn = (...args) => warnings.push(args.join(" "));
   try {
-    assert.equal(applySharedAppServerSocketPatch(patched), patched);
+    assert.equal(patchBundle(patched), patched);
   } finally {
     console.warn = originalWarn;
   }
   assert.deepEqual(warnings, [], "an already applied patch must not report drift");
   assert.match(patched, /CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET/);
-  assert.match(patched, /hostConfig\.kind===`local`/);
+  assert.match(patched, /t\.kind===`local`&&t\.id===`local`/);
   assert.match(
     patched,
-    /CodexLinuxSharedAppServerSocketTransport\(process\.env\.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET,async\(\)=>\[\.\.\.await Ope\(e\)\]\)/,
+    /CodexLinuxSharedAppServerSocketTransport\(process\.env\.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET,async\(\)=>\{let\{overrides:e,windowsFrameworkRoot:t\}=await r\(\);return\(0,lY\.Ecy\)\(t\),e\}\);let\{isPackaged:/,
   );
   assert.match(patched, /app-server`,\s*`proxy`,\s*`--sock`/);
   assert.match(patched, /flatMap\(e=>\[`-c`,e\]\).*app-server`,\s*`--listen`,\s*`unix:\/\//);
@@ -1778,7 +1761,7 @@ test("patch selects the bridge only for the local host and is idempotent", () =>
   assert.match(patched, /reclaimStaleLock/);
   assert.match(patched, /this\.sameIdentity\(this\.socketIdentity,e\)/);
   assert.match(patched, /requires CODEX_CLI_PATH/);
-  assert.match(patched, /WebSocket:w\.kn,MessageCodec:n\.Codec,ConnectionAdapter:n\.On,keepAlive:n\.Dn,url:"ws:\/\/codex-app-server\/rpc",maximumFrameBytes:64,maximumFrameHeader:"frame-limit"/);
+  assert.match(patched, /WebSocket:r\(38156\)\.kn,MessageCodec:r\(93221\)\.Codec,ConnectionAdapter:r\(93221\)\.On,keepAlive:r\(93221\)\.Dn,url:"ws:\/\/codex-app-server\/rpc",maximumFrameBytes:64,maximumFrameHeader:"frame-limit"/);
   assert.match(patched, /new w\.kn\("ws:\/\/codex-app-server\/rpc",/);
   assert.match(patched, /new n\.On\(/);
   assert.match(patched, /supportsReconnect\(\)\{return!0\}/);
@@ -1787,7 +1770,7 @@ test("patch selects the bridge only for the local host and is idempotent", () =>
     'return r.off("error",a),this.logger.info("app_server_connection.compression_negotiated",',
     'return this.logger.info("app_server_connection.compression_negotiated",',
   );
-  assert.notEqual(applySharedAppServerSocketPatch(negotiated), negotiated);
+  assert.notEqual(patchBundle(negotiated), negotiated);
 });
 
 // Distinct codec and connection adapter mirror the current upstream contract.
@@ -1860,9 +1843,9 @@ async function connectPatchedBundle(source = syntheticBundle(), {
     }
     close(code, reason) { return this.codec.finishSending().then(() => this.ws.close(code, reason)); }
   }
-  const patched = applySharedAppServerSocketPatch(source);
+  const patched = patchBundle(source);
   assert.notEqual(patched, source);
-  const injected = patched.slice(patched.indexOf("class CodexLinuxSharedAppServerSocketTransport"), patched.indexOf("function b5(e)"));
+  const injected = patched.slice(patched.indexOf("class CodexLinuxSharedAppServerSocketTransport"), patched.indexOf("class uS{"));
   const context = {
     w: { kn: WebSocket },
     n: { Codec, On: Adapter, Dn(ws, options) {
@@ -1874,6 +1857,7 @@ async function connectPatchedBundle(source = syntheticBundle(), {
   };
   context["n$"] = context.n;
   context["w$"] = context.w;
+  context.r = context["r$"] = (id) => ({ 93221: context.n, 38156: context.w })[id];
   Object.assign(context, bindings);
   diagnostics.stream = stream;
   vm.runInNewContext(`${injected};globalThis.Transport=CodexLinuxSharedAppServerSocketTransport`, context);
@@ -1964,7 +1948,7 @@ test("patch rejects handshake values held in method-local bindings", () => {
   try {
     for (const unsupported of cases) {
       assert.notEqual(unsupported, syntheticBundle());
-      assert.equal(applySharedAppServerSocketPatch(unsupported), unsupported);
+      assert.equal(patchBundle(unsupported), unsupported);
     }
   } finally {
     console.warn = originalWarn;
@@ -1989,7 +1973,7 @@ test("patch rejects ambiguous or disconnected codec and adapter lifecycles", () 
   try {
     for (const unsupported of cases) {
       assert.notEqual(unsupported, source, "each case must change the upstream contract");
-      assert.equal(applySharedAppServerSocketPatch(unsupported), unsupported);
+      assert.equal(patchBundle(unsupported), unsupported);
     }
   } finally {
     console.warn = originalWarn;
@@ -1997,29 +1981,40 @@ test("patch rejects ambiguous or disconnected codec and adapter lifecycles", () 
   assert.equal(warnings.length, cases.length);
 });
 
-test("durable hosts retain their upstream transport even when kind is local", () => {
-  const patched = applySharedAppServerSocketPatch(syntheticBundle());
-  const factory = patched.slice(patched.indexOf("function b5(e)"), patched.indexOf("function afterFactory"));
-  class Bridge {}
-  class Cloud {}
+test("durable hosts retain their upstream transport even when kind is local", async () => {
+  const patched = patchBundle(syntheticBundle());
+  const stdioCase = 'case"stdio":return{transport:';
+  const start = patched.indexOf(stdioCase) + stdioCase.length;
+  const factory = patched.slice(start, patched.indexOf("(e,t,s)};", start));
+  class Bridge {
+    constructor(socket, getConfigOverrides) {
+      this.socket = socket;
+      this.getConfigOverrides = getConfigOverrides;
+    }
+  }
   class Local {}
+  const frameworkRoots = [];
   const context = {
     process: { env: { CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET: "/test/socket" } },
     CodexLinuxSharedAppServerSocketTransport: Bridge,
-    _C: () => null,
-    n: { no: () => false, Tn: Cloud, Cn: Local },
-    x5: config => config.id === "durable" ? "wss://example.test" : null,
-    vbe: () => null,
+    lY: { Lu0: Local, Ecy: (root) => frameworkRoots.push(root) },
   };
-  vm.runInNewContext(`${factory};globalThis.create=b5`, context);
-  assert.ok(context.create({ hostConfig: { kind: "local", id: "local" } }) instanceof Bridge);
-  assert.ok(context.create({ hostConfig: { kind: "local", id: "durable" } }) instanceof Cloud);
-  assert.ok(context.create({ hostConfig: { kind: "local", id: "other" } }) instanceof Local);
+  vm.runInNewContext(`globalThis.create=${factory}`, context);
+  const launchSettings = async () => ({ overrides: ["a=b"], windowsFrameworkRoot: null });
+  const bridge = context.create({ options: {} }, { kind: "local", id: "local" }, launchSettings);
+  assert.ok(bridge instanceof Bridge);
+  assert.equal(bridge.socket, "/test/socket");
+  assert.deepEqual(await bridge.getConfigOverrides(), ["a=b"]);
+  assert.deepEqual(frameworkRoots, [null]);
+  assert.ok(context.create({ options: {} }, { kind: "local", id: "durable" }, launchSettings) instanceof Local);
+  assert.ok(context.create({ options: {} }, { kind: "ssh", id: "local" }, launchSettings) instanceof Local);
+  context.process.env = {};
+  assert.ok(context.create({ options: {} }, { kind: "local", id: "local" }, launchSettings) instanceof Local);
 });
 
 test("patch rejects retired, duplicate, and mixed transport layouts", () => {
   const current = syntheticBundle();
-  const patched = applySharedAppServerSocketPatch(current);
+  const patched = patchBundle(current);
   const retired = current.replace(
     "let i=new n.On(r,void 0,s,c);",
     "let i=new n.On(r,void 0,s);",
@@ -2030,7 +2025,7 @@ test("patch rejects retired, duplicate, and mixed transport layouts", () => {
     const originalWarn = console.warn;
     console.warn = (...args) => warnings.push(args.join(" "));
     try {
-      assert.equal(applySharedAppServerSocketPatch(source), source);
+      assert.equal(patchBundle(source), source);
     } finally {
       console.warn = originalWarn;
     }
@@ -2043,7 +2038,7 @@ test("patch leaves unsupported bundle shapes unchanged with a warning", () => {
   const originalWarn = console.warn;
   console.warn = (...args) => warnings.push(args.join(" "));
   try {
-    assert.equal(applySharedAppServerSocketPatch("unrelated bundle"), "unrelated bundle");
+    assert.equal(patchBundle("unrelated bundle"), "unrelated bundle");
   } finally {
     console.warn = originalWarn;
   }
@@ -2059,7 +2054,7 @@ test("patch rejects a current transport whose semantic SSH anchor is missing", (
   const originalWarn = console.warn;
   console.warn = (...args) => warnings.push(args.join(" "));
   try {
-    assert.equal(applySharedAppServerSocketPatch(source), source);
+    assert.equal(patchBundle(source), source);
   } finally {
     console.warn = originalWarn;
   }
@@ -2068,14 +2063,14 @@ test("patch rejects a current transport whose semantic SSH anchor is missing", (
 
 test("patch leaves a current transport with no config override callback byte-identical", () => {
   const source = syntheticBundle().replace(
-    ",getConfigOverrides:async()=>[...await Ope(e)]",
+    ",getConfigOverrides:async()=>{let{overrides:e,windowsFrameworkRoot:t}=await r();return(0,lY.Ecy)(t),e}",
     "",
   );
   const warnings = [];
   const originalWarn = console.warn;
   console.warn = (...args) => warnings.push(args.join(" "));
   try {
-    assert.equal(applySharedAppServerSocketPatch(source), source);
+    assert.equal(patchBundle(source), source);
   } finally {
     console.warn = originalWarn;
   }
@@ -2084,13 +2079,13 @@ test("patch leaves a current transport with no config override callback byte-ide
 
 test("patch leaves an ambiguous config override callback byte-identical", () => {
   const callbackTransport =
-    "return new n.Cn({hostConfig:e.hostConfig,repoRoot:e.repoRoot,resourcesPath:e.resourcesPath,defaultOriginator:e.defaultOriginator,getConfigOverrides:async()=>[...await Ope(e)]})";
-  const source = syntheticBundle().replace(callbackTransport, `${callbackTransport};${callbackTransport}`);
+    "getConfigOverrides:async()=>{let{overrides:e,windowsFrameworkRoot:t}=await r();return(0,lY.Ecy)(t),e}";
+  const source = syntheticBundle().replace(callbackTransport, `${callbackTransport},${callbackTransport}`);
   const warnings = [];
   const originalWarn = console.warn;
   console.warn = (...args) => warnings.push(args.join(" "));
   try {
-    assert.equal(applySharedAppServerSocketPatch(source), source);
+    assert.equal(patchBundle(source), source);
   } finally {
     console.warn = originalWarn;
   }
@@ -2106,40 +2101,47 @@ test("injected transport requires the captured config override callback", () => 
 });
 
 test(
-  "patch applies to exactly one current signed main-process chunk",
+  "patch applies to exactly the current signed app-server host chunk",
   { skip: process.env.CODEX_SIGNED_EXTRACTED_APP == null },
   () => {
-    const buildDir = path.join(process.env.CODEX_SIGNED_EXTRACTED_APP, ".vite", "build");
-    const chunks = fs.readdirSync(buildDir)
-      .filter((name) => /^early-bootstrap(?:-\d+-[0-9a-f]{16})?\.js$/.test(name));
-    assert.ok(chunks.length > 0);
+    const mainProcess = findMainProcessChunks(process.env.CODEX_SIGNED_EXTRACTED_APP);
+    assert.ok(mainProcess);
+    const mainProcessChunks = mainProcess.chunks.map((name) => ({
+      name,
+      source: fs.readFileSync(path.join(mainProcess.buildDir, name), "utf8"),
+    }));
     const results = [];
     const originalWarn = console.warn;
     console.warn = () => {};
     try {
-      for (const name of chunks) {
-        const source = fs.readFileSync(path.join(buildDir, name), "utf8");
-        const patched = applySharedAppServerSocketPatch(source);
+      for (const { name, source } of mainProcessChunks) {
+        const patched = applySharedAppServerSocketPatch(source, { mainProcessChunks });
         if (patched !== source) results.push({ name, patched });
       }
     } finally {
       console.warn = originalWarn;
     }
-    assert.equal(results.length, 1);
-    const [{ patched }] = results;
+    assert.deepEqual(results.map(({ name }) => name), ["app-server-host.js"]);
+    const [{ name, patched }] = results;
     const warnings = [];
     console.warn = (...args) => warnings.push(args.join(" "));
     try {
-      assert.equal(applySharedAppServerSocketPatch(patched), patched);
+      const context = {
+        mainProcessChunks: mainProcessChunks.map((chunk) => (chunk.name === name ? { name, source: patched } : chunk)),
+      };
+      assert.equal(applySharedAppServerSocketPatch(patched, context), patched);
     } finally {
       console.warn = originalWarn;
     }
     assert.deepEqual(warnings, []);
     assert.match(
       patched,
-      /\.call\(this,\{WebSocket:[\w$]+\.[\w$]+,MessageCodec:[\w$]+\.[\w$]+,ConnectionAdapter:[\w$]+\.[\w$]+,keepAlive:[\w$]+\.[\w$]+,url:"ws:\/\/codex-app-server\/rpc",maximumFrameBytes:0x[0-9a-f]+,maximumFrameHeader:"x-codex-websocket-max-unfragmented-message-bytes"\}\)/,
+      /\.call\(this,\{WebSocket:[\w$]+\(\d+\)\.[\w$]+,MessageCodec:[\w$]+\(\d+\)\.[\w$]+,ConnectionAdapter:[\w$]+\(\d+\)\.[\w$]+,keepAlive:[\w$]+\(\d+\)\.[\w$]+,url:"ws:\/\/codex-app-server\/rpc",maximumFrameBytes:0x[0-9a-f]+,maximumFrameHeader:"x-codex-websocket-max-unfragmented-message-bytes"\}\)/,
     );
-    assert.match(patched, /return new CodexLinuxSharedAppServerSocketTransport\(process\.env\.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET,async\(\)=>\[/);
+    assert.match(
+      patched,
+      /case"stdio":return\{transport:function\(([\w$]+),([\w$]+),([\w$]+)\)\{if\(process\.env\.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET&&\2\.kind===\x60local\x60&&\2\.id===\x60local\x60\)return new CodexLinuxSharedAppServerSocketTransport\(process\.env\.CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET,async\(\)=>\{let\{overrides:/,
+    );
     new vm.Script(patched, { filename: "patched-chunk.js" });
   },
 );
@@ -3034,6 +3036,139 @@ test("injected transport preserves a dead owner's lock while its socket is live"
     assert.equal(fs.lstatSync(socketPath).isSocket(), true);
   } finally {
     await closeServer(server);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+function listeningSpawn(children) {
+  return (_command, args) => {
+    const child = fakeChild();
+    children.push(child);
+    const target = args.at(-1).replace("unix://", "");
+    queueMicrotask(async () => {
+      const server = await listenUnix(target);
+      child.kill = () => {
+        child.killed = true;
+        child.signalCode = "SIGTERM";
+        server.close(() => child.emit("close", null, "SIGTERM"));
+        return true;
+      };
+    });
+    return child;
+  };
+}
+
+function fakeHostProcess() {
+  const host = new EventEmitter();
+  host.signals = [];
+  return Object.assign(host, {
+    env: process.env,
+    pid: process.pid,
+    execPath: process.execPath,
+    getuid: typeof process.getuid === "function" ? process.getuid.bind(process) : undefined,
+    kill(pid, signal) {
+      host.signals.push([pid, signal]);
+      return true;
+    },
+  });
+}
+
+async function withFakeCli(callback) {
+  const originalCli = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = "/fake/codex";
+  try {
+    return await callback();
+  } finally {
+    if (originalCli == null) delete process.env.CODEX_CLI_PATH;
+    else process.env.CODEX_CLI_PATH = originalCli;
+  }
+}
+
+test("host SIGTERM stops the authority, releases ownership and keeps default termination", async () => {
+  const tempDir = makeSocketTempDir("shared-app-server-host-term-");
+  const socketPath = path.join(tempDir, "app-server.sock");
+  const children = [];
+  const hostProcess = fakeHostProcess();
+  const { Transport } = loadInjectedTransport({ spawnImpl: listeningSpawn(children), processImpl: hostProcess });
+  try {
+    await withFakeCli(async () => {
+      const transport = new Transport(socketPath);
+      await transport.ensureAuthority();
+      assert.equal(hostProcess.listenerCount("SIGTERM"), 1);
+      assert.equal(hostProcess.listenerCount("exit"), 1);
+      const closed = once(children[0], "close");
+      hostProcess.emit("SIGTERM");
+      await closed;
+      await waitForCondition(() => hostProcess.signals.length > 0, "host SIGTERM to be re-raised");
+      assert.deepEqual(hostProcess.signals, [[process.pid, "SIGTERM"]]);
+      assert.equal(children[0].killed, true);
+      assert.equal(fs.existsSync(`${socketPath}.lock`), false);
+      assert.equal(fs.existsSync(socketPath), false);
+      assert.equal(hostProcess.listenerCount("SIGTERM"), 0);
+      assert.equal(hostProcess.listenerCount("exit"), 0);
+      await assert.rejects(transport.ensureAuthority(), /disposed/);
+    });
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("host exit stops a running authority synchronously", async () => {
+  const tempDir = makeSocketTempDir("shared-app-server-host-exit-");
+  const socketPath = path.join(tempDir, "app-server.sock");
+  const children = [];
+  const hostProcess = fakeHostProcess();
+  const { Transport } = loadInjectedTransport({ spawnImpl: listeningSpawn(children), processImpl: hostProcess });
+  try {
+    await withFakeCli(async () => {
+      const transport = new Transport(socketPath);
+      await transport.ensureAuthority();
+      const closed = once(children[0], "close");
+      hostProcess.emit("exit", 0);
+      assert.equal(children[0].killed, true);
+      await closed;
+      transport.dispose();
+      assert.equal(hostProcess.listenerCount("SIGTERM"), 0);
+      assert.equal(hostProcess.listenerCount("exit"), 0);
+      assert.deepEqual(hostProcess.signals, []);
+    });
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a restarted host takes over after the orphan reaper stops the dead host's authority", async () => {
+  const tempDir = makeSocketTempDir("shared-app-server-host-restart-");
+  const socketPath = path.join(tempDir, "app-server.sock");
+  const lockPath = `${socketPath}.lock`;
+  const children = [];
+  let orphan;
+  try {
+    orphan = await spawnOrphanAuthority(socketPath);
+    // The crashed host left its lock behind; its authority was reparented.
+    fs.writeFileSync(lockPath, `99999999 1 ${orphan.pid} ${orphan.startTime}\n`, { mode: 0o600 });
+    const { Transport } = loadInjectedTransport({ spawnImpl: listeningSpawn(children) });
+    await withFakeCli(async () => {
+      const withoutReaper = new Transport(socketPath);
+      withoutReaper.orphanReaperPath = () => null;
+      await assert.rejects(withoutReaper.ensureAuthority(), /already owned/);
+      assert.equal(processStartTime(orphan.pid), orphan.startTime);
+
+      const restarted = new Transport(socketPath);
+      restarted.orphanReaperPath = () => orphanReaper;
+      await restarted.ensureAuthority();
+      assert.notEqual(processStartTime(orphan.pid), orphan.startTime);
+      assert.match(
+        fs.readFileSync(lockPath, "utf8"),
+        new RegExp(`^${process.pid} \\d+ ${process.pid} \\d+\\n$`),
+      );
+      assert.equal(children.length, 1);
+      const closed = once(children[0], "close");
+      restarted.dispose();
+      await closed;
+    });
+  } finally {
+    stopOrphanAuthority(orphan);
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });

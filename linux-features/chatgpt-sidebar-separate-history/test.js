@@ -57,6 +57,19 @@ function load(source, saved = new Map()) {
   return { ...require("RFDv"), select: require("sHm2").select };
 }
 
+// The signed 26.1117 webview wraps every factory as `id:(function(e,t,n){…})`.
+const WRAPPED = chunk(...[PREFERENCES, SIDEBAR].map((module) => module.replace(/^(\w+)(\([^)]*\)\{)([\s\S]*)$/, "$1:(function$2$3)")));
+
+test("wrapped module factories keep the same proven contract", () => {
+  assert.ok(WRAPPED.includes("RFDv:(function(e,t,n){"));
+  assert.equal(matchesSidebarHistoryContract(WRAPPED), true);
+  const patched = applySidebarHistoryPatch(WRAPPED);
+  assert.notEqual(patched, WRAPPED);
+  assert.equal(applySidebarHistoryPatch(patched), patched);
+  assert.equal(load(patched).uM.value, "chatgpt");
+  assert.equal(matchesSidebarHistoryContract(WRAPPED.replace("}),sHm2:", "},sHm2:")), false);
+});
+
 test("Business Work availability makes the upstream All default mix histories", () => {
   const upstream = load(CURRENT);
   const patched = load(applySidebarHistoryPatch(CURRENT));

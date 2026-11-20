@@ -81,7 +81,14 @@ function settingsContract(source) {
   const ownerFunction = functionAt(body, owner.index);
   if (!ownerFunction) return null;
   const ownerBody = ownerFunction.text;
-  const row = unique(ownerBody, new RegExp(`\\(0,(${ID})\\.jsx\\)\\((${REF}),\\{label:${ID},description:${ID},control:${ID}\\}\\)`, "g"));
+  // Older builds render the row primitive directly; newer ones render it
+  // through a settings-search entry wrapper (`{entry:L.$j.menuBar,description,
+  // control}`), and the module renders the same primitive with label props once.
+  const row = unique(ownerBody, new RegExp(`\\(0,(${ID})\\.jsx\\)\\((${REF}),\\{label:${ID},description:${ID},control:${ID}\\}\\)`, "g")) ?? (() => {
+    const entryRow = unique(ownerBody, new RegExp(`\\(0,(${ID})\\.jsx\\)\\(${REF},\\{entry:${REF},description:${ID},control:${ID}\\}\\)`, "g"));
+    const primitive = entryRow && unique(body, new RegExp(`\\(0,(${escapeRegExp(entryRow[1])})\\.jsx\\)\\((${REF}),\\{label:${ID},description:${ID},control:`, "g"));
+    return primitive && !ownerBody.includes(`(${primitive[2]},`) ? primitive : null;
+  })();
   const reactNames = new Set([...body.matchAll(new RegExp(`\\(0,(${ID})\\.useState\\)\\(`, "g"))].map((match) => match[1]));
   const react = reactNames.size === 1 ? [...reactNames][0] : null;
   const intlUse = unique(ownerBody, new RegExp(`(${ID})\\.formatMessage\\(\\{id:"settings\\.general\\.macMenuBar\\.ariaLabel"`, "g"));
@@ -121,7 +128,7 @@ function settingsContract(source) {
   const pageMarker = unique(body, /slug:"general-settings"/g);
   const page = pageMarker && containingFunction(body, pageMarker.index);
   if (!page || generals.some(({ name }) => !page.text.includes(`(0,${row[1]}.jsx)(${name},{})`))) return null;
-  const render = unique(page.text, new RegExp(`\\(0,${jsx}\\.jsxs\\)\\(${REF},\\{title:${ID},children:\\[`, "g"));
+  const render = unique(page.text, new RegExp(`\\(0,${jsx}\\.jsxs\\)\\(${REF},\\{(?:overview:${ID},)?title:${ID},children:\\[`, "g"));
   if (!render) return null;
   const references = { row: row[2], button: button[1], section, stack, react, platformHook: owner[4], intlHook: intl[1], jsx: row[1] };
   if (Object.values(references).some((reference) => !bindings.has(rootOf(reference)))) return null;

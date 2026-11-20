@@ -8,9 +8,15 @@ const MAX_CONFIGURABLE_UI_FONT_SIZE = 64;
 const MIN_EXTENDED_UI_FONT_SIZE = 17;
 const RUNTIME_MARKER = "codex-linux-ui-font-size-max";
 const EXPECTED_BUILD_FONT_SIZE_BUNDLE_COUNT = 2;
+// 26.1117 also inlines the registry into app-server-host, chat-search-worker,
+// process-telemetry-worker and sqlite-writer next to the main entry and worker.
+const EXPECTED_BUILD_FONT_SIZE_BUNDLE_COUNTS = Object.freeze([EXPECTED_BUILD_FONT_SIZE_BUNDLE_COUNT, 6]);
 const EXPECTED_WEBVIEW_FONT_SIZE_BUNDLE_COUNT = 2;
 const EXPECTED_FONT_SIZE_BUNDLE_COUNT =
   EXPECTED_BUILD_FONT_SIZE_BUNDLE_COUNT + EXPECTED_WEBVIEW_FONT_SIZE_BUNDLE_COUNT;
+const EXPECTED_FONT_SIZE_BUNDLE_COUNTS = Object.freeze(
+  EXPECTED_BUILD_FONT_SIZE_BUNDLE_COUNTS.map((count) => count + EXPECTED_WEBVIEW_FONT_SIZE_BUNDLE_COUNT),
+);
 // Renderer bundles keep the shared limits object.
 const UPSTREAM_FONT_SIZE_LIMITS_PATTERN =
   /([A-Za-z_$][\w$]*)=\{sans:\{min:(11),max:(16)\},code:\{min:(8),max:(24)\}\}/g;
@@ -214,8 +220,7 @@ function findUiFontSizeBundles(extractedDir) {
     candidates.filter(({ state }) => state === "applied").map(({ appliedMax }) => appliedMax),
   );
   if (
-    candidates.length !== EXPECTED_FONT_SIZE_BUNDLE_COUNT ||
-    buildCount !== EXPECTED_BUILD_FONT_SIZE_BUNDLE_COUNT ||
+    !EXPECTED_BUILD_FONT_SIZE_BUNDLE_COUNTS.includes(buildCount) ||
     webviewCount !== EXPECTED_WEBVIEW_FONT_SIZE_BUNDLE_COUNT ||
     states.has("drifted") ||
     states.size !== 1 ||
@@ -234,7 +239,8 @@ function findUiFontSizeBundles(extractedDir) {
 
 function applyUiFontSizeAppPatch(extractedDir, context = {}) {
   const discovery = findUiFontSizeBundles(extractedDir);
-  if (discovery.candidates.length !== EXPECTED_FONT_SIZE_BUNDLE_COUNT) {
+  const count = discovery.candidates.length;
+  if (!EXPECTED_FONT_SIZE_BUNDLE_COUNTS.includes(count)) {
     const reason = discovery.reason ?? "Current UI font-size contracts not found";
     warn(reason);
     return { matched: 0, changed: 0, reason };
@@ -249,7 +255,7 @@ function applyUiFontSizeAppPatch(extractedDir, context = {}) {
       return { matched: 0, changed: 0, reason };
     }
     return {
-      matched: EXPECTED_FONT_SIZE_BUNDLE_COUNT,
+      matched: count,
       changed: 0,
       reason: null,
       targets: discovery.candidates.map(({ filePath }) => path.relative(extractedDir, filePath)),
@@ -269,8 +275,8 @@ function applyUiFontSizeAppPatch(extractedDir, context = {}) {
     fs.writeFileSync(filePath, patchedSource, "utf8");
   }
   return {
-    matched: EXPECTED_FONT_SIZE_BUNDLE_COUNT,
-    changed: EXPECTED_FONT_SIZE_BUNDLE_COUNT,
+    matched: count,
+    changed: count,
     reason: null,
     targets: results.map(({ filePath }) => path.relative(extractedDir, filePath)),
   };
@@ -285,7 +291,7 @@ const descriptors = [
     enabled,
     apply: applyUiFontSizeAppPatch,
     status: (result, warnings) => {
-      if (result?.matched !== EXPECTED_FONT_SIZE_BUNDLE_COUNT) {
+      if (!EXPECTED_FONT_SIZE_BUNDLE_COUNTS.includes(result?.matched)) {
         return { status: "skipped-optional", reason: result?.reason ?? warnings[0] ?? null };
       }
       return result.changed > 0 ? "applied" : "already-applied";
@@ -296,6 +302,7 @@ const descriptors = [
 module.exports = {
   DEFAULT_MAX_UI_FONT_SIZE,
   EXPECTED_FONT_SIZE_BUNDLE_COUNT,
+  EXPECTED_FONT_SIZE_BUNDLE_COUNTS,
   MAX_CONFIGURABLE_UI_FONT_SIZE,
   MIN_EXTENDED_UI_FONT_SIZE,
   RUNTIME_MARKER,

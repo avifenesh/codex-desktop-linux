@@ -15,6 +15,7 @@ const {
   applyDotsAppSharedPatch,
   applyDotsLandingRoutePatch,
   applyDotsPersonalizationPatch,
+  applyDotsUserRulesPatch,
   descriptors,
 } = require("./patch.js");
 
@@ -25,6 +26,15 @@ const FIXTURES = {
   "async/221857.4c17f751f6.js": chunk(221857, 'Ab12(e,t,n){function route(){if("error"===$||N?.tbo_config?.tbo_available==null||null==N.structure)return null;if(N.tbo_config.tbo_available){return redirect}}}'),
   "async/24191.7b05d5cf83.js": chunk(24191, 'Cd34(e,t,n){function capable(){if(e.query.getData(s.sE,t)?.accounts[t]?.account.tbo_config?.tbo_available!==!0)throw Error();let capable="success"===r&&n?.accounts[t]?.account.tbo_config?.tbo_available===!0;return capable||"error"===l&&r?.accounts[n]?.account.tbo_config?.tbo_available===!0}}'),
   "async/860646.06b6da0005.js": chunk(860646, 'Ef56(e,t,n){first?.accounts[M]?.account.tbo_config?.tbo_available!==!0; second?.accounts[c]?.account.tbo_config?.tbo_available!==!0;}'),
+  "async/333098.37b24a5b94.js": chunk(333098, 'UiX9(e,t,a){let d=(0,i.un)(s.u,({get:e})=>{let{authMethod:t,authenticatedAccountId:a,userId:i}=e(n.PO);if("chatgpt"!==t||null==a||null==i)return null;let{data:s}=e(o.sE,a);return s?.accounts[a]?.account.tbo_config?.tbo_available===!0&&null!=e(l.NW)?{accountId:a,userId:i}:null});a.d(t,{},{G:d})}'),
+};
+
+// Reduced chunks shaped like the signed 26.1117 webview: the capability is bound
+// once from the account entry, the access policy is gated on its own, and the
+// second personalization check moved into a user rules atom copied across chunks.
+const CURRENT = {
+  appShared: chunk(911644, 'jiwy:(function(e,t,n){let _=(0,r.un)(p.u,({get:e})=>{let i=e(o.sE,n),l=i.data?.accounts[n],d=l?.account.tbo_config?.tbo_available,g=null==l?null==i.data:null==d;return{isCapable:i.isSuccess&&!0===d,retainNavigation:i.isError&&!0===d,unresolved:g}});function I(e,t){return e?.features?.includes("dot_account_access_policy")?"success"===t&&e.account.tbo_config?.tbo_available===!0:null}n.d(t,{},{qo:function(e){if(e.query.getData(o.sE,t)?.accounts[t]?.account.tbo_config?.tbo_available!==!0)throw Error()},vA:_,I})})'),
+  personalization: chunk(345897, 'k2co(e,t,a){function W(){if(P&&null==z)return k;if(!v||A||"chatgpt"!==T||null==L||null==S||z?.accounts[L]?.account.tbo_config?.tbo_available!==!0)return B;return p}}'),
 };
 
 
@@ -60,6 +70,7 @@ test("feature is disabled until selected", () => {
         "feature:chatgpt-dots-any-country:dots-landing-route",
         "feature:chatgpt-dots-any-country:dots-app-shared-capability",
         "feature:chatgpt-dots-any-country:dots-personalization-capability",
+        "feature:chatgpt-dots-any-country:dots-user-rules-capability",
       ],
     );
   });
@@ -87,6 +98,32 @@ test("personalization Dots checks are patched together", () => {
   assert.equal(applyDotsPersonalizationPatch(patched), patched);
 });
 
+test("current shapes: capability, access policy, personalization and every user rules copy", () => {
+  const shared = applyDotsAppSharedPatch(CURRENT.appShared);
+  assert.ok(shared.includes("d=!0,g=null==l"));
+  assert.ok(shared.includes('"success"===t&&!0:null}'));
+  assert.ok(shared.includes("if(!1)throw Error()"));
+  assert.doesNotMatch(shared, /tbo_available/);
+  assert.equal(applyDotsAppSharedPatch(shared), shared);
+  assert.equal(descriptors[1].assetMatch(CURRENT.appShared), true);
+  assert.equal(descriptors[1].assetMatch(FIXTURES["async/24191.7b05d5cf83.js"]), true);
+  const page = applyDotsPersonalizationPatch(CURRENT.personalization);
+  assert.ok(page.includes("null==S||!1)return B"));
+  assert.equal(applyDotsPersonalizationPatch(page), page);
+  const rules = applyDotsUserRulesPatch(FIXTURES["async/333098.37b24a5b94.js"]);
+  assert.ok(rules.includes("return !0&&null!=e(l.NW)?{accountId:a,userId:i}:null"));
+  assert.equal(applyDotsUserRulesPatch(rules), rules);
+  // A chunk with one shape partly drifted, or two shapes at once, stays unchanged.
+  for (const source of [
+    CURRENT.appShared.replace('"success"===t&&', '"ok"===t&&'),
+    CURRENT.appShared + FIXTURES["async/24191.7b05d5cf83.js"],
+    CURRENT.personalization.replace(")return B;", ")return;"),
+  ]) {
+    const apply = source.includes("jiwy") || source.includes("Cd34") ? applyDotsAppSharedPatch : applyDotsPersonalizationPatch;
+    assert.equal(apply(source), source);
+  }
+});
+
 test("ambiguous contracts fail closed", () => {
   const source = "a?.tbo_config?.tbo_available==null;b?.tbo_config?.tbo_available==null";
   assert.equal(applyDotsLandingRoutePatch(source), source);
@@ -100,8 +137,8 @@ test("each descriptor patches its current rspack chunk contract", () => {
     for (const [name, source] of Object.entries(FIXTURES)) fs.writeFileSync(path.join(assetsDir, name), source);
     const report = createPatchReport();
     applyWebviewAssetPatchDescriptors(extractedDir, normalizePatchDescriptors(descriptors), {}, report);
-    assert.deepEqual(report.patches.map(({ status }) => status), ["applied", "applied", "applied"]);
-    assert.deepEqual(report.patches.map(({ assetName }) => assetName), Object.keys(FIXTURES));
+    assert.deepEqual(report.patches.map(({ status }) => status), ["applied", "applied", "applied", "applied"]);
+    assert.deepEqual(report.patches.slice(0, 3).map(({ assetName }) => assetName), Object.keys(FIXTURES).slice(0, 3));
     for (const name of Object.keys(FIXTURES)) {
       assert.doesNotMatch(fs.readFileSync(path.join(assetsDir, name), "utf8"), /tbo_available(?:==null|[!=]==!0)/);
     }
@@ -114,6 +151,16 @@ const signedApp = process.env.CODEX_SIGNED_EXTRACTED_APP;
 test("the signed official webview has one pristine chunk per Dots contract", { skip: signedApp == null }, () => {
   const { findWebviewAssetsContaining } = require("../../scripts/patches/lib/assets.js");
   for (const descriptor of descriptors) {
+    if (descriptor.assetMatch == null) {
+      // Content-addressed: every copy of the user rules atom must patch.
+      const copies = findWebviewAssetsContaining(signedApp, descriptor.assetNeedles);
+      assert.ok(copies.length >= 1, descriptor.id);
+      for (const name of copies) {
+        const source = fs.readFileSync(path.join(signedApp, "webview", "assets", name), "utf8");
+        assert.notEqual(descriptor.apply(source), source, name);
+      }
+      continue;
+    }
     const matches = findWebviewAssetsContaining(signedApp, descriptor.assetNeedles).filter((name) =>
       descriptor.assetMatch(fs.readFileSync(path.join(signedApp, "webview", "assets", name), "utf8")));
     assert.equal(matches.length, 1, descriptor.id);

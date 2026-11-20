@@ -5,12 +5,6 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { readSocketPath } = require("./socket-path.js");
 
-const socketPath = process.argv[2];
-if (!socketPath) {
-  throw new Error("shared app-server orphan cleanup requires a socket path");
-}
-
-const lockPath = `${socketPath}.lock`;
 const expectedUid = typeof process.getuid === "function" ? process.getuid() : null;
 
 function sameIdentity(left, right) {
@@ -57,7 +51,7 @@ function ownerIsDead(ownerPid, ownerStartTime) {
   return owner == null || owner.state === "Z" || owner.startTime !== ownerStartTime;
 }
 
-function listenerInodes(targetPath = socketPath) {
+function listenerInodes(targetPath) {
   const inodes = new Set();
   const lines = fs.readFileSync("/proc/net/unix", "utf8").split("\n");
   for (const line of lines) {
@@ -103,16 +97,6 @@ function listenerProcesses(inode) {
   return listeners;
 }
 
-function isExpectedAuthority(processInfo) {
-  const listenUrl = `unix://${socketPath}`;
-  return processInfo.commandLine.some(
-    (argument, index, commandLine) =>
-      argument === "app-server" &&
-      commandLine[index + 1] === "--listen" &&
-      commandLine[index + 2] === listenUrl,
-  );
-}
-
 function isVerifiedSystemdUserManager(processInfo) {
   const executable = processInfo.commandLine[0];
   return (
@@ -136,177 +120,209 @@ function hasExpectedOrphanAdoption(authority) {
   );
 }
 
-function isExpectedLockedAuthority(lock, authority) {
-  return (
-    authority != null &&
-    authority.startTime === lock.authorityStartTime &&
-    (expectedUid == null || authority.uid === expectedUid) &&
-    hasExpectedOrphanAdoption(authority) &&
-    isExpectedAuthority(authority)
-  );
-}
-
-function verifiedOrphanTargets(lock, listeners) {
-  const authority = readProcess(lock.authorityPid);
-  if (!isExpectedLockedAuthority(lock, authority)) {
-    throw new Error("locked authority is not the expected reparented Codex process");
-  }
-
-  const targets = new Map();
-  for (const listener of listeners) {
-    if (expectedUid != null && listener.uid !== expectedUid) {
-      throw new Error(`listener ${listener.pid} has unexpected uid`);
-    }
-    if (!isExpectedAuthority(listener)) {
-      throw new Error(`listener ${listener.pid} is not the expected Codex authority`);
-    }
-    if (listener.pid !== authority.pid && listener.ppid !== authority.pid) {
-      throw new Error(`listener ${listener.pid} does not belong to the locked authority`);
-    }
-    targets.set(listener.pid, listener);
-  }
-  targets.set(authority.pid, authority);
-  return [...targets.values()];
-}
-
-function readLock() {
-  let descriptor;
-  try {
-    descriptor = fs.openSync(lockPath, "r");
-    const stat = fs.fstatSync(descriptor);
-    const contents = fs.readFileSync(descriptor, "utf8");
-    const owner = contents.trim().match(/^(\d+) (\S+)(?: (\d+) (\S+))?$/);
-    if (owner == null) return null;
-    return {
-      identity: { dev: stat.dev, ino: stat.ino },
-      contents,
-      ownerPid: Number(owner[1]),
-      ownerStartTime: owner[2],
-      authorityPid: owner[3] == null ? null : Number(owner[3]),
-      authorityStartTime: owner[4] ?? null,
-    };
-  } catch (error) {
-    if (error?.code === "ENOENT") return null;
-    throw error;
-  } finally {
-    if (descriptor != null) fs.closeSync(descriptor);
-  }
-}
-
-function unchangedLock(snapshot) {
-  try {
-    const stat = fs.lstatSync(lockPath);
-    return (
-      sameIdentity(snapshot.identity, stat) &&
-      fs.readFileSync(lockPath, "utf8") === snapshot.contents
-    );
-  } catch (error) {
-    if (error?.code === "ENOENT") return false;
-    throw error;
-  }
-}
-
-function socketPathState(snapshot, allowMissingTarget = false) {
-  try {
-    const current = readSocketPath(socketPath, fs, expectedUid);
-    return sameIdentity(snapshot.identity, current.identity) &&
-      current.targetPath === snapshot.targetPath &&
-      ((current.target == null && (snapshot.target == null || allowMissingTarget)) ||
-       (current.target != null && sameIdentity(snapshot.target, current.target))) &&
-      (snapshot.parent == null || sameIdentity(snapshot.parent, current.parent))
-      ? "same" : "changed";
-  } catch (error) {
-    if (error?.code === "ENOENT") return "missing";
-    throw error;
-  }
-}
-
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function reapOrphan() {
-  const lock = readLock();
-  if (lock == null || !ownerIsDead(lock.ownerPid, lock.ownerStartTime)) return;
+// Binds the lock, socket and listener identity checks to one socket path.
+function createOrphanReaper(socketPath) {
+  if (!socketPath) {
+    throw new Error("shared app-server orphan cleanup requires a socket path");
+  }
+  const lockPath = `${socketPath}.lock`;
 
-  let socket;
-  try {
-    socket = readSocketPath(socketPath, fs, expectedUid);
-  } catch (error) {
-    if (error?.code === "ENOENT") return;
-    throw error;
-  }
-  if (socket.target == null) return;
-
-  const inodes = listenerInodes(socket.targetPath);
-  if (inodes.length === 0) return;
-  if (lock.authorityPid == null || lock.authorityStartTime == null) {
-    throw new Error("live shared app-server lock lacks an authority identity");
-  }
-  if (inodes.length !== 1) {
-    throw new Error("shared app-server path has multiple live listener inodes");
-  }
-  const [inode] = inodes;
-  const listeners = listenerProcesses(inode);
-  if (listeners.length === 0) {
-    throw new Error("live shared app-server listener could not be identified");
-  }
-  const targets = verifiedOrphanTargets(lock, listeners);
-
-  const verifiedInodes = listenerInodes(socket.targetPath);
-  const currentAuthority = readProcess(lock.authorityPid);
-  if (
-    !unchangedLock(lock) ||
-    !ownerIsDead(lock.ownerPid, lock.ownerStartTime) ||
-    socketPathState(socket) !== "same" ||
-    verifiedInodes.length !== 1 ||
-    verifiedInodes[0] !== inode ||
-    !isExpectedLockedAuthority(lock, currentAuthority) ||
-    targets.some((target) => !isRunning(target))
-  ) {
-    throw new Error("shared app-server ownership changed during orphan verification");
+  function isExpectedAuthority(processInfo) {
+    const listenUrl = `unix://${socketPath}`;
+    return processInfo.commandLine.some(
+      (argument, index, commandLine) =>
+        argument === "app-server" &&
+        commandLine[index + 1] === "--listen" &&
+        commandLine[index + 2] === listenUrl,
+    );
   }
 
-  for (const target of targets) {
+  function isExpectedLockedAuthority(lock, authority) {
+    return (
+      authority != null &&
+      authority.startTime === lock.authorityStartTime &&
+      (expectedUid == null || authority.uid === expectedUid) &&
+      hasExpectedOrphanAdoption(authority) &&
+      isExpectedAuthority(authority)
+    );
+  }
+
+  function verifiedOrphanTargets(lock, listeners) {
+    const authority = readProcess(lock.authorityPid);
+    if (!isExpectedLockedAuthority(lock, authority)) {
+      throw new Error("locked authority is not the expected reparented Codex process");
+    }
+
+    const targets = new Map();
+    for (const listener of listeners) {
+      if (expectedUid != null && listener.uid !== expectedUid) {
+        throw new Error(`listener ${listener.pid} has unexpected uid`);
+      }
+      if (!isExpectedAuthority(listener)) {
+        throw new Error(`listener ${listener.pid} is not the expected Codex authority`);
+      }
+      if (listener.pid !== authority.pid && listener.ppid !== authority.pid) {
+        throw new Error(`listener ${listener.pid} does not belong to the locked authority`);
+      }
+      targets.set(listener.pid, listener);
+    }
+    targets.set(authority.pid, authority);
+    return [...targets.values()];
+  }
+
+  function readLock() {
+    let descriptor;
     try {
-      process.kill(target.pid, "SIGTERM");
+      descriptor = fs.openSync(lockPath, "r");
+      const stat = fs.fstatSync(descriptor);
+      const contents = fs.readFileSync(descriptor, "utf8");
+      const owner = contents.trim().match(/^(\d+) (\S+)(?: (\d+) (\S+))?$/);
+      if (owner == null) return null;
+      return {
+        identity: { dev: stat.dev, ino: stat.ino },
+        contents,
+        ownerPid: Number(owner[1]),
+        ownerStartTime: owner[2],
+        authorityPid: owner[3] == null ? null : Number(owner[3]),
+        authorityStartTime: owner[4] ?? null,
+      };
     } catch (error) {
-      if (error?.code !== "ESRCH") throw error;
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    } finally {
+      if (descriptor != null) fs.closeSync(descriptor);
     }
   }
 
-  const deadline = Date.now() + 3000;
-  while (
-    Date.now() < deadline &&
-    (listenerInodes(socket.targetPath).includes(inode) || targets.some((target) => isRunning(target)))
-  ) {
-    await delay(50);
-  }
-  if (listenerInodes(socket.targetPath).includes(inode) || targets.some((target) => isRunning(target))) {
-    throw new Error("orphaned shared app-server authority did not stop");
+  function unchangedLock(snapshot) {
+    try {
+      const stat = fs.lstatSync(lockPath);
+      return (
+        sameIdentity(snapshot.identity, stat) &&
+        fs.readFileSync(lockPath, "utf8") === snapshot.contents
+      );
+    } catch (error) {
+      if (error?.code === "ENOENT") return false;
+      throw error;
+    }
   }
 
-  const remainingInodes = listenerInodes(socket.targetPath);
-  const finalSocketState = socketPathState(socket, true);
-  if (
-    !unchangedLock(lock) ||
-    !ownerIsDead(lock.ownerPid, lock.ownerStartTime) ||
-    remainingInodes.length !== 0 ||
-    finalSocketState === "changed"
-  ) {
-    throw new Error("shared app-server ownership changed before orphan cleanup");
+  function socketPathState(snapshot, allowMissingTarget = false) {
+    try {
+      const current = readSocketPath(socketPath, fs, expectedUid);
+      return sameIdentity(snapshot.identity, current.identity) &&
+        current.targetPath === snapshot.targetPath &&
+        ((current.target == null && (snapshot.target == null || allowMissingTarget)) ||
+         (current.target != null && sameIdentity(snapshot.target, current.target))) &&
+        (snapshot.parent == null || sameIdentity(snapshot.parent, current.parent))
+        ? "same" : "changed";
+    } catch (error) {
+      if (error?.code === "ENOENT") return "missing";
+      throw error;
+    }
   }
-  if (finalSocketState === "same") fs.unlinkSync(socketPath);
-  if (unchangedLock(lock)) fs.unlinkSync(lockPath);
 
-  console.error(
-    `Stopped orphaned shared app-server authority: ${targets
-      .map((target) => target.pid)
-      .join(", ")}`,
-  );
+  // Stops the authority of a dead owner only after every lock, socket, listener
+  // and process identity check passes. Resolves true when it stopped an orphan,
+  // false when there was nothing to stop; any unverifiable state rejects.
+  async function reapOrphan() {
+    const lock = readLock();
+    if (lock == null || !ownerIsDead(lock.ownerPid, lock.ownerStartTime)) return false;
+
+    let socket;
+    try {
+      socket = readSocketPath(socketPath, fs, expectedUid);
+    } catch (error) {
+      if (error?.code === "ENOENT") return false;
+      throw error;
+    }
+    if (socket.target == null) return false;
+
+    const inodes = listenerInodes(socket.targetPath);
+    if (inodes.length === 0) return false;
+    if (lock.authorityPid == null || lock.authorityStartTime == null) {
+      throw new Error("live shared app-server lock lacks an authority identity");
+    }
+    if (inodes.length !== 1) {
+      throw new Error("shared app-server path has multiple live listener inodes");
+    }
+    const [inode] = inodes;
+    const listeners = listenerProcesses(inode);
+    if (listeners.length === 0) {
+      throw new Error("live shared app-server listener could not be identified");
+    }
+    const targets = verifiedOrphanTargets(lock, listeners);
+
+    const verifiedInodes = listenerInodes(socket.targetPath);
+    const currentAuthority = readProcess(lock.authorityPid);
+    if (
+      !unchangedLock(lock) ||
+      !ownerIsDead(lock.ownerPid, lock.ownerStartTime) ||
+      socketPathState(socket) !== "same" ||
+      verifiedInodes.length !== 1 ||
+      verifiedInodes[0] !== inode ||
+      !isExpectedLockedAuthority(lock, currentAuthority) ||
+      targets.some((target) => !isRunning(target))
+    ) {
+      throw new Error("shared app-server ownership changed during orphan verification");
+    }
+
+    for (const target of targets) {
+      try {
+        process.kill(target.pid, "SIGTERM");
+      } catch (error) {
+        if (error?.code !== "ESRCH") throw error;
+      }
+    }
+
+    const deadline = Date.now() + 3000;
+    while (
+      Date.now() < deadline &&
+      (listenerInodes(socket.targetPath).includes(inode) || targets.some((target) => isRunning(target)))
+    ) {
+      await delay(50);
+    }
+    if (listenerInodes(socket.targetPath).includes(inode) || targets.some((target) => isRunning(target))) {
+      throw new Error("orphaned shared app-server authority did not stop");
+    }
+
+    const remainingInodes = listenerInodes(socket.targetPath);
+    const finalSocketState = socketPathState(socket, true);
+    if (
+      !unchangedLock(lock) ||
+      !ownerIsDead(lock.ownerPid, lock.ownerStartTime) ||
+      remainingInodes.length !== 0 ||
+      finalSocketState === "changed"
+    ) {
+      throw new Error("shared app-server ownership changed before orphan cleanup");
+    }
+    if (finalSocketState === "same") fs.unlinkSync(socketPath);
+    if (unchangedLock(lock)) fs.unlinkSync(lockPath);
+
+    console.error(
+      `Stopped orphaned shared app-server authority: ${targets
+        .map((target) => target.pid)
+        .join(", ")}`,
+    );
+    return true;
+  }
+
+  return { reapOrphan, verifiedOrphanTargets };
 }
 
-reapOrphan().catch((error) => {
-  console.error(`Shared app-server orphan cleanup refused: ${error.message}`);
-  process.exitCode = 1;
-});
+async function reapOrphan(socketPath) {
+  return createOrphanReaper(socketPath).reapOrphan();
+}
+
+module.exports = { createOrphanReaper, hasExpectedOrphanAdoption, readProcess, reapOrphan };
+
+if (require.main === module) {
+  reapOrphan(process.argv[2]).catch((error) => {
+    console.error(`Shared app-server orphan cleanup refused: ${error.message}`);
+    process.exitCode = 1;
+  });
+}

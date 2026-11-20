@@ -22,7 +22,7 @@ const ASSISTANT_RENDER_SHARED_PROPS = [
   "assistantCopyText",
   "savedContentResponseId",
   "after",
-  "compactAttachment",
+  // 26.1117 no longer passes compactAttachment to either assistant render.
   "autoReviewStats",
   "hookStats",
   "completedThreadGoal",
@@ -388,8 +388,9 @@ function inspectGeneralSettingsPage(source) {
     // own self-contained marked components, such as
     // `(0,n.jsx)(codexLinuxCommunityFeaturesInGuiSettings,{})`.
     const linuxChildren = `(?:\\(0,${escapeRegExp(jsx)}\\.jsx\\)\\(codexLinux[A-Za-z]+,\\{\\}\\),)*`;
+    // 26.1117 adds an overview before the title: `{overview:t,title:a,children:[e,r]}`.
     const pageCall = new RegExp(
-      `\\(0,${escapeRegExp(jsx)}\\.jsxs\\)\\([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)?,\\{title:[A-Za-z_$][\\w$]*,children:\\[(${linuxChildren})([A-Za-z_$][\\w$]*),(${mount},)?([A-Za-z_$][\\w$]*)\\]\\}\\)`,
+      `\\(0,${escapeRegExp(jsx)}\\.jsxs\\)\\([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)?,\\{(?:overview:[A-Za-z_$][\\w$]*,)?title:[A-Za-z_$][\\w$]*,children:\\[(${linuxChildren})([A-Za-z_$][\\w$]*),(${mount},)?([A-Za-z_$][\\w$]*)\\]\\}\\)`,
       "g",
     );
     for (const call of body.matchAll(pageCall)) {

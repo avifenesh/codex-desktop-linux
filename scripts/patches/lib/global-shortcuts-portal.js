@@ -466,14 +466,19 @@ function installPortalBackend(source) {
   // Accepted quit (will-quit): upstream disposes the shortcut owners and then
   // drains asynchronously. Stop the portal session before that disposal and
   // make the drain wait for the helper to release its session.
-  const quitLifecycle = new RegExp(`function(?: ${IDENT})?\\(\\{(?:${IDENT}:${IDENT},)*hotkeyWindowLifecycleManager:(?<hotkey>${IDENT}),globalDictationLifecycleManager:(?<dictation>${IDENT}),(?:${IDENT}:${IDENT},)*flushAndDisposeContext:${IDENT},(?:${IDENT}:${IDENT},)*disposables:${IDENT}(?:,${IDENT}:${IDENT})*\\}\\)\\{`, "u");
+  const quitLifecycle = new RegExp(`function(?: ${IDENT})?\\(\\{(?:(?!hotkeyWindowLifecycleManager:)${IDENT}:${IDENT},)*(?:hotkeyWindowLifecycleManager:(?<hotkey>${IDENT}),)?globalDictationLifecycleManager:(?<dictation>${IDENT}),(?:${IDENT}:${IDENT},)*flushAndDisposeContext:${IDENT},(?:${IDENT}:${IDENT},)*disposables:${IDENT}(?:,${IDENT}:${IDENT})*\\}\\)\\{`, "u");
   const quitHeader = uniqueAnchor(quitLifecycle, "accepted application quit lifecycle");
+  // The hotkey owner is optional, but a listed one must be the one disposed
+  // before dictation; one elsewhere in the header would skip its disposal.
+  if (quitHeader.groups.hotkey == null && quitHeader[0].includes("hotkeyWindowLifecycleManager:")) {
+    throw new Error("accepted application quit lifecycle lists hotkeyWindowLifecycleManager out of order");
+  }
   const quitOpen = quitHeader.index + quitHeader[0].length - 1;
   const quitClose = findMatchingBrace(patched, quitOpen);
   if (quitClose === -1) throw new Error("accepted application quit lifecycle is incomplete");
   const quitBody = patched.slice(quitOpen, quitClose + 1);
   const willQuit = new RegExp(`\\.on\\(${literal("will-quit")},`, "u").exec(quitBody);
-  const quitDisposal = `${quitHeader.groups.hotkey}.dispose(),${quitHeader.groups.dictation}.dispose(),Promise.allSettled([`;
+  const quitDisposal = `${quitHeader.groups.hotkey == null ? "" : `${quitHeader.groups.hotkey}.dispose(),`}${quitHeader.groups.dictation}.dispose(),Promise.allSettled([`;
   const quitDisposals = quitBody.split(quitDisposal).length - 1;
   if (willQuit == null || quitDisposals < 1 || quitBody.indexOf(quitDisposal) < willQuit.index) {
     throw new Error("application shutdown before shortcut disposal matched 0 times");
@@ -494,10 +499,15 @@ function installPortalBackend(source) {
   uniqueAnchor(activation, "Wayland registration adapter");
   patched = replaceUnique(patched, activation,
     (match, item, generation) => `${match}if(codexLinuxGlobalShortcutsUsesWayland()&&null!=${item}.linuxCommandId&&${item}.hotkey.includes("+"))return codexLinuxGlobalShortcutsActivate(${item},${generation});`, "Wayland registration adapter");
-  const capture = new RegExp(`beginCapture\\(\\)\\{if\\(this\\.origin\\.isDestroyed\\(\\)\\)return null;let (${IDENT})=${escapeRegExp(electron)}\\.BrowserWindow\\.fromWebContents\\(this\\.origin\\);return ${notNull("\\1")}&&\\1\\.isFocused\\(\\)\\?new (${IDENT})\\(this\\.origin,\\1\\):null\\}`, "u");
+  // 26.1117 resolves the owner window through getFocusedOwnerWindow(); older
+  // builds read BrowserWindow.fromWebContents() and check isFocused().
+  const captureReady = (owner, Capture, focused) => `async beginCapture(){if(this.origin.isDestroyed())return null;let e=${owner};if(null==e||!${focused})return null;let t=new ${Capture}(this.origin,e);try{await codexLinuxGlobalShortcutsCaptureReady;if(this.origin.isDestroyed()||e.isDestroyed()||!${focused}){t[Symbol.dispose]();return null}return t}catch(n){t[Symbol.dispose]();console.warn("[linux-global-shortcuts] Unable to prepare shortcut capture",n);return null}}`;
+  const capture = new RegExp(`beginCapture\\(\\)\\{if\\(this\\.origin\\.isDestroyed\\(\\)\\)return null;let (${IDENT})=(?:${escapeRegExp(electron)}\\.BrowserWindow\\.fromWebContents\\(this\\.origin\\);return ${notNull("\\1")}&&\\1\\.isFocused\\(\\)\\?new (${IDENT})\\(this\\.origin,\\1\\):null|this\\.(${IDENT})\\(\\);return ${isNull("\\1")}\\?null:new (${IDENT})\\(this\\.origin,\\1\\))\\}`, "u");
   uniqueAnchor(capture, "shortcut capture readiness");
   patched = replaceUnique(patched, capture,
-    (_match, _window, Capture) => `async beginCapture(){if(this.origin.isDestroyed())return null;let e=${electron}.BrowserWindow.fromWebContents(this.origin);if(null==e||!e.isFocused())return null;let t=new ${Capture}(this.origin,e);try{await codexLinuxGlobalShortcutsCaptureReady;if(this.origin.isDestroyed()||e.isDestroyed()||!e.isFocused()){t[Symbol.dispose]();return null}return t}catch(n){t[Symbol.dispose]();console.warn("[linux-global-shortcuts] Unable to prepare shortcut capture",n);return null}}`, "shortcut capture readiness");
+    (_match, _window, Capture, owner, OwnerCapture) => owner == null
+      ? captureReady(`${electron}.BrowserWindow.fromWebContents(this.origin)`, Capture, "e.isFocused()")
+      : captureReady(`this.${owner}()`, OwnerCapture, `(this.${owner}()===e)`), "shortcut capture readiness");
   const functions = [codexLinuxGlobalShortcutsUsesWayland, codexLinuxGlobalShortcutsNativePath,
     codexLinuxGlobalShortcutsLines, codexLinuxGlobalShortcutsRequested, codexLinuxGlobalShortcutsUnavailable,
     codexLinuxGlobalShortcutsPortalRegistration, codexLinuxGlobalShortcutsPortalPause, codexLinuxGlobalShortcutsPortalShutdown,

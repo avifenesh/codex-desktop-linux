@@ -358,11 +358,13 @@ test("rejects missing, unexpected, and obsolete upstream executables", () => {
   });
 });
 
-test("Nix runtime probes use the current upstream Tectonic location", () => {
+test("Nix runtime probes expect no bundled Tectonic executable", () => {
+  // 26.1117 ships only resources/tectonic/compiler scripts; the LaTeX plugin
+  // finds tectonic through CODEX_TECTONIC_PATH or PATH.
   const flake = fs.readFileSync(path.resolve(__dirname, "../../flake.nix"), "utf8");
   assert.equal(
     (flake.match(/resources\/tectonic\/tectonic/g) || []).length,
-    2,
+    0,
   );
   assert.doesNotMatch(
     flake,
