@@ -149,6 +149,11 @@ test(
     const result = applyUsageLimitSendAttemptAppPatch(directory);
     assert.equal(result.changed, 1);
     assert.equal(result.consumers.length, 2);
+    // The shared list also reaches two other local-host surfaces (a submit check
+    // and a disabled state); a new reader changes the feature's reach, so it
+    // must be reviewed here.
+    assert.equal(result.readers.length, 4, JSON.stringify(result.readers));
+    for (const consumer of result.consumers) assert.ok(result.readers.includes(consumer), consumer);
     for (const name of Object.keys(files)) {
       const patched = fs.readFileSync(path.join(assets, name), "utf8");
       const target = result.targets.includes(path.join("webview", "assets", "async", name));

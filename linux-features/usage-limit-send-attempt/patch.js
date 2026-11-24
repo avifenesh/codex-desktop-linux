@@ -61,6 +61,16 @@ function consumesUsageReasons(source, { moduleId, exportName }) {
   return joined.length === 1 && source.split(`submitDisabledReasons:${joined[0].groups.name}`).length === 2;
 }
 
+// Any module that binds the usage module and passes the reasons atom to a
+// reader call, such as (0,x.get)(binding.o,host) or store.get(binding.o,host).
+// The composers are among them; other local-host surfaces read the same list.
+// Minified chunks reuse short binding names across modules, so a plain
+// binding.o elsewhere (a different module's function export) does not count.
+function readsUsageReasons(source, { moduleId, exportName }) {
+  return [...source.matchAll(new RegExp(`(?<name>${IDENT})=${IDENT}\\("${escapeRegExp(moduleId)}"\\)`, "g"))]
+    .some(({ groups }) => new RegExp(`\\(${escapeRegExp(groups.name)}\\.${escapeRegExp(exportName)},`).test(source));
+}
+
 function applyUsageLimitSendAttemptPatch(source) {
   if (source.includes(MARKER)) return source;
   const atom = findUsageReasonAtom(source);
@@ -92,6 +102,7 @@ function applyUsageLimitSendAttemptAppPatch(extractedDir) {
     changed: 1,
     targets: [path.relative(extractedDir, owner.file)],
     consumers: consumers.map(({ file }) => path.relative(extractedDir, file)),
+    readers: sources.filter(({ source }) => readsUsageReasons(source, atom)).map(({ file }) => path.relative(extractedDir, file)),
   };
 }
 

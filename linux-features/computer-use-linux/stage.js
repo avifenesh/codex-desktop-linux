@@ -27,7 +27,9 @@ try {
   throw new Error(`Linux unified Computer Use contract drift: ${error.message}`);
 }
 
-// The app materializes bundled plugin caches by version, not resource contents.
+// The app materializes bundled plugin caches, and executor copies of them, by
+// version, not resource contents: bump the suffix whenever the staged scripts or
+// the injected config change.
 manifest.version = manifest.version.replace(/-linux-native\.\d+$/, "") + "-linux-native.9";
 fs.mkdirSync(path.join(target, "scripts"), { recursive: true });
 for (const name of ["native-client.mjs", "native-service.mjs", "native-backend-service.mjs", "native-protocol.mjs"]) {
