@@ -4,7 +4,6 @@ const { escapeRegExp, findMatchingBrace } = require("../../scripts/patches/lib/m
 
 const ID = "[A-Za-z_$][\\w$]*";
 const ROOT_KEY = "codexLinuxCuaPluginRoot";
-const CONTEXT_KEY = "codexLinuxCuaContext";
 const ROOT_PLACEHOLDER = "\u0000ROOT\u0000";
 // rspack chunk modules: `exports.modules={123(e,t,r){...},456(e){...}}`.
 const MODULE_HEADER = /(?:modules=\{|\},)\d+\([\w$]+(?:,[\w$]+){0,2}\)\{/g;
@@ -119,53 +118,66 @@ function rootPattern(source) {
   return escapeRegExp(source).replace(escapeRegExp(ROOT_PLACEHOLDER), `(?<pluginRoot>${ID})`);
 }
 
-function lifecycleContract(source, builder, syncSource) {
-  const owner = uniqueMatch(syncSource, new RegExp(`^(?:async )?function (?<name>${ID})\\((?<argument>${ID})\\)\\{`, "g"),
-    "expected one plugin synchronization owner");
-  requireUsages(source, builder, 3); // declaration, plugin synchronization, thread configuration
-  const reloads = [...source.matchAll(new RegExp(
-    `(?<![\\w$.#])${escapeRegExp(owner.groups.name)}\\(\\{\\.\\.\\.this\\.options,reloadUserConfig:!1\\}\\)`, "g",
-  ))];
-  if (reloads.length > 1) throw drift("unexpected plugin resynchronization consumers");
-  requireUsages(source, owner.groups.name, 2 + reloads.length);
-  const inlineSelection = [...syncSource.matchAll(new RegExp(
-    `,\\{selection:(?<selection>${ID}),cuaReplEnabled:${ID}\\}\\}\\)\\(${ID}\\)\\)`, "g",
-  ))];
-  if (inlineSelection.length === 1) {
-    const syncCall = uniqueMatch(syncSource, new RegExp(
-      `Object\\.assign\\(${ID},${escapeRegExp(builder)}\\(\\{\\.\\.\\.(?<argument>${ID}),accessBootstrapPath:${ID}\\}(?:,${ID})?\\)\\)`, "g",
-    ), "expected one inline plugin synchronization builder call");
-    const resume = uniqueMatch(source, new RegExp(
-      `(?<![\\w$.#])${escapeRegExp(builder)}\\(\\{browserBackends:(?<selection>${ID})\\.browserBackends,` +
-      `deferTools:\\k<selection>\\.desktopFeatureAvailability\\.deferCuaTools,` +
-      `(?:omitCuaConfirmationPolicyBySku:\\k<selection>\\.desktopFeatureAvailability\\.omitCuaConfirmationPolicyBySku,)?` +
-      `surfaces:\\k<selection>\\.cuaReplSurfaces,` +
-      `nodeRepl:${ID}\\}(?<root>,\\k<selection>\\.${ROOT_KEY})?\\)`, "g"),
-    "expected one thread configuration builder call");
-    return {
-      version: 2,
-      argument: syncCall.groups.argument,
-      selection: inlineSelection[0].groups.selection,
-      sync: { groups: { context: null } },
-      resume,
-    };
-  }
+// The signed package writes the shared plugin's .mcp.json through one writer
+// used by plugin synchronization and by executor plugin copies, and builds the
+// same config again for each resumed local thread. Every consumer must receive
+// the plugin root that its trusted service and banner point into.
+function lifecycleContract(source, builder) {
+  const writer = uniqueMatch(source, new RegExp(
+    `async function (?<name>${ID})\\((?<root>${ID}),(?<options>${ID})(?<rootParam>,(?<writerRoot>${ID})=\\k<root>)?\\)\\{` +
+    `let ${ID}=${ID}\\(\\)\\.join\\(\\k<root>,"\\.mcp\\.json"\\)`, "g"),
+  "expected one shared plugin config writer");
+  const writerOwner = enclosingFunction(source, writer.index);
+  if (writerOwner == null || writerOwner.start !== writer.index) throw drift("expected one shared plugin config writer");
+  const writerSource = source.slice(writerOwner.start, writerOwner.end);
+  const writerCall = uniqueMatch(writerSource, new RegExp(
+    `Object\\.assign\\(${ID}\\.mcpServers\\.cua_repl,${escapeRegExp(builder)}\\(\\{\\.\\.\\.${escapeRegExp(writer.groups.options)},sharedPlugin:!0\\}` +
+    `(?<rootArg>,(?<pluginRoot>${ID}))?\\)\\)`, "g"), "expected one shared plugin config builder call");
+  requireUsages(source, builder, 3); // declaration, shared plugin writer, thread configuration
+  requireUsages(source, writer.groups.name, 3); // declaration, plugin synchronization, executor copy
+
+  // Plugin synchronization resolves the root from verified installed plugin
+  // metadata and caches the synchronized selection for thread configuration.
   const sync = uniqueMatch(source, new RegExp(
-    `(?<enabled>${ID})=await ${escapeRegExp(owner.groups.name)}\\(\\{browserBackends:${ID},deferTools:${ID}\\.deferCuaTools,` +
-    `surfaces:${ID},codexHome:${ID},marketplaceName:${ID},marketplaces:${ID},nodeRepl:${ID}\\?void 0:${ID}` +
-    `(?<context>,${CONTEXT_KEY}:(?<selection>${ID}))?\\}\\)`, "g"), "expected one cached plugin synchronization call");
+    `(?<enabled>${ID})=await async function\\((?<argument>${ID})\\)\\{let (?<entry>${ID})=${ID}\\(\\{marketplaceName:\\k<argument>\\.marketplaceName,` +
+    `marketplaces:\\k<argument>\\.marketplaces,pluginName:${ID}\\.${ID}\\}\\);if\\(!\\k<entry>\\?\\.plugin\\.installed\\)return!1;` +
+    `let (?<pluginRoot>${ID})=\\(0,${ID}\\.${ID}\\)\\(\\{codexHome:\\k<argument>\\.codexHome,localVersion:\\k<entry>\\.plugin\\.localVersion,` +
+    `marketplaceName:\\k<entry>\\.marketplace\\.name,pluginName:\\k<entry>\\.plugin\\.name\\}\\);return (?<publish>(?<selection>${ID})\\.${ROOT_KEY}=\\k<pluginRoot>,)?` +
+    `await ${escapeRegExp(writer.groups.name)}\\(\\k<pluginRoot>,\\k<argument>\\),`, "g"),
+  "expected plugin root derived from verified installed plugin metadata");
   const syncOwner = enclosingFunction(source, sync.index);
   if (syncOwner == null) throw drift("expected a plugin synchronization owner");
   const syncOwnerSource = source.slice(syncOwner.start, syncOwner.end);
   const cached = uniqueMatch(syncOwnerSource, new RegExp(
-    `(?:return |,)\\{selection:(?<selection>${ID}),cuaReplEnabled:${escapeRegExp(sync.groups.enabled)}\\}`, "g"),
+    `\\{selection:(?<selection>${ID}),cuaReplEnabled:${escapeRegExp(sync.groups.enabled)},executorLaunch:${ID},confirmationPolicyConfig:${ID}\\}`, "g"),
   "expected synchronized selection to be cached with CUA enabled state");
-  uniqueMatch(syncOwnerSource, new RegExp(`(?:let |,)${escapeRegExp(cached.groups.selection)}=`, "g"),
+  uniqueMatch(syncOwnerSource, new RegExp(`(?:let |,)${escapeRegExp(cached.groups.selection)}=await ${ID}\\(\\{`, "g"),
     "expected cached selection to belong to plugin initialization");
+  if (sync.groups.publish != null && sync.groups.selection !== cached.groups.selection) {
+    throw drift("plugin root receiver is not the cached selection");
+  }
+  // The injected assignment runs inside the inline synchronization function;
+  // a binding there with the selection's name would shadow it.
+  const inlineOpen = sync.index + sync[0].indexOf("){") + 1;
+  const inlineSource = source.slice(inlineOpen, findMatchingBrace(source, inlineOpen) + 1);
+  requireUsages(inlineSource, cached.groups.selection, sync.groups.publish == null ? 0 : 1);
+
+  // Executor plugin copies are written in a staging directory and then renamed
+  // to their content-addressed directory, which is the root the copy runs from.
+  const executor = uniqueMatch(source, new RegExp(
+    `await \\(0,${ID}\\.cp\\)\\(${ID}\\.path,(?<staging>${ID}),\\{recursive:!0\\}\\),` +
+    `await ${escapeRegExp(writer.groups.name)}\\(\\k<staging>,${ID}(?<rootArg>,(?<finalRoot>${ID}))?\\);` +
+    `try\\{await \\(0,${ID}\\.rename\\)\\(\\k<staging>,(?<final>${ID})\\)`, "g"),
+  "expected one executor plugin copy");
+  if (executor.groups.rootArg != null && executor.groups.finalRoot !== executor.groups.final) {
+    throw drift("executor plugin copy root is not its final directory");
+  }
+
   const resume = uniqueMatch(source, new RegExp(
     `(?<![\\w$.#])${escapeRegExp(builder)}\\(\\{browserBackends:(?<selection>${ID})\\.browserBackends,` +
     `deferTools:\\k<selection>\\.desktopFeatureAvailability\\.deferCuaTools,` +
-    `(?:omitCuaConfirmationPolicyBySku:\\k<selection>\\.desktopFeatureAvailability\\.omitCuaConfirmationPolicyBySku,)?` +
+    `confirmationPolicyConfig:(?<cache>${ID})\\.confirmationPolicyConfig,` +
+    `omitCuaConfirmationPolicyBySku:\\k<selection>\\.desktopFeatureAvailability\\.omitCuaConfirmationPolicyBySku,` +
     `surfaces:\\k<selection>\\.cuaReplSurfaces,` +
     `nodeRepl:${ID}\\}(?<root>,\\k<selection>\\.${ROOT_KEY})?\\)`, "g"),
   "expected one thread configuration builder call");
@@ -178,6 +190,11 @@ function lifecycleContract(source, builder, syncSource) {
     `${ID}=${ID}\\?await ${ID}\\.getAuthenticatedPrincipal\\(\\)\\.catch\\(\\(\\)=>null\\):null,` +
     `${selection}=\\k<cached>\\?\\.selection\\?\\?await ${ID}\\(`, "g"),
   "expected thread configuration to reuse the cached selection");
+  // The resumed builder call is guarded by the cached enabled state, so its
+  // selection is the cached one that carries the published root.
+  if (!resumeSource.includes(`${resume.groups.cache}?.cuaReplEnabled&&`)) {
+    throw drift("thread configuration is not guarded by the cached CUA state");
+  }
   // The per-thread selection may only be widened by copying the cached
   // selection, which keeps the published trusted root.
   const reassignments = [...resumeSource.matchAll(new RegExp(`(?<![\\w$.#])${selection}=(?!=)`, "g"))];
@@ -185,10 +202,7 @@ function lifecycleContract(source, builder, syncSource) {
   if (reassignments.length !== 1 + copies.length) {
     throw drift("thread configuration replaces the cached selection");
   }
-  if (sync.groups.context != null && sync.groups.selection !== cached.groups.selection) {
-    throw drift("plugin root receiver is not the cached selection");
-  }
-  return { version: 1, argument: owner.groups.argument, sync, resume, selection: cached.groups.selection };
+  return { writer, writerSource, writerCall, sync, executor, resume, selection: cached.groups.selection };
 }
 
 function enclosingFunction(source, targetIndex) {
@@ -238,14 +252,13 @@ function applyUnifiedComputerUseModulePatch(source) {
   const match = uniqueMatch(source, selectorPattern(), "expected one native surface selector");
   const { native, ready, runtime, features, legacy, mode, modeValue, linux, modeLinux } = match.groups;
   if (Boolean(linux) !== Boolean(modeLinux)) throw drift("partial native selector patch");
-  // The signed package shares a config builder between plugin synchronization
-  // and per-thread configuration. Publish synchronization's verified root in
-  // its cached selection, then pass that context through both builder calls.
+  // One config builder serves the shared plugin writer and per-thread
+  // configuration. It receives the trusted plugin root as an extra argument.
   const builder = uniqueMatch(source, new RegExp(
     `function (?<builder>[\\w$]+)\\(\\{browserBackends:(?<backends>[\\w$]+),deferTools:(?<defer>[\\w$]+),` +
-      `(?:omitCuaConfirmationPolicyBySku:(?<omitPolicy>[\\w$]+),)?` +
+      `confirmationPolicyConfig:[\\w$]+="\\{\\}",omitCuaConfirmationPolicyBySku:[\\w$]+,` +
       `surfaces:(?<surfaces>[\\w$]+),nodeRepl:(?<nodeRepl>[\\w$]+),` +
-      `accessBootstrapPath:(?<accessBootstrapPath>[\\w$]+)\\}(?<rootParam>,(?<pluginRoot>[\\w$]+))?\\)\\{`,
+      `sharedPlugin:[\\w$]+=!1\\}(?<rootParam>,(?<pluginRoot>[\\w$]+))?\\)\\{`,
     "g",
   ), "expected one native config builder");
   const builderOwner = enclosingFunction(source, builder.index);
@@ -257,7 +270,7 @@ function applyUnifiedComputerUseModulePatch(source) {
   const patchedServices = [...builderSource.matchAll(new RegExp(
     `${surfaces}\\.includes\\("computer"\\)&&\\((?<services>[\\w$]+)\\.sky=` +
       `${rootPattern(pluginFile(ROOT_PLACEHOLDER, "native-service.mjs"))}\\)`, "g"))];
-  // Optional audio environment block; carried through unchanged.
+  // Audio environment block; carried through unchanged.
   const audioEnvironmentPattern =
     `(?<audio>\\.\\.\\.${nodeRepl}\\?\\.env\\.SKY_[A-Z_]+==="1"\\?\\{` +
     `SKY_ENABLE_AUDIO:${surfaces}\\.includes\\("computer"\\)\\?"1":"0",` +
@@ -284,61 +297,48 @@ function applyUnifiedComputerUseModulePatch(source) {
       bannerKeys !== 1 + patchedBanners.length) {
     throw drift("packaged cua-repl environment no longer preserves the native bridge");
   }
-  if (/(?<![\w$.#])require(?![\w$]|\()/.test(builderSource)) {
+  // Token scan: the builder also passes a "--require-browser-access" literal.
+  // Only the injected node:path calls may reference require.
+  try {
+    requireUsages(builderSource, "require", builderSource.split('require("node:path")').length - 1);
+  } catch {
     throw drift("native config builder shadows require");
   }
-  const callPattern = new RegExp(
-    `Object\\.assign\\([\\w$]+,${escapeRegExp(builder.groups.builder)}\\(\\{\\.\\.\\.(?<argument>[\\w$]+),` +
-      `accessBootstrapPath:(?<accessBootstrapPath>[\\w$]+)\\}(?<rootArg>,(?<pluginRoot>[\\w$]+))?\\)\\)`,
-    "g",
-  );
-  const calls = [...source.matchAll(callPattern)];
-  const callOwner = calls.length === 1 ? enclosingFunction(source, calls[0].index) : null;
-  const callOwnerSource = callOwner == null ? "" : source.slice(callOwner.start, callOwner.end);
-  const pluginRoots = [...callOwnerSource.matchAll(new RegExp(
-    `${ID}=${ID}\\(\\)\\.join\\((?<pluginRoot>${ID}),"\\.mcp\\.json"\\)`, "g"))];
-  const lifecycle = lifecycleContract(source, builder.groups.builder, callOwnerSource);
+  const lifecycle = lifecycleContract(source, builder.groups.builder);
+  const { writer, writerSource, writerCall, sync, executor, resume } = lifecycle;
   const serviceCurrent = currentServices.length === 1 && patchedServices.length === 0;
   const servicePatched = currentServices.length === 0 && patchedServices.length === 1;
   const bannerCurrent = currentBanners.length === 1 && patchedBanners.length === 0;
   const bannerPatched = currentBanners.length === 0 && patchedBanners.length === 1;
-  const current = !linux && builder.groups.rootParam == null && calls.length === 1 &&
-    calls[0].groups.rootArg == null && serviceCurrent && bannerCurrent &&
-    (lifecycle.version === 2 || lifecycle.sync.groups.context == null) && lifecycle.resume.groups.root == null;
-  const patched = Boolean(linux) && builder.groups.rootParam != null && calls.length === 1 &&
-    calls[0].groups.rootArg != null && servicePatched && bannerPatched &&
-    (lifecycle.version === 2 || lifecycle.sync.groups.context != null) && lifecycle.resume.groups.root != null;
+  const current = !linux && builder.groups.rootParam == null && serviceCurrent && bannerCurrent &&
+    writer.groups.rootParam == null && writerCall.groups.rootArg == null && sync.groups.publish == null &&
+    executor.groups.rootArg == null && resume.groups.root == null;
+  const patched = Boolean(linux) && builder.groups.rootParam != null && servicePatched && bannerPatched &&
+    writer.groups.rootParam != null && writerCall.groups.rootArg != null && sync.groups.publish != null &&
+    executor.groups.rootArg != null && resume.groups.root != null;
   if (!current && !patched) throw drift("expected one native trusted service selector");
   const service = current ? currentServices[0] : patchedServices[0];
-  if (pluginRoots.length !== 1) throw drift("changed plugin cache relationship");
-  const root = pluginRoots[0];
-  const argument = lifecycle.argument;
-  uniqueMatch(callOwnerSource, new RegExp(
-    `${escapeRegExp(root.groups.pluginRoot)}=\\(0,${ID}\\.${ID}\\)\\(\\{codexHome:${escapeRegExp(argument)}\\.codexHome,` +
-    `localVersion:(?<plugin>${ID})\\.plugin\\.localVersion,marketplaceName:\\k<plugin>\\.marketplace\\.name,pluginName:\\k<plugin>\\.plugin\\.name\\}\\)`, "g"),
-  "expected plugin root derived from verified installed plugin metadata");
-  const publishRoot = lifecycle.version === 2
-    ? `${lifecycle.selection}.${ROOT_KEY}=${root.groups.pluginRoot};`
-    : `${argument}.${CONTEXT_KEY}.${ROOT_KEY}=${root.groups.pluginRoot};`;
   const banner = current ? currentBanners[0] : patchedBanners[0];
   if (banner.groups.services !== service.groups.services) throw drift("changed native banner relationship");
-  if (patched && (service.groups.pluginRoot !== builder.groups.pluginRoot ||
-      banner.groups.pluginRoot !== builder.groups.pluginRoot ||
-      calls[0].groups.pluginRoot !== root.groups.pluginRoot)) {
-    throw drift("changed native service path relationship");
+  if (patched) {
+    if (service.groups.pluginRoot !== builder.groups.pluginRoot ||
+        banner.groups.pluginRoot !== builder.groups.pluginRoot ||
+        writerCall.groups.pluginRoot !== writer.groups.writerRoot) {
+      throw drift("changed native service path relationship");
+    }
+    if (!builderSource.startsWith(builder[0] + rootGuard(builder.groups.pluginRoot))) {
+      throw drift("incomplete trusted root propagation");
+    }
+    return source;
   }
-  const completePropagation = callOwnerSource.split(publishRoot).length === 2 &&
-    callOwnerSource.includes(publishRoot + calls[0][0]) &&
-    builderSource.startsWith(builder[0] + rootGuard(builder.groups.pluginRoot));
-  if ((current && callOwnerSource.includes(publishRoot)) || (patched && !completePropagation)) {
-    throw drift("incomplete trusted root propagation");
-  }
-  if (patched) return source;
-  const pluginRoot = root.groups.pluginRoot;
   // Caller and helper have independent minified scopes. A caller alias can be
   // an existing destructured parameter or local in the helper. Use a fresh
   // helper binding, including nested scopes that capture the injected value.
   const builderRoot = freshBuilderRoot(builderSource);
+  const writerRoot = freshBuilderRoot(writerSource);
+  const writerParams = writer.index + writer[0].indexOf("){");
+  const writerCallEnd = writer.index + writerSource.indexOf(writerCall[0]) + writerCall[0].length - 2;
+  const executorCallEnd = executor.index + executor[0].indexOf(");try{");
   const edits = [
     {
       index: match.index,
@@ -365,28 +365,28 @@ function applyUnifiedComputerUseModulePatch(source) {
     },
     {
       index: builder.index + builder[0].length - 2,
-      length: 1,
-      replacement: `,${builderRoot})`,
+      length: 0,
+      replacement: `,${builderRoot}`,
     },
     {
       index: builder.index + builder[0].length,
       length: 0,
       replacement: rootGuard(builderRoot),
     },
+    // The writer defaults to the directory it writes; executor copies pass
+    // their final directory instead of the staging directory.
+    { index: writerParams, length: 0, replacement: `,${writerRoot}=${writer.groups.root}` },
+    { index: writerCallEnd, length: 0, replacement: `,${writerRoot}` },
+    { index: executorCallEnd, length: 0, replacement: `,${executor.groups.final}` },
     {
-      index: calls[0].index,
-      length: calls[0][0].length,
-      replacement: publishRoot + calls[0][0].slice(0, -2) + `,${pluginRoot}` + calls[0][0].slice(-2),
+      index: sync.index + sync[0].lastIndexOf("await "),
+      length: 0,
+      replacement: `${lifecycle.selection}.${ROOT_KEY}=${sync.groups.pluginRoot},`,
     },
-    ...(lifecycle.version === 1 ? [{
-      index: lifecycle.sync.index,
-      length: lifecycle.sync[0].length,
-      replacement: lifecycle.sync[0].slice(0, -2) + `,${CONTEXT_KEY}:${lifecycle.selection}})`,
-    }] : []),
     {
-      index: lifecycle.resume.index,
-      length: lifecycle.resume[0].length,
-      replacement: lifecycle.resume[0].slice(0, -1) + `,${lifecycle.resume.groups.selection}.${ROOT_KEY})`,
+      index: resume.index + resume[0].length - 1,
+      length: 0,
+      replacement: `,${resume.groups.selection}.${ROOT_KEY}`,
     },
   ];
   let patchedSource = source;

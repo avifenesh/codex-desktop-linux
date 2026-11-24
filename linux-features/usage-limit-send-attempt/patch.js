@@ -6,93 +6,92 @@ const { escapeRegExp } = require("../../scripts/patches/lib/minified-js.js");
 
 const IDENT = "[A-Za-z_$][\\w$]*";
 const MARKER = "codexLinuxUsageLimitSendAttempt";
-const COMPOSER = new RegExp(
-  `let\\{agentMode:${IDENT},permissionProfileId:${IDENT},shouldSendPermissionOverrides:${IDENT}\\}`,
-);
-const LOCAL_USAGE_GATE = new RegExp(
-  `(?<flag>${IDENT})=\\(0,${IDENT}\\.${IDENT}\\)\\("local"===${IDENT}&&${IDENT}\\.${IDENT}\\)`,
-  "g",
-);
-const CURRENT_LOCAL_USAGE_REASON = new RegExp(
-  `(?<flag>${IDENT})=\\(0,${IDENT}\\.${IDENT}\\)\\(${IDENT}\\.${IDENT},${IDENT}\\)(?=,${IDENT}=\\(0,)`,
-  "g",
-);
 
-function usageLimitReasonContract(source, gate) {
-  const after = source.slice(gate.index + gate[0].length, gate.index + gate[0].length + 20000);
-  const flag = escapeRegExp(gate.groups.flag);
-  const reason = [...after.matchAll(new RegExp(
-    `(?<name>${IDENT})=${flag}&&"usage-limit";`,
+// The account usage module derives the host's submit-disabled reasons in one
+// atom family: [..., "local"===host&&get(usageExhausted)&&"usage-limit"]
+// .filter(Boolean).join(","). Only the local host entry is neutralized; other
+// reasons in the same list (such as "reserve-limit") keep applying.
+const USAGE_REASONS = new RegExp(
+  `(?<atom>${IDENT})=\\(0,${IDENT}\\.${IDENT}\\)\\(${IDENT}\\.${IDENT},\\((?<host>${IDENT}),\\{get:(?<get>${IDENT})\\}\\)=>` +
+    `\\[[^\\[\\]]{0,400}?(?<gate>"local"===\\k<host>&&\\k<get>\\(${IDENT}\\)&&"usage-limit")\\]` +
+    `\\.filter\\(Boolean\\)\\.join\\(","\\)\\)`,
+  "g",
+);
+const MODULE_HEADER = /(?:^|[,{])"?(?<id>[\w$]+)"?(?::\(function|)\([\w$]+(?:,[\w$]+){0,2}\)\{/g;
+
+// Returns the unique usage-reason atom with its module ID and export name, or
+// null when the shape is missing, ambiguous or not exported.
+function findUsageReasonAtom(source) {
+  const matches = [...source.matchAll(USAGE_REASONS)];
+  if (matches.length !== 1) return null;
+  const [match] = matches;
+  const end = match.index + match[0].length;
+  const exported = new RegExp(
+    `^;${IDENT}\\.d\\(${IDENT},\\{\\},\\{(?:[^{}]*,)?(?<name>${IDENT}):${escapeRegExp(match.groups.atom)}(?:,[^{}]*)?\\}\\)`,
+  ).exec(source.slice(end, end + 400));
+  if (exported == null) return null;
+  let moduleId = null;
+  for (const header of source.slice(0, match.index).matchAll(MODULE_HEADER)) moduleId = header.groups.id;
+  if (moduleId == null) return null;
+  const gateIndex = match.index + match[0].indexOf(match.groups.gate);
+  return { gateIndex, gate: match.groups.gate, moduleId, exportName: exported.groups.name };
+}
+
+// A local Codex composer reads the atom for its host and spreads the value into
+// the reason list that becomes its submitDisabledReasons prop.
+function consumesUsageReasons(source, { moduleId, exportName }) {
+  if (!source.includes("shouldSendPermissionOverrides:") || !source.includes("submitDisabledReasons:")) return false;
+  const modules = [...source.matchAll(new RegExp(`(?<name>${IDENT})=${IDENT}\\("${escapeRegExp(moduleId)}"\\)`, "g"))];
+  if (modules.length !== 1) return false;
+  const reads = [...source.matchAll(new RegExp(
+    `(?<name>${IDENT})=\\(0,${IDENT}\\.${IDENT}\\)\\(${escapeRegExp(modules[0].groups.name)}\\.${escapeRegExp(exportName)},${IDENT}\\)`,
     "g",
   ))];
-  if (reason.length !== 1) return false;
-  const reasonName = escapeRegExp(reason[0].groups.name);
-  const reasons = [...after.matchAll(new RegExp(
-    `(?<name>${IDENT})=\\[[^\\]]{0,1500}(?:^|,)${reasonName}\\]\\.filter\\(Boolean\\)`,
+  if (reads.length !== 1) return false;
+  const reason = escapeRegExp(reads[0].groups.name);
+  const lists = [...source.matchAll(new RegExp(
+    `(?<name>${IDENT})=\\[(?:[^\\[\\]]{0,1500},)?${reason}(?:,[^\\[\\]]{0,1500})?\\]\\.filter\\(Boolean\\)`,
     "g",
   ))];
-  if (reasons.length !== 1) return false;
-  const reasonsName = escapeRegExp(reasons[0].groups.name);
-  const joined = [...after.matchAll(new RegExp(
-    `let (?<name>${IDENT})=${reasonsName}\\.join\\(","\\);`,
+  if (lists.length !== 1) return false;
+  const joined = [...source.matchAll(new RegExp(
+    `let (?<name>${IDENT})=${escapeRegExp(lists[0].groups.name)}\\.join\\(","\\);`,
     "g",
   ))];
-  return joined.length === 1 &&
-    after.split(`submitDisabledReasons:${joined[0].groups.name}`).length === 2;
+  return joined.length === 1 && source.split(`submitDisabledReasons:${joined[0].groups.name}`).length === 2;
 }
 
 function applyUsageLimitSendAttemptPatch(source) {
   if (source.includes(MARKER)) return source;
-
-  // Match the local Codex composer and the complete semantic path from the
-  // account usage gate through its disabled-reason list and rendered prop.
-  const rawGates = [...source.matchAll(LOCAL_USAGE_GATE)];
-  if (rawGates.length === 0) {
-    const current = [...source.matchAll(CURRENT_LOCAL_USAGE_REASON)].filter((gate) => {
-      const after = source.slice(gate.index + gate[0].length, gate.index + gate[0].length + 25000);
-      return COMPOSER.test(after) &&
-        new RegExp(`=\\[[^\\]]{0,1500},${escapeRegExp(gate.groups.flag)}\\]\\.filter\\(Boolean\\)`).test(after) &&
-        after.includes("submitDisabledReasons:");
-    });
-    if (current.length !== 1) return source;
-    const gate = current[0];
-    return source.slice(0, gate.index) + `${gate.groups.flag}=!1/*${MARKER}*/` +
-      source.slice(gate.index + gate[0].length);
-  }
-  if (rawGates.length !== 1) return source;
-  const gates = rawGates.filter((gate) => {
-    const before = source.slice(Math.max(0, gate.index - 1200), gate.index);
-    if (!COMPOSER.test(before)) return false;
-
-    return usageLimitReasonContract(source, gate);
-  });
-  if (gates.length !== 1) return source;
-
-  const gate = gates[0];
-  return source.slice(0, gate.index) + `${gate.groups.flag}=!1/*${MARKER}*/` +
-    source.slice(gate.index + gate[0].length);
+  const atom = findUsageReasonAtom(source);
+  if (atom == null) return source;
+  return source.slice(0, atom.gateIndex) + `!1/*${MARKER}*/` + source.slice(atom.gateIndex + atom.gate.length);
 }
 
 function applyUsageLimitSendAttemptAppPatch(extractedDir) {
+  const drift = { changed: 0, reason: "local Codex composer usage gate changed" };
   const assets = path.join(extractedDir, "webview", "assets", "async");
   if (!fs.existsSync(assets)) return { changed: 0, reason: "webview composer assets missing" };
-  const candidates = [];
-  for (const name of fs.readdirSync(assets)) {
-    if (!name.endsWith(".js")) continue;
-    const file = path.join(assets, name);
-    const source = fs.readFileSync(file, "utf8");
-    if (!COMPOSER.test(source) || !source.includes("submitDisabledReasons:")) continue;
-    const patched = applyUsageLimitSendAttemptPatch(source);
-    if (patched === source) {
-      return { changed: 0, reason: "local Codex composer usage gate changed" };
-    }
-    candidates.push({ file, patched });
-  }
-  if (candidates.length === 0) return { changed: 0, reason: "local Codex composer usage gate changed" };
-  for (const { file, patched } of candidates) fs.writeFileSync(file, patched);
+  const sources = fs.readdirSync(assets).filter((name) => name.endsWith(".js"))
+    .map((name) => ({ file: path.join(assets, name), source: fs.readFileSync(path.join(assets, name), "utf8") }));
+  const owners = sources.filter(({ source }) =>
+    source.includes('"usage-limit"') && [...source.matchAll(USAGE_REASONS)].length > 0);
+  if (owners.length !== 1) return drift;
+  const [owner] = owners;
+  const atom = findUsageReasonAtom(owner.source);
+  if (atom == null) return drift;
+  const consumers = sources.filter(({ source }) => consumesUsageReasons(source, atom));
+  if (consumers.length === 0) return drift;
+  // A composer that builds its own "usage-limit" reason would keep blocking
+  // Send after this patch, so the patch fails closed.
+  if (sources.some(({ source }) => /"usage-limit"/.test(source) && /submitDisabledReasons:/.test(source))) return drift;
+  const patched = applyUsageLimitSendAttemptPatch(owner.source);
+  if (patched === owner.source) return drift;
+  fs.writeFileSync(owner.file, patched);
   return {
-    changed: candidates.length,
-    targets: candidates.map(({ file }) => path.relative(extractedDir, file)),
+    changed: 1,
+    targets: [path.relative(extractedDir, owner.file)],
+    consumers: consumers.map(({ file }) => path.relative(extractedDir, file)),
   };
 }
 
@@ -108,5 +107,7 @@ const descriptors = [{
 module.exports = {
   applyUsageLimitSendAttemptPatch,
   applyUsageLimitSendAttemptAppPatch,
+  consumesUsageReasons,
+  findUsageReasonAtom,
   descriptors,
 };

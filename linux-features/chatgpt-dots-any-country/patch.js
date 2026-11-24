@@ -27,14 +27,6 @@ const CONTRACTS = Object.freeze({
     replacement: "!0",
     expected: 1,
   }],
-  personalization: [{
-    pattern: new RegExp(
-      `${IDENT}\\?\\.accounts\\[${IDENT}\\]\\?\\.account\\.tbo_config\\?\\.tbo_available!==!0`,
-      "gu",
-    ),
-    replacement: "!1",
-    expected: 1,
-  }],
 });
 
 function contractState(source, replacements) {
@@ -68,10 +60,6 @@ function applyDotsAppSharedPatch(source) {
   return applyContract(source, CONTRACTS.appShared, "capability");
 }
 
-function applyDotsPersonalizationPatch(source) {
-  return applyContract(source, CONTRACTS.personalization, "personalization");
-}
-
 function matchesContract(source, contracts) {
   return contractState(source, contracts) === "pristine";
 }
@@ -99,23 +87,11 @@ const descriptors = [
     skipDescription: "ChatGPT Dots capability patch",
     apply: applyDotsAppSharedPatch,
   },
-  {
-    id: "dots-personalization-capability",
-    phase: "webview-asset",
-    order: 20_902,
-    ciPolicy: "optional",
-    assetNeedles: ["tbo_available!==!0"],
-    assetMatch: (source) => matchesContract(source, CONTRACTS.personalization),
-    missingDescription: "ChatGPT Dots personalization bundle",
-    skipDescription: "ChatGPT Dots personalization patch",
-    apply: applyDotsPersonalizationPatch,
-  },
 ];
 
 module.exports = {
   CONTRACTS,
   applyDotsAppSharedPatch,
   applyDotsLandingRoutePatch,
-  applyDotsPersonalizationPatch,
   descriptors,
 };

@@ -121,11 +121,25 @@ const LOCAL_FILE_WATCH_METHOD =
   new RegExp(`${LOCAL_FILE_WATCH_METHOD_PREFIX}${LOCAL_FILE_WATCH_CURRENT_BODY}`, "gu");
 // The current signed package builds both the main process (numbered
 // `early-bootstrap-<n>-<hash>.js` chunks) and the Git worker (`worker.js`) with
-// rspack. Its minifier emits class declarations, double-quoted strings,
-// literal-first comparisons, and rspack interop getters such as `c1().join`.
+// rspack. Its minifier emits double-quoted strings, literal-first comparisons,
+// and rspack interop calls such as `(0,t2.Ny)()` and `rr().join`. The main
+// process declares the local host as a named class (`class oc{`). The worker
+// keeps it in its own rspack module and exports an anonymous class through the
+// module's define helper (`66418(e,t,r){"use strict";var ...;r.d(t,{},{_:class{`);
+// the Git route then constructs it through the namespace bound to that module
+// id (`t0=r(66418)`, `new t0._(`).
 const CURRENT_LOCAL_HOST_CLASS = new RegExp(
-  `class (?<localHostClass>${IDENTIFIER_PATTERN})\\{` +
-    `runsInsideWsl;processOwner;workspaceRoot=new ${IDENTIFIER_PATTERN}\\(this\\);` +
+  "(?:" +
+    `class (?<localHostClass>${IDENTIFIER_PATTERN})` +
+    "|" +
+    `(?<![\\w$])(?<localHostModuleId>\\d+)\\(${IDENTIFIER_PATTERN},` +
+    `(?<localHostExports>${IDENTIFIER_PATTERN}),(?<localHostRequire>${IDENTIFIER_PATTERN})\\)` +
+    '\\{"use strict";(?:var [^{}]{0,1200}?;)?' +
+    "\\k<localHostRequire>\\.d\\(\\k<localHostExports>,\\{\\},\\{" +
+    `(?<localHostExport>${IDENTIFIER_PATTERN}):class` +
+    ")" +
+    "\\{runsInsideWsl;processOwner;" +
+    `workspaceRoot=new ${IDENTIFIER_PATTERN}(?:\\.${IDENTIFIER_PATTERN})?\\(this\\);` +
     'hostConfig=\\{id:"local",display_name:"Local",kind:"local"\\};' +
     'id="local";isLocal=!0;',
   "gu",
@@ -153,17 +167,21 @@ const CURRENT_PARCEL_EXTERNAL = new RegExp(
 );
 const CURRENT_GIT_ROUTE_PREFIX_PATTERN =
   'case"git":\\{let ' +
-  `(?<ignoreSource>${IDENTIFIER_PATTERN})=${IDENTIFIER_PATTERN}\\(\\),` +
+  `(?<ignoreSource>${IDENTIFIER_PATTERN})=\\(0,${IDENTIFIER_PATTERN}\\.${IDENTIFIER_PATTERN}\\)\\(\\),` +
   `(?<localHost>${IDENTIFIER_PATTERN})=new ` +
-  `(?<localHostClass>${IDENTIFIER_PATTERN})\\(\\k<ignoreSource>,[\\s\\S]{0,600}?\\);` +
+  `(?<localHostNamespace>${IDENTIFIER_PATTERN})\\.(?<localHostNamespaceExport>${IDENTIFIER_PATTERN})` +
+  `\\(\\k<ignoreSource>,[\\s\\S]{0,600}?\\);` +
   // The current package exposes the ignore sources lazily and opts the repo
   // watcher into ignored-directory pruning; the Git ignore environment reader
   // is inlined by the current minifier.
   "return\\{git:\\{getWatchIgnoreSources:\\k<ignoreSource>\\?void 0:\\(\\)=>\\(\\{" +
-  `getEnvironment:async\\(\\)=>[\\s\\S]{1,2000}?,getWatchTargets:${IDENTIFIER_PATTERN},` +
+  `getEnvironment:async\\(\\)=>[\\s\\S]{1,2000}?,` +
+  `getWatchTargets:${IDENTIFIER_PATTERN}\\.${IDENTIFIER_PATTERN},` +
   'pruneIgnoredDirectories:"darwin"===process\\.platform\\?"observed":"all"\\}\\),' +
   `createExecutionHost:(?<executionConfig>${IDENTIFIER_PATTERN})=>\\{` +
-  `if\\(\\k<executionConfig>\\.id===\\k<localHost>\\.id&&!${IDENTIFIER_PATTERN}\\(\\k<executionConfig>\\)\\)` +
+  // The remote-host predicate is an rspack interop call such as `(0,tQ.rsL)(e)`.
+  `if\\(\\k<executionConfig>\\.id===\\k<localHost>\\.id&&` +
+  `!\\(0,${IDENTIFIER_PATTERN}\\.${IDENTIFIER_PATTERN}\\)\\(\\k<executionConfig>\\)\\)` +
   "return \\k<localHost>;if\\(null==" +
   `(?<mainConnection>${IDENTIFIER_PATTERN})\\)throw Error\\(` +
   '"Git hosts require a main RPC connection"' +
@@ -1567,19 +1585,49 @@ function completedLocalFileWatchMethod(settings) {
   );
 }
 
+function localHostIdentity(groups) {
+  if (groups?.localHostClass != null) return `class ${groups.localHostClass}`;
+  if (groups?.localHostModuleId != null && groups?.localHostExport != null) {
+    return `module ${groups.localHostModuleId} export ${groups.localHostExport}`;
+  }
+  return null;
+}
+
 function currentLocalHostClassForMethod(source, classMatches, methodMatches) {
   if (classMatches.length !== 1 || methodMatches.length !== 1) return null;
   const [classMatch] = classMatches;
   const [methodMatch] = methodMatches;
-  const classOpen =
-    classMatch.index + `class ${classMatch.groups?.localHostClass ?? ""}`.length;
+  const classOpen = classMatch.index + classMatch[0].indexOf("{runsInsideWsl;");
   if (source[classOpen] !== "{") return null;
   const classClose = findMatchingBrace(source, classOpen);
   return classClose >= 0 &&
     methodMatch.index > classOpen &&
     methodMatch.index < classClose
-    ? classMatch.groups?.localHostClass ?? null
+    ? localHostIdentity(classMatch.groups)
     : null;
+}
+
+// The worker route constructs the local host as `new <namespace>.<export>(`.
+// Resolve the namespace through its nearest preceding rspack require binding
+// (`<namespace>=r(<moduleId>)`) so the route only correlates with the host
+// class exported by that exact module. Any other nearest binding fails closed.
+function routeLocalHostIdentity(source, route) {
+  const namespace = route.groups?.localHostNamespace;
+  const exportName = route.groups?.localHostNamespaceExport;
+  if (namespace == null || exportName == null) return null;
+  const binding = new RegExp(`(?<![\\w$.])${escapeRegExp(namespace)}=(?!=)`, "gu");
+  let nearest = null;
+  for (const match of source.slice(0, route.index).matchAll(binding)) nearest = match;
+  if (nearest == null) return null;
+  const moduleRequire = new RegExp(
+    `${IDENTIFIER_PATTERN}\\((?<moduleId>\\d+)\\)[,;]`,
+    "yu",
+  );
+  moduleRequire.lastIndex = nearest.index + nearest[0].length;
+  const bound = moduleRequire.exec(source);
+  return bound == null
+    ? null
+    : localHostIdentity({ localHostModuleId: bound.groups.moduleId, localHostExport: exportName });
 }
 
 function classifyCurrentBundle(bundlePath, source, settings = normalizedSettings()) {
@@ -1611,12 +1659,12 @@ function classifyCurrentBundle(bundlePath, source, settings = normalizedSettings
     parcelHelperMatches.some((helper) =>
       helper.groups?.helperName === route.groups?.routeHelper &&
       route.groups?.metadataHelper === route.groups?.routeHelper &&
-      route.groups?.localHostClass === localHostClass
+      routeLocalHostIdentity(source, route) === localHostClass
     )
   ).length;
   const correlatedCompletedRouteCount = completedRouteMatches.filter(
     (route) =>
-      route.groups?.localHostClass === localHostClass &&
+      routeLocalHostIdentity(source, route) === localHostClass &&
       route.groups?.metadataHelper === route.groups?.routeHelper &&
       parcelHelperMatches.some(
         (helper) => helper.groups?.helperName === route.groups?.routeHelper,
