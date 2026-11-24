@@ -110,11 +110,6 @@ function resumeHarness(source, trustedServicesKey) {
   const executable = only(buildSource, new RegExp(`command:${packageRoot[2]}\\.env\\[${packageRoot[3]}\\.(${IDENT})\\]`, "g"));
   const files = [null, oneAlias(buildSource, new RegExp(`\\(0,(${IDENT})\\.readFileSync\\)\\(new URL`, "g"))];
   const fileUrls = [null, oneAlias(buildSource, new RegExp(`\\(0,(${IDENT})\\.pathToFileURL\\)`, "g"))];
-  // Current builders append the confirmation-policy key to a module-local
-  // untrusted env allowlist key; older builders have none.
-  const allowlists = [...buildSource.matchAll(new RegExp(
-    `\\[(${IDENT})\\]:\\[${IDENT}\\?\\.env\\[\\1\\],${IDENT}\\]\\.filter\\(Boolean\\)\\.join\\(","\\)`, "g"))];
-  assert(allowlists.length <= 1, "Expected at most one untrusted env allowlist");
   const platforms = only(buildSource, new RegExp(`(${IDENT})\\[${IDENT}\\];if\\(!${IDENT}\\)throw Error\\(\`unsupported cua_repl platform`, "g"));
   assert.equal(services[1], packageRoot[3]);
   assert.equal(services[1], call[2]);
@@ -152,7 +147,7 @@ function resumeHarness(source, trustedServicesKey) {
     [env[3]]: "browserIdentity",
     [fallback[1]]: { "mcp_servers.cua_repl": { enabled: false } },
     [cleanup[1]]: () => {},
-    ...(allowlists.length === 1 ? { [allowlists[0][1]]: "NODE_REPL_UNTRUSTED_ENV_ALLOWLIST" } : {}),
+    r8: "NODE_REPL_ENV_DELETE",
     URL,
     require: name => {
       assert.equal(name, "node:path");
@@ -187,7 +182,10 @@ test("official per-thread CUA overrides carry the trusted root when resuming cha
   assert.notEqual(patched, source);
   assert.equal(applyUnifiedComputerUsePatch(patched), patched);
   assert.doesNotThrow(() => new vm.Script(patched));
-  const builderStart = patched.search(new RegExp(`function ${IDENT}\\(\\{browserBackends:${IDENT},deferTools:`));
+  const builderStart = patched.search(new RegExp(
+    `function ${IDENT}\\(\\{browserBackends:${IDENT},deferTools:${IDENT},` +
+    `(?:omitCuaConfirmationPolicyBySku:${IDENT},)?surfaces:`,
+  ));
   const builderServices = only(owner(patched, builderStart),
     new RegExp(`\\[${IDENT}\\.(${IDENT})\\]:JSON\\.stringify\\(${IDENT}\\)`, "g"));
   const trustedServicesKey = trustedServicesConstant(chunks, builderServices[1]);

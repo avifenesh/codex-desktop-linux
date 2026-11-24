@@ -146,16 +146,6 @@ async function codexLinuxStartMinimizedTrayReady(setup, isReady, timeoutMs = 300
 // Seven upstream references: both startup window creations, both reveal
 // decisions, the renderer mode gate, and both startup-progress windows.
 const EXPECTED_LAUNCH_PARTS = 8;
-// Since 26.1117: the renderer mode gate, both reveal decisions, the content-ready
-// attribution and the second window creation; the first window always starts
-// in the background behind a startup screen.
-const EXPECTED_STARTUP_SCREEN_LAUNCH_PARTS = 6;
-
-function launchCounts(first) {
-  return first?.reveal
-    ? { parts: EXPECTED_STARTUP_SCREEN_LAUNCH_PARTS, background: 2, shouldShow: 1 }
-    : { parts: EXPECTED_LAUNCH_PARTS, background: 3, shouldShow: 3 };
-}
 
 function unique(source, pattern) {
   const matches = [...source.matchAll(pattern)];
@@ -176,38 +166,7 @@ function backgroundContract(source, first) {
 
 function firstWindowContract(source, background) {
   const bg = escapeRegExp(background);
-  const head = `let (${ID})=${ID}\\.deepLinks\\.isWakeOnlyLaunch\\(\\)&&!${ID}\\?null:await (${ID})\\.ensureWindow\\(`;
-  const visible = `,${ID}=null==\\1\\?null:\\2\\.windowManager\\.getPersistenceWindowId\\(\\1\\);\\1\\?\\.once\\("show",\\(\\)=>\\{(${ID})\\.handleInitialWindowVisible\\(\\)\\}\\)`;
-  const legacy = unique(source, new RegExp(`${head}\\{background:${bg}\\}\\)${visible},null==\\1\\|\\|${bg}\\|\\|(${ID})\\(\\1,!(${ID})\\)`, "g"));
-  if (legacy) return legacy;
-  // Since 26.1117 the first window always opens hidden behind a startup screen
-  // and a reveal callback, also the interactive-launch hook, shows it once ready.
-  const current = unique(source, new RegExp(`${head}\\{background:!0,startupScreen:!0\\}\\)${visible};let (${ID})=\\((${ID})=!0\\)=>\\{null==\\1\\|\\|\\1\\.isDestroyed\\(\\)\\|\\|\\2\\.windowManager\\.whenReadyToShow\\(\\1,\\(\\)=>(${ID})\\(\\1,\\5\\)\\)\\};${bg}\\|\\|\\4\\(!(${ID})\\)`, "g"));
-  if (!current) return null;
-  const result = [current[0], current[1], current[2], current[3], current[6], current[7]];
-  result.index = current.index;
-  result.reveal = current[4];
-  return result;
-}
-
-// Second-instance activation; since 26.1117 it no longer hides the hotkey window first.
-function activationPattern(services, prefix = "") {
-  const svc = escapeRegExp(services);
-  return new RegExp(`(${ID})=async\\((${ID}),(${ID})\\)=>\\{${prefix}try\\{(?:${svc}\\.hotkeyWindowLifecycleManager\\.hide\\(\\)|let ${ID}=${svc}\\.getPrimaryWindow\\(\\)\\?\\?await )`, "g");
-}
-
-// Tray activation; since 26.1117 its readiness guard is no longer an inner
-// async function and it does not hide the hotkey window. Group 4 or 5 is the
-// host-ready flag.
-function trayActivationPattern(services, prefix = "", guard = "") {
-  const svc = escapeRegExp(services);
-  return new RegExp(`(${ID})=async\\((${ID}),(${ID})\\)=>\\{${prefix}(?:let ${ID}=await \\(async\\(${ID},${ID}\\)=>\\{if\\(!(${ID})${guard}\\)return null;${svc}\\.hotkeyWindowLifecycleManager\\.hide\\(\\)|if\\(!(${ID})${guard}\\)return null;let ${ID}=${svc}\\.getPrimaryWindow\\(\\),)`, "g");
-}
-
-function interactiveSource(owner, first, clearHidden) {
-  return first.reveal
-    ? `${owner}.onInteractiveLaunch=()=>{${clearHidden}${first.reveal}()},`
-    : `${owner}.onInteractiveLaunch=()=>{${clearHidden}null==${first[1]}||${first[1]}.isDestroyed()||${first[4]}(${first[1]}),`;
+  return unique(source, new RegExp(`let (${ID})=${ID}\\.deepLinks\\.isWakeOnlyLaunch\\(\\)&&!${ID}\\?null:await (${ID})\\.ensureWindow\\(\\{background:${bg}\\}\\),${ID}=null==\\1\\?null:\\2\\.windowManager\\.getPersistenceWindowId\\(\\1\\);\\1\\?\\.once\\("show",\\(\\)=>\\{(${ID})\\.handleInitialWindowVisible\\(\\)\\}\\),null==\\1\\|\\|${bg}\\|\\|(${ID})\\(\\1,!(${ID})\\)`, "g"));
 }
 
 // The startup window-services call passes upstream's tray readiness predicate;
@@ -244,9 +203,8 @@ function hasCompleteMainPatch(source, state, startup) {
   const traySetup = unique(source, new RegExp(`let codexLinuxStartMinimizedTraySetup=\\((${ID})\\|\\|"linux"===process\\.platform\\)\\?(${ID})\\(\\):null;`, "g"));
   if (!first || !windowMode || !trayReady || !traySetup) return false;
   const clearHidden = `codexLinuxStartMinimized=!1;${first[2]}.windowManager.codexLinuxStartMinimized=!1;`;
-  const activations = unique(source, activationPattern(first[2], escapeRegExp(clearHidden)));
-  const trayActivation = unique(source, trayActivationPattern(first[2], escapeRegExp(clearHidden),
-    `&&\\(!codexLinuxStartMinimizedRequested\\|\\|${escapeRegExp(first[2])}\\.getPrimaryWindow\\(\\)==null\\)`));
+  const activations = unique(source, new RegExp(`(${ID})=async\\((${ID}),(${ID})\\)=>\\{${escapeRegExp(clearHidden)}try\\{${escapeRegExp(first[2])}\\.hotkeyWindowLifecycleManager\\.hide\\(\\)`, "g"));
+  const trayActivation = unique(source, new RegExp(`(${ID})=async\\((${ID}),(${ID})\\)=>\\{${escapeRegExp(clearHidden)}let ${ID}=await \\(async\\(${ID},${ID}\\)=>\\{if\\(!(${ID})&&\\(!codexLinuxStartMinimizedRequested\\|\\|${escapeRegExp(first[2])}\\.getPrimaryWindow\\(\\)==null\\)\\)return null;${escapeRegExp(first[2])}\\.hotkeyWindowLifecycleManager\\.hide\\(\\)`, "g"));
   if (!activations || !trayActivation || !unique(source, new RegExp(`if\\(${ID}\\.deepLinks\\.queueProcessArgs\\(${ID}\\)\\)\\{\\(${ID}\\|\\|codexLinuxStartMinimizedRequested\\)&&${escapeRegExp(activations[1])}\\(\\);return\\}`, "g"))) return false;
   return [
     codexLinuxStartMinimizedRoute.toString(),
@@ -256,9 +214,46 @@ function hasCompleteMainPatch(source, state, startup) {
     state[0] + preferenceDeclaration(state[1]),
     trayReadinessStatement(first[2], trayReady[1]) + first[0],
     windowMode[0] + hiddenWindowModeBody(...windowMode.slice(1, 4)),
-    interactiveSource(startup[1], first, clearHidden),
+    `${startup[1]}.onInteractiveLaunch=()=>{${clearHidden}null==${first[1]}||${first[1]}.isDestroyed()||${first[4]}(${first[1]}),`,
   ].every(exactlyOnce) && source.split(clearHidden).length === 4 &&
-    source.split(launchBackground).length === launchCounts(first).parts;
+    source.split(launchBackground).length === EXPECTED_LAUNCH_PARTS;
+}
+
+function applyCurrentHiddenStartupPatch(source, installFetchRoute, state, startup) {
+  const windowCreation = unique(source, new RegExp(
+    `let (${ID})=${ID}\\.deepLinks\\.isWakeOnlyLaunch\\(\\)&&!${ID}\\?null:await (${ID})\\.ensureWindow\\(\\{background:!0,startupScreen:!0\\}\\),` +
+      `${ID}=null==\\1\\?null:\\2\\.windowManager\\.getPersistenceWindowId\\(\\1\\);`,
+    "g",
+  ));
+  const owner = startup?.[1];
+  const reveal = owner && unique(source, new RegExp(
+    `${escapeRegExp(owner)}\\.isBackgroundLaunch\\|\\|(${ID})\\(!(${ID})\\),${escapeRegExp(owner)}\\.onInteractiveLaunch=\\1`,
+    "g",
+  ));
+  const trayReady = trayReadyContract(source, state?.index ?? 0);
+  const traySetup = unique(source, new RegExp(`;\\((${ID})\\|\\|"linux"===process\\.platform\\)&&(${ID})\\(\\);`, "g"));
+  const windowMode = windowModeContract(source);
+  const activate = unique(source, new RegExp(`${ID}\\.app\\.on\\("activate",\\(\\)=>\\{if\\(!${ID}\\)\\{`, "g"));
+  if (!state || !startup || !windowCreation || !reveal || !trayReady || !traySetup || !windowMode || !activate) {
+    return null;
+  }
+  const services = windowCreation[2];
+  const clearHidden = `codexLinuxStartMinimized=!1;${services}.windowManager.codexLinuxStartMinimized=!1;`;
+  let patched = source.replace(state[0], state[0] + preferenceDeclaration(state[1]));
+  patched = patched.replace(traySetup[0],
+    `;let codexLinuxStartMinimizedTraySetup=(${traySetup[1]}||"linux"===process.platform)?${traySetup[2]}():null;`);
+  const readiness = `if(codexLinuxStartMinimized){let ready=await ${MAIN_MARKER}(codexLinuxStartMinimizedTraySetup,${trayReady[1]});` +
+    `console.info(\`[start-minimized-to-tray] tray readiness\`,{ready});codexLinuxStartMinimized=codexLinuxStartMinimized&&ready}` +
+    `${services}.windowManager.codexLinuxStartMinimized=codexLinuxStartMinimized;`;
+  patched = patched.replace(reveal[0], readiness +
+    `(${owner}.isBackgroundLaunch||codexLinuxStartMinimized)||${reveal[1]}(!${reveal[2]}),` +
+    `${owner}.onInteractiveLaunch=()=>{${clearHidden}${reveal[1]}()}`);
+  patched = patched.replace(startup[0], `shouldShowPrimaryWindow:()=>!(${owner}.isBackgroundLaunch||codexLinuxStartMinimized)`);
+  patched = patched.replace(windowMode[0], windowMode[0] + hiddenWindowModeBody(...windowMode.slice(1, 4)));
+  patched = patched.replace(activate[0], activate[0].replace("=>{", `=>{${clearHidden}`));
+  const helpers = `${codexLinuxStartMinimizedRoute.toString()}\n${codexLinuxStartMinimizedAutostart.toString()}\n` +
+    `${codexLinuxStartMinimizedPreference.toString()}\n${codexLinuxStartMinimizedTrayReady.toString()}\n`;
+  return installFetchRoute(helpers + patched);
 }
 
 function applyMainPatch(source) {
@@ -275,7 +270,20 @@ function applyMainPatch(source) {
     : `${owner}.isBackgroundLaunch`;
   const first = firstWindowContract(source, launchBackground);
   const background = backgroundContract(source, first);
+  if (first == null && !source.includes(`function ${MAIN_MARKER}(`)) {
+    const current = applyCurrentHiddenStartupPatch(source, installFetchRoute, state, startup);
+    if (current != null) return current;
+  }
   if (source.includes(`function ${MAIN_MARKER}(`)) {
+    if (source.includes(".deepLinks.isWakeOnlyLaunch()") &&
+        source.includes(".ensureWindow({background:!0,startupScreen:!0})") &&
+        source.includes(".onInteractiveLaunch=()=>{codexLinuxStartMinimized=!1;") &&
+        source.includes(".windowManager.codexLinuxStartMinimized=codexLinuxStartMinimized;") &&
+        source.includes("shouldShowPrimaryWindow:()=>!(") &&
+        source.includes("this.codexLinuxStartMinimizedWindowMode={") &&
+        source.split(ROUTE_MARKER).length === 2) {
+      return source;
+    }
     if (!background || !state || !startup || !hasCompleteMainPatch(source, state, startup) ||
         source.split(ROUTE_MARKER).length !== 2) {
       console.warn("WARN: Start minimized to tray patched startup contract missing or ambiguous");
@@ -298,9 +306,9 @@ function applyMainPatch(source) {
   if (!background || !state || !startup || !trayReady || !traySetup || !first || !last || !maximize || !windowMode ||
       first[4] !== background[2] || first[5] !== background[1] ||
       last[2] !== first[1] || last[3] !== first[4] || last[4] !== first[5] ||
-      source.split(launchBackground).length !== launchCounts(first).parts ||
-      source.split(`background:${launchBackground}`).length !== launchCounts(first).background ||
-      source.split(`shouldShow:()=>!${launchBackground}`).length !== launchCounts(first).shouldShow) {
+      source.split(launchBackground).length !== EXPECTED_LAUNCH_PARTS ||
+      source.split(`background:${launchBackground}`).length !== 3 ||
+      source.split(`shouldShow:()=>!${launchBackground}`).length !== 3) {
     console.warn("WARN: Start minimized to tray startup contract missing or ambiguous");
     return source;
   }
@@ -314,13 +322,10 @@ function applyMainPatch(source) {
     console.warn("WARN: Start minimized to tray window mode contract missing or ambiguous");
     return source;
   }
-  const activations = unique(source, activationPattern(first[2]));
-  const trayActivation = unique(source, trayActivationPattern(first[2]));
-  const trayReadyFlag = trayActivation?.[4] ?? trayActivation?.[5];
+  const activations = unique(source, new RegExp(`(${ID})=async\\((${ID}),(${ID})\\)=>\\{try\\{${first[2]}\\.hotkeyWindowLifecycleManager\\.hide\\(\\)`, "g"));
+  const trayActivation = unique(source, new RegExp(`(${ID})=async\\((${ID}),(${ID})\\)=>\\{let ${ID}=await \\(async\\(${ID},${ID}\\)=>\\{if\\(!(${ID})\\)return null;${first[2]}\\.hotkeyWindowLifecycleManager\\.hide\\(\\)`, "g"));
   const queuedActivation = unique(source, new RegExp(`if\\(${ID}\\.deepLinks\\.queueProcessArgs\\(${ID}\\)\\)\\{(${ID})&&${activations?.[1] ?? "__missing"}\\(\\);return\\}`, "g"));
-  const interactive = first.reveal
-    ? unique(source, new RegExp(`${escapeRegExp(owner)}\\.onInteractiveLaunch=${escapeRegExp(first.reveal)},`, "g"))
-    : unique(source, new RegExp(`${escapeRegExp(owner)}\\.onInteractiveLaunch=\\(\\)=>\\{null==${first[1]}\\|\\|${first[1]}\\.isDestroyed\\(\\)\\|\\|${first[4]}\\(${first[1]}\\),`, "g"));
+  const interactive = unique(source, new RegExp(`${escapeRegExp(owner)}\\.onInteractiveLaunch=\\(\\)=>\\{null==${first[1]}\\|\\|${first[1]}\\.isDestroyed\\(\\)\\|\\|${first[4]}\\(${first[1]}\\),`, "g"));
   if (!activations || !trayActivation || !queuedActivation || !interactive) {
     console.warn("WARN: Start minimized to tray activation contract missing or ambiguous");
     return source;
@@ -345,12 +350,10 @@ function applyMainPatch(source) {
   patched = patched.replace(activations[0], activations[0].replace("=>{", `=>{${clearHidden}`));
   patched = patched.replace(trayActivation[0], trayActivation[0]
     .replace("=>{", `=>{${clearHidden}`)
-    .replace(`if(!${trayReadyFlag})`, `if(!${trayReadyFlag}&&(!codexLinuxStartMinimizedRequested||${first[2]}.getPrimaryWindow()==null))`));
+    .replace(`if(!${trayActivation[4]})`, `if(!${trayActivation[4]}&&(!codexLinuxStartMinimizedRequested||${first[2]}.getPrimaryWindow()==null))`));
   patched = patched.replace(queuedActivation[0], queuedActivation[0]
     .replace(`${queuedActivation[1]}&&`, `(${queuedActivation[1]}||codexLinuxStartMinimizedRequested)&&`));
-  patched = patched.replace(interactive[0], first.reveal
-    ? interactiveSource(owner, first, clearHidden)
-    : interactive[0].replace("=>{", `=>{${clearHidden}`));
+  patched = patched.replace(interactive[0], interactive[0].replace("=>{", `=>{${clearHidden}`));
   // rspack chunks are CommonJS files; these helpers become chunk-scoped
   // declarations visible to the startup module factory below them.
   return installFetchRoute(`${codexLinuxStartMinimizedRoute.toString()}\n${codexLinuxStartMinimizedAutostart.toString()}\n${codexLinuxStartMinimizedPreference.toString()}\n${codexLinuxStartMinimizedTrayReady.toString()}\n${patched}`);
@@ -370,7 +373,7 @@ function webpackModuleFactories(source) {
   const markerIndex = source.indexOf(marker);
   if (markerIndex === -1 || source.indexOf(marker, markerIndex + 1) !== -1) return null;
   const factories = [];
-  const head = new RegExp(`(?:"[^"\\\\]+"|${ID})\\((${ID})(?:,(${ID}))?(?:,(${ID}))?\\)\\{`, "y");
+  const head = new RegExp(`(?:"[^"\\\\]+"|${ID})(?:(?:\\((${ID})(?:,(${ID}))?(?:,(${ID}))?\\))|(?::(\\()?function\\((${ID})(?:,(${ID}))?(?:,(${ID}))?\\)))\\{`, "y");
   let index = markerIndex + marker.length;
   while (source[index] !== "}") {
     head.lastIndex = index;
@@ -379,8 +382,9 @@ function webpackModuleFactories(source) {
     const open = index + match[0].length - 1;
     const end = findMatchingBrace(source, open);
     if (end === -1) return null;
-    factories.push({ start: index, open, end, requireName: match[3] ?? null });
+    factories.push({ start: index, open, end, requireName: match[3] ?? match[7] ?? null });
     index = end + 1;
+    if (match[4] != null && source[index] === ")") index += 1;
     if (source[index] === ",") index += 1;
   }
   return factories;
@@ -394,15 +398,14 @@ function factoryImports(factory, source, name) {
 }
 
 function settingsContract(source) {
-  const owner = unique(source, new RegExp(`function (${ID})\\((${ID})\\)\\{let [^;]*?\\{platform:(${ID})\\}=\\(0,(${MEMBER})\\)\\(\\),(${ID})=\\(0,${MEMBER}\\)\\(${MEMBER}\\.macMenuBarEnabled\\);if\\("macOS"!==\\3\\)return null;`, "g"));
+  const owner = unique(source, new RegExp(`function (${ID})\\((${ID})\\)\\{let [^;]*?\\{platform:(${ID})\\}=\\(0,(${MEMBER})\\)\\(\\),.{0,200}?(${ID})=\\(0,${MEMBER}\\)\\(${MEMBER}\\.macMenuBarEnabled\\);if\\("macOS"!==\\3\\)return null;`, "g"));
   const factories = owner && webpackModuleFactories(source);
   const factory = factories?.find(({ open, end }) => open < owner.index && end > owner.index);
   if (!factory) return null;
   const ownerEnd = findMatchingBrace(source, source.indexOf("{", owner.index));
   if (ownerEnd === -1 || !/[;{}]/.test(source[owner.index - 1])) return null;
   const body = source.slice(owner.index, ownerEnd + 1);
-  // Since 26.1117 rows take a settings-search entry whose title is the label.
-  const row = unique(body, new RegExp(`\\(0,(${ID})\\.jsx\\)\\((${MEMBER}),\\{(?:label:${ID}|entry:(${MEMBER})),description:${ID},control:${ID}\\}\\)`, "g"));
+  const row = unique(body, new RegExp(`\\(0,(${ID})\\.jsx\\)\\((${MEMBER}),\\{entry:${MEMBER},description:${ID},control:${ID}\\}\\)`, "g"));
   const toggle = unique(body, new RegExp(`\\(0,${ID}\\.jsx\\)\\((${MEMBER}),\\{checked:${ID},onChange:${ID},ariaLabel:${ID}\\}\\)`, "g"));
   const intlUse = unique(body, new RegExp(`(${ID})\\.formatMessage\\(\\{id:"settings\\.general\\.macMenuBar\\.ariaLabel"`, "g"));
   const intl = intlUse && unique(body, new RegExp(`(?<![\\w$.])${escapeRegExp(intlUse[1])}=\\(0,(${MEMBER})\\)\\(\\)`, "g"));
@@ -418,7 +421,7 @@ function settingsContract(source) {
       !bindings.every((name) => factoryImports(factory, source, name))) {
     return null;
   }
-  return { ownerEnd, factoryEnd: factory.end, renders, row: row[2], rowEntry: row[3] != null, toggle: toggle[1], react, platformHook: owner[4], jsx, intlHook: intl[1] };
+  return { ownerEnd, factoryEnd: factory.end, renders, row: row[2], toggle: toggle[1], react, platformHook: owner[4], jsx, intlHook: intl[1] };
 }
 
 // Self-contained webview client for this feature's main-process route. It
@@ -427,14 +430,14 @@ function settingsPostSource() {
   return `function ${POST_FUNCTION}(codexLinuxBody){let codexLinuxState=globalThis.codexLinuxStartMinimizedRequests;if(codexLinuxState==null){codexLinuxState={sequence:0,pending:new Map};globalThis.codexLinuxStartMinimizedRequests=codexLinuxState;window.addEventListener("message",codexLinuxEvent=>{let codexLinuxData=codexLinuxEvent?.data;if(codexLinuxData==null||"object"!=typeof codexLinuxData||"fetch-response"!==codexLinuxData.type)return;let codexLinuxEntry=codexLinuxState.pending.get(codexLinuxData.requestId);if(codexLinuxEntry==null)return;codexLinuxState.pending.delete(codexLinuxData.requestId);clearTimeout(codexLinuxEntry.timer);if("success"===codexLinuxData.responseType){let codexLinuxParsed=null;try{codexLinuxParsed=codexLinuxData.bodyJsonString?JSON.parse(codexLinuxData.bodyJsonString):null}catch{}codexLinuxEntry.resolve(codexLinuxParsed)}else codexLinuxEntry.reject(Error(codexLinuxData.error||"Could not reach the startup preference service"))})}let codexLinuxRequestId="codex-linux-start-minimized-"+Date.now()+"-"+ ++codexLinuxState.sequence;return new Promise((codexLinuxResolve,codexLinuxReject)=>{let codexLinuxTimer=setTimeout(()=>{codexLinuxState.pending.delete(codexLinuxRequestId);codexLinuxReject(Error("Timed out reading the startup preference"))},1e4);codexLinuxState.pending.set(codexLinuxRequestId,{resolve:codexLinuxResolve,reject:codexLinuxReject,timer:codexLinuxTimer});let codexLinuxPayload={type:"fetch",requestId:codexLinuxRequestId,method:"POST",url:${JSON.stringify(ROUTE_URL)},body:JSON.stringify(codexLinuxBody)},codexLinuxBridge=window.electronBridge,codexLinuxMessage=new CustomEvent("codex-message-from-view",{detail:codexLinuxPayload});if(codexLinuxBridge?.sendMessageFromView){codexLinuxMessage.__codexForwardedViaBridge=!0;codexLinuxBridge.sendMessageFromView(codexLinuxPayload).catch(()=>{})}window.dispatchEvent(codexLinuxMessage)})}`;
 }
 
-function settingComponent({ row, rowEntry = false, toggle, react, platformHook, jsx, intlHook }, bootOnly = false) {
+function settingComponent({ row, toggle, react, platformHook, jsx, intlHook }, bootOnly = false) {
   const key = bootOnly ? BOOT_ONLY_SETTINGS_KEY : SETTINGS_KEY;
   const marker = bootOnly ? BOOT_ONLY_UI_MARKER : UI_MARKER;
   const label = bootOnly ? "Start minimized to tray only on boot" : "Start minimized to tray";
   const description = bootOnly
     ? "Hide the main window only when started automatically at login. Manual launches open normally. Takes priority over Start minimized to tray; does not enable autostart."
     : "Start with the main window hidden in the system tray. Applies after quitting and restarting the app, unless the boot-only option is enabled.";
-  return `function ${marker}(){let{platform:codexLinuxPlatform}=(0,${platformHook})(),[codexLinuxEnabled,codexLinuxSetEnabled]=(0,${react}.useState)(!1),[codexLinuxPending,codexLinuxSetPending]=(0,${react}.useState)(!0),[codexLinuxError,codexLinuxSetError]=(0,${react}.useState)(null),codexLinuxIntl=(0,${intlHook})(),codexLinuxLabel=codexLinuxIntl.formatMessage({id:${JSON.stringify(LABEL_IDS[Number(bootOnly)])},defaultMessage:${JSON.stringify(label)}}),codexLinuxDescription=codexLinuxIntl.formatMessage({id:${JSON.stringify(DESCRIPTION_IDS[Number(bootOnly)])},defaultMessage:${JSON.stringify(description)}});(0,${react}.useEffect)(()=>{let codexLinuxAlive=!0;return ${POST_FUNCTION}({action:"get",key:${JSON.stringify(key)}}).then(codexLinuxResult=>{if(codexLinuxAlive)codexLinuxSetEnabled(codexLinuxResult?.value===!0)}).catch(codexLinuxProblem=>{if(codexLinuxAlive)codexLinuxSetError(String(codexLinuxProblem))}).finally(()=>{if(codexLinuxAlive)codexLinuxSetPending(!1)}),()=>{codexLinuxAlive=!1}},[]);if("linux"!==codexLinuxPlatform)return null;let codexLinuxChange=async codexLinuxValue=>{codexLinuxSetPending(!0);codexLinuxSetError(null);try{let codexLinuxResult=await ${POST_FUNCTION}({action:"set",key:${JSON.stringify(key)},value:codexLinuxValue===!0});if(codexLinuxResult?.success!==!0)throw Error("Could not save startup preference");codexLinuxSetEnabled(codexLinuxValue===!0)}catch(codexLinuxProblem){codexLinuxSetError(String(codexLinuxProblem))}finally{codexLinuxSetPending(!1)}};return(0,${jsx}.jsx)(${row},{${rowEntry ? "entry:{title:{localizedText:codexLinuxLabel}},anchored:!1" : "label:codexLinuxLabel"},description:codexLinuxError??codexLinuxDescription,control:(0,${jsx}.jsx)(${toggle},{checked:codexLinuxEnabled,disabled:codexLinuxPending,onChange:codexLinuxChange,ariaLabel:codexLinuxLabel})})}`;
+  return `function ${marker}(){let{platform:codexLinuxPlatform}=(0,${platformHook})(),[codexLinuxEnabled,codexLinuxSetEnabled]=(0,${react}.useState)(!1),[codexLinuxPending,codexLinuxSetPending]=(0,${react}.useState)(!0),[codexLinuxError,codexLinuxSetError]=(0,${react}.useState)(null),codexLinuxIntl=(0,${intlHook})(),codexLinuxLabel=codexLinuxIntl.formatMessage({id:${JSON.stringify(LABEL_IDS[Number(bootOnly)])},defaultMessage:${JSON.stringify(label)}}),codexLinuxDescription=codexLinuxIntl.formatMessage({id:${JSON.stringify(DESCRIPTION_IDS[Number(bootOnly)])},defaultMessage:${JSON.stringify(description)}});(0,${react}.useEffect)(()=>{let codexLinuxAlive=!0;return ${POST_FUNCTION}({action:"get",key:${JSON.stringify(key)}}).then(codexLinuxResult=>{if(codexLinuxAlive)codexLinuxSetEnabled(codexLinuxResult?.value===!0)}).catch(codexLinuxProblem=>{if(codexLinuxAlive)codexLinuxSetError(String(codexLinuxProblem))}).finally(()=>{if(codexLinuxAlive)codexLinuxSetPending(!1)}),()=>{codexLinuxAlive=!1}},[]);if("linux"!==codexLinuxPlatform)return null;let codexLinuxChange=async codexLinuxValue=>{codexLinuxSetPending(!0);codexLinuxSetError(null);try{let codexLinuxResult=await ${POST_FUNCTION}({action:"set",key:${JSON.stringify(key)},value:codexLinuxValue===!0});if(codexLinuxResult?.success!==!0)throw Error("Could not save startup preference");codexLinuxSetEnabled(codexLinuxValue===!0)}catch(codexLinuxProblem){codexLinuxSetError(String(codexLinuxProblem))}finally{codexLinuxSetPending(!1)}};return(0,${jsx}.jsx)(${row},{entry:{id:${JSON.stringify(key)},title:{localizedText:codexLinuxLabel}},anchored:!1,description:codexLinuxError??codexLinuxDescription,control:(0,${jsx}.jsx)(${toggle},{checked:codexLinuxEnabled,disabled:codexLinuxPending,onChange:codexLinuxChange,ariaLabel:codexLinuxLabel})})}`;
 }
 
 function escapeSingleQuotedJson(text) {
@@ -443,89 +446,61 @@ function escapeSingleQuotedJson(text) {
 
 // The locale loader maps "../locales/<locale>.json" to a numbered async chunk
 // and the module inside it; each catalog module is `e.exports=JSON.parse('...')`.
-// Since 26.1117 the module instead fetches two gzip JSON arrays from
-// webview/assets/locales: message keys shared by several locales, and the
-// locale's values in the same order. New messages are appended to both.
-const LOCALE_ENTRY = new RegExp(`"\\.\\./locales/([A-Za-z]{2}(?:-(?:[A-Za-z]{2,4}|\\d{3}))?)\\.json":function\\(\\)\\{return (${ID})\\.e\\((\\d+)\\)\\.then\\(\\2\\.(?:(t)\\.bind\\(\\2,"([^"\\\\]+)",\\d+\\)|bind\\(\\2,"([^"\\\\]+)"\\))\\)\\}`, "g");
-const LOCALE = "[A-Za-z]{2}(?:-(?:[A-Za-z]{2,4}|\\d{3}))?";
-const GZIP_CATALOG_FILES = new RegExp(`let\\[(${ID}),(${ID})\\]=await Promise\\.all\\(\\[(${ID})\\("assets/locales/(keys\\.([0-9a-f]+)\\.json\\.codex-gzip)"\\),\\3\\("assets/locales/((${LOCALE})\\.keys\\.\\5\\.[0-9a-f]+\\.json\\.codex-gzip)"\\)\\]\\);(${ID})\\.default=Object\\.fromEntries\\(\\1\\.map\\(\\((${ID}),(${ID})\\)=>\\[\\9,\\2\\[\\10\\]\\]\\)\\)`, "g");
-
-function readGzipJsonArray(file) {
-  let value;
-  try {
-    value = JSON.parse(zlib.gunzipSync(fs.readFileSync(file)).toString("utf8"));
-  } catch {
-    return null;
-  }
-  return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value : null;
-}
-
-function gzipCatalog(assetsDir, locale, source, moduleId) {
-  const id = escapeRegExp(moduleId);
-  const module = unique(source, new RegExp(`(?:"${id}"|(?<![\\w$."])${id})\\((${ID}),(${ID}),(${ID})\\)\\{\\3\\.a\\(\\1,async function\\(`, "g"));
-  const files = unique(source, GZIP_CATALOG_FILES);
-  if (!module || !files || files[7] !== locale || !source.includes('DecompressionStream("gzip")')) return null;
-  const keysFile = path.join(assetsDir, "locales", files[4]);
-  const valuesFile = path.join(assetsDir, "locales", files[6]);
-  const keys = readGzipJsonArray(keysFile);
-  const values = readGzipJsonArray(valuesFile);
-  if (!keys || !values || keys.length !== values.length || new Set(keys).size !== keys.length) return null;
-  return { keysFile, valuesFile, keys, values };
-}
-
 function labelCatalogPatches(extractedDir) {
   const assetsDir = path.join(extractedDir, "webview", "assets");
   const loaders = findWebviewAssetsContaining(extractedDir, LOCALE_LOADER_NEEDLES);
   if (loaders.length !== 1) throw Error("Start minimized to tray locale loader missing or ambiguous");
   const loader = fs.readFileSync(path.join(assetsDir, loaders[0]), "utf8");
-  const entries = [...loader.matchAll(LOCALE_ENTRY)]
-    .map(([, locale, , chunk, legacy, legacyModuleId, moduleId]) => ({ locale, chunk, gzip: legacy == null, moduleId: legacyModuleId ?? moduleId }));
-  if (entries.length === 0 || entries.length !== loader.split('"../locales/').length - 1 ||
-      entries.some(({ gzip }) => gzip !== entries[0].gzip)) {
+  const entries = [...loader.matchAll(new RegExp(`"\\.\\./locales/([A-Za-z]{2}(?:-(?:[A-Za-z]{2,4}|\\d{3}))?)\\.json":function\\(\\)\\{return (${ID})\\.e\\((\\d+)\\)\\.then\\(\\2\\.(?:t\\.)?bind\\(\\2,"([^"\\\\]+)"(?:,\\d+)?\\)\\)\\}`, "g"))]
+    .map(([, locale, , chunk, moduleId]) => ({ locale, chunk, moduleId }));
+  if (entries.length === 0 || entries.length !== loader.split('"../locales/').length - 1) {
     throw Error("Start minimized to tray locale loader contract missing or ambiguous");
   }
   const asyncNames = fs.readdirSync(path.join(assetsDir, "async"));
-  const ids = [...LABEL_IDS, ...DESCRIPTION_IDS];
   const patches = [];
-  const keyPatches = new Map();
-  for (const { locale, chunk, gzip, moduleId } of entries) {
+  const compressed = new Map();
+  for (const { locale, chunk, moduleId } of entries) {
     const files = asyncNames.filter((name) => name.startsWith(`${chunk}.`) && name.endsWith(".js"));
     if (files.length !== 1) throw Error(`Start minimized to tray ${locale} label catalog chunk missing or ambiguous`);
     const target = path.join(assetsDir, "async", files[0]);
     const source = fs.readFileSync(target, "utf8");
-    const catalogFiles = gzip ? gzipCatalog(assetsDir, locale, source, moduleId) : null;
-    if (gzip && !catalogFiles) throw Error(`Start minimized to tray ${locale} label catalog contract missing or ambiguous`);
-    if (gzip ? !catalogFiles.keys.includes(JSON.parse(MAC_MENU_BAR_LABEL)) : !source.includes(MAC_MENU_BAR_LABEL)) continue;
     const labels = LABEL_TRANSLATIONS[locale];
     if (!labels) throw Error(`Start minimized to tray label translations missing for ${locale}`);
     const descriptions = DESCRIPTION_TRANSLATIONS[locale];
     if (!descriptions) throw Error(`Start minimized to tray description translations missing for ${locale}`);
-    const messages = [...labels, ...descriptions];
-    if (gzip) {
-      const { keysFile, valuesFile, keys, values } = catalogFiles;
-      const indexes = ids.map((messageId) => keys.indexOf(messageId));
-      if (indexes.some((index) => index !== -1)) {
-        if (indexes.some((index, position) => index === -1 || values[index] !== messages[position])) {
-          throw Error(`Start minimized to tray ${locale} patched label catalog contract missing or ambiguous`);
-        }
+    const fetched = unique(source, /Promise\.all\(\[\w+\("(assets\/locales\/keys\.[^"\\]+\.json\.codex-gzip)"\),\w+\("(assets\/locales\/[^"\\]+\.json\.codex-gzip)"\)\]\)/g);
+    if (fetched) {
+      const [keysPath, valuesPath] = fetched.slice(1).map((name) => path.join(extractedDir, "webview", name));
+      let keys;
+      let values;
+      try {
+        keys = JSON.parse(zlib.gunzipSync(fs.readFileSync(keysPath)));
+        values = JSON.parse(zlib.gunzipSync(fs.readFileSync(valuesPath)));
+      } catch {
+        throw Error(`Start minimized to tray ${locale} compressed catalog missing or invalid`);
+      }
+      if (!Array.isArray(keys) || !Array.isArray(values) || keys.length !== values.length || !keys.includes(JSON.parse(MAC_MENU_BAR_LABEL))) {
+        throw Error(`Start minimized to tray ${locale} compressed catalog missing or ambiguous`);
+      }
+      const ids = [...LABEL_IDS, ...DESCRIPTION_IDS];
+      const messages = [...labels, ...descriptions];
+      const indexes = ids.map((id) => keys.indexOf(id));
+      if (indexes.some((index) => index >= 0) && indexes.some((index) => index < 0)) throw Error(`Start minimized to tray ${locale} compressed catalog is partially patched`);
+      if (indexes.every((index) => index >= 0)) {
+        if (indexes.some((index, message) => values[index] !== messages[message])) throw Error(`Start minimized to tray ${locale} compressed catalog is inconsistent`);
         continue;
       }
-      // Locales sharing a keys file share its order, so append to it once.
-      const sharedLength = keyPatches.get(keysFile);
-      if (sharedLength != null && sharedLength !== keys.length) {
-        throw Error(`Start minimized to tray ${locale} label catalog contract missing or ambiguous`);
-      }
-      if (sharedLength == null) {
-        keyPatches.set(keysFile, keys.length);
-        patches.push({ target: keysFile, source: zlib.gzipSync(JSON.stringify([...keys, ...ids])) });
-      }
-      patches.push({ target: valuesFile, source: zlib.gzipSync(JSON.stringify([...values, ...messages])) });
+      compressed.set(keysPath, compressed.get(keysPath) ?? [...keys, ...ids]);
+      compressed.set(valuesPath, [...values, ...messages]);
       continue;
     }
+    if (!source.includes(MAC_MENU_BAR_LABEL)) continue;
     const id = escapeRegExp(moduleId);
     const catalog = unique(source, new RegExp(`(?:"${id}"|(?<![\\w$."])${id})\\((${ID})\\)\\{\\1\\.exports=JSON\\.parse\\('\\{`, "g"));
     if (!catalog) throw Error(`Start minimized to tray ${locale} label catalog contract missing or ambiguous`);
     const open = catalog.index + catalog[0].length;
+    const ids = [...LABEL_IDS, ...DESCRIPTION_IDS];
+    const messages = [...labels, ...descriptions];
     const inserted = escapeSingleQuotedJson(
       ids.map((messageId, index) => `${JSON.stringify(messageId)}:${JSON.stringify(messages[index])},`).join(""),
     );
@@ -538,6 +513,7 @@ function labelCatalogPatches(extractedDir) {
     }
     patches.push({ target, source: source.slice(0, open) + inserted + source.slice(open) });
   }
+  for (const [target, value] of compressed) patches.push({ target, source: zlib.gzipSync(Buffer.from(JSON.stringify(value))) });
   return patches;
 }
 

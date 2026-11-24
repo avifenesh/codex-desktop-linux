@@ -165,30 +165,6 @@ test("remote-control UI feature patches are idempotent and fail soft", () => {
   }
 });
 
-// Signed 26.1117.31558 shape: the gate id is a module constant that the
-// config check reads as its fallback.
-const HOISTED_REMOTE_CONNECTIONS_SOURCE =
-  'let h="1042620455",p="4114442250",m=(0,r.un)(s.u,({get:e})=>{let t=e(i.Dc),{data:n}=e(o.I2,t);return f(n?.config,e(c.JW,p))});function f(e,t){if(!0===e?.["features.remote_connections"])return!0;let n=e?.features;return null==n||"object"!=typeof n||Array.isArray(n)?t:Object.getOwnPropertyDescriptor(n,"remote_connections")?.value===!0||t}' +
-  '(0,r.un)(s.u,({get:e})=>{let{data:t}=e(o.I2,e(i.Dc),{enabled:!1});return f(t?.config,e(d.P,p))}),n.d(t,{},{bc:m,i2:h});';
-
-test("remote connections visibility patches the hoisted gate constant", () => {
-  const patch = featurePatches.find((candidate) => candidate.id === "remote-connections-visibility");
-  const patched = patch.apply(HOISTED_REMOTE_CONNECTIONS_SOURCE, {});
-  assert.equal(patched.split("||navigator.userAgent.includes(`Linux`)").length - 1, 2);
-  assert.match(patched, /return f\(n\?\.config,\(e\(c\.JW,p\)\|\|navigator\.userAgent\.includes\(`Linux`\)\)\)/);
-  assert.equal(patch.apply(patched, {}), patched);
-  const atom = new Function("navigator", "c", `${patched.slice(patched.indexOf("function f("), patched.indexOf("(0,r.un)(s.u,({get:e})=>{let{data"))};return (get) => f({}, get(c.JW, "4114442250") || navigator.userAgent.includes(\`Linux\`))`);
-  assert.equal(atom({ userAgent: "Linux" }, { JW: "gate" })(() => false), true);
-  for (const drifted of [
-    HOISTED_REMOTE_CONNECTIONS_SOURCE.replaceAll("?.config,e(", "?.settings,e("),
-    HOISTED_REMOTE_CONNECTIONS_SOURCE.replace('p="4114442250"', 'p="4114442250",q="4114442250"'),
-  ]) {
-    const { value, warnings } = captureWarns(() => patch.apply(drifted, {}));
-    assert.equal(value, drifted);
-    assert.match(warnings.join("\n"), /Could not find remote connections Statsig gate/);
-  }
-});
-
 test("remote-control UI descriptors find rspack chunks by content", () => {
   for (const patch of featurePatches) {
     assert.equal(patch.pattern, undefined, patch.id);
@@ -314,4 +290,31 @@ test("signed webview chunks satisfy every remote-control UI contract", { skip: !
       assert.equal(patch.apply(patched, {}), patched, `${patch.id} ${name}`);
     }
   }
+});
+
+test("remote connections visibility accepts the resolver already gated by remote-mobile-control", () => {
+  const remoteMobile = require("../remote-mobile-control/patch.js");
+  const loadGate = (remoteMobile.descriptors ?? remoteMobile)
+    .find((patch) => patch.id === "linux-remote-control-load-gate");
+  const remoteConnectionsPatch = featurePatches.find((patch) => patch.id === "remote-connections-visibility");
+  const resolver =
+    'let m="1042620455",p="4114442250";function f(e,t){if(!0===e?.["features.remote_connections"])return!0;' +
+    'let n=e?.features;return null==n||"object"!=typeof n||Array.isArray(n)?t:' +
+    'Object.getOwnPropertyDescriptor(n,"remote_connections")?.value===!0||t}';
+  assert.ok(loadGate.order < remoteConnectionsPatch.order);
+  const { value: mobileGated, warnings: mobileWarnings } = captureWarns(() => loadGate.apply(resolver, {}));
+  assert.deepEqual(mobileWarnings, []);
+  assert.notEqual(mobileGated, resolver);
+  const { value: composed, warnings } = captureWarns(() => remoteConnectionsPatch.apply(mobileGated, {}));
+  assert.deepEqual(warnings, []);
+  assert.equal(composed, mobileGated);
+  const resolve = new Function("navigator", `${composed};return f`);
+  assert.equal(resolve({ userAgent: "X11; Linux x86_64" })({}, false), true);
+  assert.equal(resolve({ userAgent: "Macintosh" })({}, false), false);
+
+  const { value: duplicated, warnings: duplicateWarnings } = captureWarns(() =>
+    remoteConnectionsPatch.apply(mobileGated + mobileGated, {}),
+  );
+  assert.equal(duplicated, mobileGated + mobileGated);
+  assert.match(duplicateWarnings.join("\n"), /Could not find remote connections Statsig gate/);
 });

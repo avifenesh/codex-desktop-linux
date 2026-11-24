@@ -10,6 +10,8 @@ activity items in Codex local conversations. They stay visible when completed
 tool activity collapses and start expanded, including when reopening history.
 The native Thinking / Thought disclosure still supports manual folding.
 The transcript projection also keeps reasoning separate from tool groups.
+Completed summaries keep their full text, including a heading when that is the
+only content returned by the backend.
 
 When active, the feature requests `detailed` reasoning summaries through the existing
 turn-start option. Explicit `model_reasoning_summary` configuration and explicit
@@ -63,9 +65,9 @@ CODEX_SIGNED_EXTRACTED_APP=/path/to/extracted/app.asar \
   node --test linux-features/reasoning-visibility/test.js
 ```
 
-Five semantic ASAR contracts cover activity classification, collapsed-turn
-persistence, summary requests, the native disclosure, and the General setting
-with translations.
+Six semantic ASAR contracts cover activity classification, collapsed-turn
+persistence, transcript projection, summary requests, the native disclosure,
+and the General setting with translations.
 The official webview is an rspack build, so chunks are found by distinctive
 content, never by file name, chunk id, or module id. When rspack copies a module
 into several lazily loaded chunks, every copy is patched. The General setting

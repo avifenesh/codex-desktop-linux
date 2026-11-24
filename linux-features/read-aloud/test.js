@@ -1245,15 +1245,6 @@ test("assistant render patch atomically adds buttons to the current two-call top
   assert.equal(matchesAssistantRuntimeContract(patched), true);
 });
 
-test("assistant render patch accepts the signed 26.1117 calls without compactAttachment", () => {
-  const fixture = assistantRenderFixture();
-  const source = fixture.source.replaceAll(",compactAttachment:M", "");
-  const patched = twice(applyAssistantRenderPatch, source);
-  assert.equal((patched.match(/codex-linux-read-aloud-button/g) ?? []).length, 2);
-  assert.match(patched, /globalThis\.codexLinuxReadAloudClick\?\.\(n,w,p,e\.currentTarget\)/);
-  assert.equal(matchesAssistantRuntimeContract(patched), true);
-});
-
 test("assistant render patch ignores normalized assistant items without render props", () => {
   const source = "case`agentMessage`:{let s=e.status===`inProgress`&&d>=0&&t===d,l=s&&Spt(i.content);a.push({type:`assistant-message`,content:m,completed:!s,renderPlaceholderWhileStreaming:l});break}";
   const { result: patched, warnings } = captureWarnings(() => applyAssistantRenderPatch(source));
@@ -1507,16 +1498,6 @@ test("general settings patch mounts the read aloud section into the current Gene
   // Without the runtime the host element stays empty instead of throwing.
   const withoutRuntime = evaluateGeneralSettingsPage(patched, {});
   assert.doesNotThrow(() => withoutRuntime.props.children[1].props.ref({}));
-});
-
-test("general settings mount accepts the signed 26.1117 page overview", () => {
-  const source = generalSettingsFixture({ page: "s=(0,n.jsxs)(eG.P,{overview:o,title:t,children:[e,a]})" });
-  const patched = twice(applyGeneralSettingsPatch, source);
-  assert.notEqual(patched, source);
-  assert.ok(patched.includes('{overview:o,title:t,children:[e,(0,n.jsx)("div",{className:"codex-linux-read-aloud-settings-mount"'));
-  assert.equal(matchesGeneralSettingsPageContract(patched), true);
-  const drifted = generalSettingsFixture({ page: "s=(0,n.jsxs)(eG.P,{overview:o,subtitle:u,title:t,children:[e,a]})" });
-  assert.equal(matchesGeneralSettingsPageContract(drifted), false);
 });
 
 test("general settings mount composes with leading marked Linux page rows in either order", () => {

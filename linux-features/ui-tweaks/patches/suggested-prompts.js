@@ -7,8 +7,10 @@ const FEATURE_GATE_NEEDLE = `"${FEATURE_GATE_ID}"`;
 const FEATURE_SYNC_ASSET_NEEDLES = Object.freeze([FEATURE_GATE_NEEDLE, "electron-desktop-features-changed"]);
 const APP_PAGE_ASSET_NEEDLES = Object.freeze([FEATURE_GATE_NEEDLE, "generatedSuggestionsEnabled:"]);
 const WORK_PAGE_ASSET_NEEDLES = Object.freeze([FEATURE_GATE_NEEDLE, "generatedSuggestionsEnabled:", "mode:\"work\""]);
-// The General settings row module is selected by its row label message.
-const GENERAL_SETTINGS_ASSET_NEEDLES = Object.freeze([FEATURE_GATE_NEEDLE, "settings.agent.ambientSuggestions.rowLabel"]);
+const GENERAL_SETTINGS_ASSET_NEEDLES = Object.freeze([
+  'id:"settings.agent.ambientSuggestions.toggleLabel"',
+  'id:"settings.agent.ambientSuggestions.saveError"',
+]);
 const HOME_CONTENT_ASSET_NEEDLES = Object.freeze(["\"curated\"===", "shouldUseCuratedNewChatPageSuggestions:"]);
 const RUNTIME_MARKER = "codexLinuxUiTweaksSuggestedPromptsEnabled";
 const FEATURE_SYNC_MARKER = "codexLinuxUiTweaksSuggestedPromptsFeatureSync";
@@ -73,19 +75,6 @@ function settingsEligibilityPattern() {
 
 function patchedSettingsEligibilityPattern() {
   return /if\(!\((\(0,[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\))\(\{authMethod:([A-Za-z_$][\w$]*),email:([A-Za-z_$][\w$]*)\?\.email\?\?([A-Za-z_$][\w$]*),plan:([A-Za-z_$][\w$]*)\?\.plan\?\?([A-Za-z_$][\w$]*)\}\)\|\|function codexLinuxUiTweaksSuggestedPromptsSettingsEligible\(\)\{return!0\}\(\)\)\)return null;/gu;
-}
-
-// 26.1117 moved the General settings row eligibility into a derived atom whose
-// getter reads the rollout gate itself:
-// p=(0,i.i1)(l.u,(e,{get:t})=>{if(!t("search"===e?c.P:d.JW,"2425897452"))return!1;
-// let{authMethod:a,email:i,plan:n}=t(s.PO),{data:l}=t(r.yK,{enabled:...});
-// return(0,o.ML4)({authMethod:a,email:l?.email??i??null,plan:l?.plan??n})})
-function settingsAtomPattern() {
-  return /if\(!([A-Za-z_$][\w$]*)\(("search"===[A-Za-z_$][\w$]*\?[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*:[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*),"2425897452"\)\)return!1;let\{authMethod:([A-Za-z_$][\w$]*),email:([A-Za-z_$][\w$]*),plan:([A-Za-z_$][\w$]*)\}=\1\(([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\),\{data:([A-Za-z_$][\w$]*)\}=\1\(([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*,\{enabled:[^{}]*\})\);return(\(0,[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\))\(\{authMethod:\3,email:\7\?\.email\?\?\4\?\?null,plan:\7\?\.plan\?\?\5\}\)\}/gu;
-}
-
-function patchedSettingsAtomPattern() {
-  return /if\(!\(([A-Za-z_$][\w$]*)\(("search"===[A-Za-z_$][\w$]*\?[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*:[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*),"2425897452"\),function codexLinuxUiTweaksSuggestedPromptsEnabled\(\)\{return!0\}\(\)\)\)return!1;let\{authMethod:([A-Za-z_$][\w$]*),email:([A-Za-z_$][\w$]*),plan:([A-Za-z_$][\w$]*)\}=\1\(([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\),\{data:([A-Za-z_$][\w$]*)\}=\1\(([A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*,\{enabled:[^{}]*\})\);return\((\(0,[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\))\(\{authMethod:\3,email:\7\?\.email\?\?\4\?\?null,plan:\7\?\.plan\?\?\5\}\)\|\|function codexLinuxUiTweaksSuggestedPromptsSettingsEligible\(\)\{return!0\}\(\)\)\}/gu;
 }
 
 function homeContentSourcePattern() {
@@ -231,54 +220,58 @@ function suggestedPromptsWorkPageContract(source) {
   return "drifted";
 }
 
-function suggestedPromptsSettingsContract(source) {
-  return suggestedPromptsSettingsShape(source).state;
-}
-
-function suggestedPromptsSettingsShape(source) {
-  if (typeof source !== "string") {
+function currentSettingsRowContract(source) {
+  if (typeof source !== "string" ||
+      GENERAL_SETTINGS_ASSET_NEEDLES.some((needle) => source.split(needle).length !== 2)) {
     return { state: "drifted" };
   }
+  const anchorPositions = GENERAL_SETTINGS_ASSET_NEEDLES.map((needle) => source.indexOf(needle));
+  const findMatchingBrace = require("../../../scripts/patches/lib/minified-js.js").findMatchingBrace;
+  const functions = [];
+  for (const header of source.matchAll(/function [A-Za-z_$][\w$]*\(\)\{/g)) {
+    const open = header.index + header[0].length - 1;
+    const close = findMatchingBrace(source, open);
+    functions.push({ start: header.index, open, close });
+  }
+  const owners = anchorPositions.map((position) => functions
+    .filter(({ open, close }) => open < position && position < close)
+    .sort((left, right) => right.start - left.start)[0]);
+  if (owners.some((owner) => owner == null) ||
+      owners.some(({ start, close }) => start !== owners[0].start || close !== owners[0].close)) {
+    return { state: "drifted" };
+  }
+  const [{ start, close }] = owners;
+  const body = source.slice(start, close + 1);
+  const clean = [...body.matchAll(/if\(!([A-Za-z_$][\w$]*)\)return null;/g)];
+  const patched = [...body.matchAll(new RegExp(
+    `if\\(!\\(([A-Za-z_$][\\w$]*)\\|\\|function ${SETTINGS_ELIGIBILITY_MARKER}\\(\\)\\{return!0\\}\\(\\)\\)\\)return null;`,
+    "g",
+  ))];
+  const markerCount = markerOccurrenceCount(source, SETTINGS_ELIGIBILITY_MARKER);
+  if (clean.length === 1 && patched.length === 0 && markerCount === 0) {
+    return { state: "current", match: clean[0], offset: start + clean[0].index };
+  }
+  if (clean.length === 0 && patched.length === 1 && markerCount === 1) return { state: "patched" };
+  return { state: "drifted" };
+}
+
+function suggestedPromptsSettingsContract(source) {
+  if (typeof source !== "string") {
+    return "drifted";
+  }
+  const currentRow = currentSettingsRowContract(source);
+  if (currentRow.state !== "drifted") return currentRow.state;
   const cleanRollouts = [...source.matchAll(gateAssignmentPattern())];
   const cleanEligibility = [...source.matchAll(settingsEligibilityPattern())];
   const patchedRollouts = [...source.matchAll(patchedGateAssignmentPattern(RUNTIME_MARKER))];
   const patchedEligibility = [...source.matchAll(patchedSettingsEligibilityPattern())];
-  const cleanAtoms = matchCount(source, settingsAtomPattern());
-  const patchedAtoms = matchCount(source, patchedSettingsAtomPattern());
-  const gateCount = markerOccurrenceCount(source, FEATURE_GATE_NEEDLE);
-  if (cleanAtoms + patchedAtoms > 0) {
-    if (
-      gateCount === 1 &&
-      cleanRollouts.length + cleanEligibility.length + patchedRollouts.length + patchedEligibility.length === 0
-    ) {
-      if (
-        cleanAtoms === 1 &&
-        patchedAtoms === 0 &&
-        markerOccurrenceCount(source, RUNTIME_MARKER) === 0 &&
-        markerOccurrenceCount(source, SETTINGS_ELIGIBILITY_MARKER) === 0
-      ) {
-        return { state: "current", shape: "atom" };
-      }
-      if (
-        cleanAtoms === 0 &&
-        patchedAtoms === 1 &&
-        markerOccurrenceCount(source, RUNTIME_MARKER) === 1 &&
-        completeMarkerCount(source, RUNTIME_MARKER) === 1 &&
-        markerOccurrenceCount(source, SETTINGS_ELIGIBILITY_MARKER) === 1 &&
-        completeMarkerCount(source, SETTINGS_ELIGIBILITY_MARKER) === 1
-      ) {
-        return { state: "patched", shape: "atom" };
-      }
-    }
-    return { state: "drifted" };
-  }
   if (
     markerOccurrenceCount(source, RUNTIME_MARKER) === 0 &&
     markerOccurrenceCount(source, SETTINGS_ELIGIBILITY_MARKER) === 0 &&
     cleanRollouts.length === 1 &&
     cleanEligibility.length === 1
   ) {
-    return { state: "current", shape: "component" };
+    return "current";
   }
   if (
     markerOccurrenceCount(source, RUNTIME_MARKER) === 1 &&
@@ -291,9 +284,9 @@ function suggestedPromptsSettingsShape(source) {
     patchedEligibility.length === 1 &&
     completePatchedGateCount(source, RUNTIME_MARKER) === 1
   ) {
-    return { state: "patched", shape: "component" };
+    return "patched";
   }
-  return { state: "drifted" };
+  return "drifted";
 }
 
 function suggestedPromptsHomeContentContract(source) {
@@ -473,7 +466,14 @@ function applySuggestedPromptsHomeContentPatch(source) {
 
 function applySuggestedPromptsSettingsPatch(source) {
   try {
-    const { state: contract, shape } = suggestedPromptsSettingsShape(source);
+    const currentRow = currentSettingsRowContract(source);
+    if (currentRow.state === "patched") return source;
+    if (currentRow.state === "current") {
+      const [original, eligible] = currentRow.match;
+      const replacement = `if(!(${eligible}||function ${SETTINGS_ELIGIBILITY_MARKER}(){return!0}()))return null;`;
+      return source.slice(0, currentRow.offset) + replacement + source.slice(currentRow.offset + original.length);
+    }
+    const contract = suggestedPromptsSettingsContract(source);
     if (contract === "patched") {
       return source;
     }
@@ -482,16 +482,6 @@ function applySuggestedPromptsSettingsPatch(source) {
       return source;
     }
 
-    if (shape === "atom") {
-      return source.replace(
-        settingsAtomPattern(),
-        (_match, get, gateArgs, authMethod, email, plan, authState, account, accountQuery, eligibilityName) =>
-          `if(!(${get}(${gateArgs},"${FEATURE_GATE_ID}"),function ${RUNTIME_MARKER}(){return!0}()))return!1;` +
-          `let{authMethod:${authMethod},email:${email},plan:${plan}}=${get}(${authState}),{data:${account}}=${get}(${accountQuery});` +
-          `return(${eligibilityName}({authMethod:${authMethod},email:${account}?.email??${email}??null,plan:${account}?.plan??${plan}})` +
-          `||function ${SETTINGS_ELIGIBILITY_MARKER}(){return!0}())}`,
-      );
-    }
     return replaceRolloutGate(source, RUNTIME_MARKER).replace(
       settingsEligibilityPattern(),
       (_match, eligibilityName, authMethod, accountInfo, email, plan) =>
@@ -556,9 +546,8 @@ const descriptors = [
     order: 20_990,
     ciPolicy: "optional",
     enabled: suggestedPromptsEnabled,
-    // rspack copies the settings row module into several lazy chunks; every
-    // copy must expose the row, so no assetMatch.
     assetNeedles: GENERAL_SETTINGS_ASSET_NEEDLES,
+    assetMatch: (source) => suggestedPromptsSettingsContract(source) !== "drifted",
     missingDescription: "current Suggested Prompts General settings bundle",
     skipDescription: "ui-tweaks Suggested Prompts settings row patch",
     apply: applySuggestedPromptsSettingsPatch,

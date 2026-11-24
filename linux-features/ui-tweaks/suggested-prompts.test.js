@@ -23,7 +23,6 @@ const {
   descriptors,
   suggestedPromptsEnabled,
   suggestedPromptsMainContract,
-  suggestedPromptsSettingsContract,
 } = require("./patches/suggested-prompts.js");
 
 function captureWarnings(callback) {
@@ -41,12 +40,11 @@ function captureWarnings(callback) {
 // calls, double-quoted strings, and literal-first comparisons.
 function settingsFixture() {
   return [
-    'let rowLabel={id:"settings.agent.ambientSuggestions.rowLabel",defaultMessage:"Suggest what to do next"};',
-    'function ki(){let e=(0,Q.c)(31),t=(0,G.Zj)("1372061905"),n=(0,G.Zj)("2425897452"),r=(0,G.Zj)(ft),i;',
-    "return n?(0,$.jsx)(H,{electron:!0,children:(0,$.jsx)(ci,{})}):null}",
-    "function ci(){let e=(0,li.c)(12),t=n(m),r=R(),{authMethod:i,email:a,planAtLogin:o}=(0,tZ.As)(),",
-    '{data:d}=(0,tq.U)(),f=(0,F.iK)(b.enabled);',
-    "if(!(0,f.ML4)({authMethod:i,email:d?.email??a,plan:d?.plan??o}))return null;return row()}",
+    "function ci(){let e=(0,li.c)(12),o=(0,h.Ul)(tS.Fg),c=(0,E.iK)(m.hij.enabled);",
+    "if(!o)return null;let d=!0===c;",
+    'let label=i.formatMessage({id:"settings.agent.ambientSuggestions.toggleLabel",defaultMessage:"Enable ambient suggestions"});',
+    'let save=()=>danger(i.formatMessage({id:"settings.agent.ambientSuggestions.saveError",defaultMessage:"Could not save suggested prompts preference"}));',
+    "return row(d,label,save)}",
   ].join("");
 }
 
@@ -131,60 +129,35 @@ test("settings patch exposes the upstream row while preserving eligibility diagn
   const patched = applySuggestedPromptsSettingsPatch(source);
 
   assert.notEqual(patched, source);
-  assert.equal((patched.match(new RegExp(RUNTIME_MARKER, "g")) || []).length, 1);
+  assert.equal((patched.match(new RegExp(RUNTIME_MARKER, "g")) || []).length, 0);
   assert.equal((patched.match(new RegExp(SETTINGS_ELIGIBILITY_MARKER, "g")) || []).length, 1);
-  assert.match(patched, /n=\(\(0,G\.Zj\)\("2425897452"\),function codexLinuxUiTweaksSuggestedPromptsEnabled\(\)\{return!0\}\(\)\)/);
   assert.match(
     patched,
-    /if\(!\(\(0,f\.ML4\)\(\{authMethod:i,email:d\?\.email\?\?a,plan:d\?\.plan\?\?o\}\)\|\|function codexLinuxUiTweaksSuggestedPromptsSettingsEligible\(\)\{return!0\}\(\)\)\)return null/,
+    /if\(!\(o\|\|function codexLinuxUiTweaksSuggestedPromptsSettingsEligible\(\)\{return!0\}\(\)\)\)return null/,
   );
+  assert.match(patched, /settings\.agent\.ambientSuggestions\.toggleLabel/);
+  assert.match(patched, /settings\.agent\.ambientSuggestions\.saveError/);
   assert.equal(applySuggestedPromptsSettingsPatch(patched), patched);
 });
 
-// Official 26.1117.31558 General settings row: a derived atom reads the rollout
-// gate and the account eligibility; rspack copies the module into two chunks.
-function settingsAtomFixture() {
-  return [
-    'Can8(e,t,a){var i=a("qmMi"),o=a("DBCl");let u={section:"general-settings",id:"general-homepage-suggestions",',
-    'description:(0,n.zR)({id:"settings.agent.ambientSuggestions.rowLabel",defaultMessage:"Suggest what to do next"})},',
-    'p=(0,i.i1)(l.u,(e,{get:t})=>{if(!t("search"===e?c.P:d.JW,"2425897452"))return!1;',
-    'let{authMethod:a,email:i,plan:n}=t(s.PO),{data:l}=t(r.yK,{enabled:"panel"===e&&("chatgpt"===a||"chatgptAuthTokens"===a)});',
-    'return(0,o.ML4)({authMethod:a,email:l?.email??i??null,plan:l?.plan??n})}),',
-    'g=(0,i.un)(l.u,({get:e})=>e(p,"panel"));a.d(t,{},{Fg:g,Ke:u,k6:p})}',
-  ].join("");
-}
+test("settings patch rejects semantic anchors owned by sibling functions byte-identically", () => {
+  const current = settingsFixture();
+  const sources = [
+    [
+      'function earlier(){return{id:"settings.agent.ambientSuggestions.saveError"}}',
+      current.replace("settings.agent.ambientSuggestions.saveError", "settings.agent.ambientSuggestions.saveFailure"),
+    ].join(""),
+    [
+      current.replace("settings.agent.ambientSuggestions.toggleLabel", "settings.agent.ambientSuggestions.label"),
+      'function later(){return{id:"settings.agent.ambientSuggestions.toggleLabel"}}',
+    ].join(""),
+  ];
 
-function evaluateSettingsAtom(source) {
-  const start = source.indexOf("(e,{get:t})=>");
-  const end = source.indexOf("),g=(0,i.un)");
-  const getter = Function("c", "d", "s", "r", "o", `return ${source.slice(start, end)}`)(
-    { P: "search-gates" }, { JW: "panel-gates" }, { PO: "auth" }, { yK: "account" }, { ML4: () => false },
-  );
-  const get = (atom) => (atom === "auth" ? { authMethod: "apikey" } : atom === "account" ? { data: null } : false);
-  return getter("panel", { get });
-}
-
-test("settings patch exposes the 26.1117 settings atom row while preserving eligibility diagnostics", () => {
-  const source = settingsAtomFixture();
-  assert.equal(suggestedPromptsSettingsContract(source), "current");
-  assert.equal(evaluateSettingsAtom(source), false);
-  const patched = applySuggestedPromptsSettingsPatch(source);
-
-  assert.equal(suggestedPromptsSettingsContract(patched), "patched");
-  assert.equal(evaluateSettingsAtom(patched), true);
-  assert.match(patched, /if\(!\(t\("search"===e\?c\.P:d\.JW,"2425897452"\),function codexLinuxUiTweaksSuggestedPromptsEnabled\(\)\{return!0\}\(\)\)\)return!1;/);
-  assert.match(patched, /return\(\(0,o\.ML4\)\(\{authMethod:a,email:l\?\.email\?\?i\?\?null,plan:l\?\.plan\?\?n\}\)\|\|function codexLinuxUiTweaksSuggestedPromptsSettingsEligible\(\)\{return!0\}\(\)\)\}/);
-  assert.equal(applySuggestedPromptsSettingsPatch(patched), patched);
-
-  for (const drifted of [
-    source.replace("return(0,o.ML4)", "return(0,o.ML5)&&(0,o.ML4)"),
-    source + source,
-    patched + source,
-    patched.replace("return!0}()))return!1", "return!1}()))return!1"),
-  ]) {
-    const result = captureWarnings(() => applySuggestedPromptsSettingsPatch(drifted));
-    assert.equal(result.value, drifted);
-    assert.match(result.warnings.join("\n"), /current Suggested Prompts settings contract/);
+  for (const source of sources) {
+    const result = captureWarnings(() => applySuggestedPromptsSettingsPatch(source));
+    assert.equal(result.value, source);
+    assert.equal(result.warnings.length, 1);
+    assert.match(result.warnings[0], /current Suggested Prompts settings contract/);
   }
 });
 
@@ -365,8 +338,8 @@ test("multi-point patches reject mixed and drifted contracts byte-identically", 
   assert.match(mixedResult.warnings.join("\n"), /current Suggested Prompts app page contract/);
 
   const driftedSettings = settingsFixture().replace(
-    'n=(0,G.Zj)("2425897452")',
-    'n=(0,G.Zj)("replacement-rollout")',
+    "settings.agent.ambientSuggestions.saveError",
+    "settings.agent.ambientSuggestions.saveFailure",
   );
   const settingsResult = captureWarnings(() => applySuggestedPromptsSettingsPatch(driftedSettings));
   assert.equal(settingsResult.value, driftedSettings);
@@ -449,20 +422,9 @@ test("Suggested Prompts descriptors select current contracts by content needles"
     const descriptor = descriptorById(id);
     assert.equal(descriptor.pattern, undefined, id);
     assert.ok(Array.isArray(descriptor.assetNeedles) && descriptor.assetNeedles.length > 0, id);
-    // The settings row module has several chunk copies: needles select every copy.
-    const fixtures = id === "home-suggested-prompts-settings-row" ? [fixture, settingsAtomFixture] : [fixture];
-    for (const source of fixtures.flatMap((current) => [current(), apply(current())])) {
+    for (const source of [fixture(), apply(fixture())]) {
       assert.equal(descriptor.assetNeedles.every((needle) => source.includes(needle)), true, id);
-      if (descriptor.assetMatch != null) assert.equal(descriptor.assetMatch(source), true, id);
-    }
-    if (descriptor.assetMatch == null) {
-      assert.equal(id, "home-suggested-prompts-settings-row");
-      for (const [otherId, otherFixture] of cases) {
-        if (otherId !== id) {
-          assert.equal(descriptor.assetNeedles.every((needle) => otherFixture().includes(needle)), false, otherId);
-        }
-      }
-      continue;
+      assert.equal(descriptor.assetMatch(source), true, id);
     }
     assert.equal(descriptor.assetMatch("export const __webpack_modules__={}"), false, id);
     for (const [otherId, otherFixture] of cases) {
@@ -479,14 +441,11 @@ test("Suggested Prompts contracts resolve uniquely in the signed official bundle
   for (const descriptor of descriptors.filter(({ phase }) => phase === "webview-asset")) {
     const owners = findWebviewAssetsContaining(app, descriptor.assetNeedles)
       .map((name) => fs.readFileSync(path.join(app, "webview", "assets", name), "utf8"))
-      .filter((source) => descriptor.assetMatch == null || descriptor.assetMatch(source));
-    // Without assetMatch every needle owner is a module copy that must patch.
-    assert.equal(owners.length, descriptor.assetMatch == null ? 2 : 1, descriptor.id);
-    for (const owner of owners) {
-      const patched = descriptor.apply(owner);
-      assert.notEqual(patched, owner, descriptor.id);
-      assert.equal(descriptor.apply(patched), patched, descriptor.id);
-    }
+      .filter((source) => descriptor.assetMatch(source));
+    assert.equal(owners.length, 1, descriptor.id);
+    const patched = descriptor.apply(owners[0]);
+    assert.notEqual(patched, owners[0], descriptor.id);
+    assert.equal(descriptor.apply(patched), patched, descriptor.id);
   }
   const buildDir = path.join(app, ".vite", "build");
   const mainOwners = fs.readdirSync(buildDir)

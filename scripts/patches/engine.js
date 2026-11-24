@@ -350,9 +350,7 @@ function applyMainBundlePatchDescriptors(source, descriptors, context, report) {
 // Applies main-process descriptors to the rspack chunk set. Each descriptor
 // is tried against every chunk; only the chunks it actually changes keep the
 // result. A descriptor that changes no chunk reports the diagnostics of the
-// chunks it tried, so a moved or removed anchor still fails closed. While a
-// descriptor runs, context.mainProcessChunks lists every chunk's current
-// name and source, so a patch can read a lazily loaded sibling chunk.
+// chunks it tried, so a moved or removed anchor still fails closed.
 function applyMainProcessChunkPatchDescriptors(chunks, descriptors, context, report) {
   const sources = chunks.map(({ name, source }) => ({ name, source }));
   for (const descriptor of descriptors.filter((patch) => patch.phase === PHASE_MAIN_BUNDLE)) {
@@ -367,9 +365,6 @@ function applyMainProcessChunkPatchDescriptors(chunks, descriptors, context, rep
 
     // Collect each chunk's warnings silently; only the outcome's warnings are
     // printed below, so a miss on unrelated chunks does not flood build logs.
-    context.mainProcessChunks = Object.freeze(
-      sources.map(({ name, source }) => Object.freeze({ name, source })),
-    );
     const attempts = sources.map((chunk) => {
       const originalWarn = console.warn;
       console.warn = () => {};
@@ -385,7 +380,6 @@ function applyMainProcessChunkPatchDescriptors(chunks, descriptors, context, rep
       }
       return { chunk, result, changed: result.error == null && result.value !== chunk.source };
     });
-    delete context.mainProcessChunks;
     const changed = attempts.filter((attempt) => attempt.changed);
     if (changed.length > 0) {
       const warnings = changed.flatMap((attempt) => attempt.result.warnings);

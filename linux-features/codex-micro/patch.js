@@ -16,16 +16,6 @@ const CODEX_MICRO_ROUTE = "/settings/codex-micro";
 const CODEX_MICRO_GATE_MARKER = "codexLinuxCodexMicroGateOverride";
 const CODEX_MICRO_HOTPLUG_MARKER = "codexLinuxCodexMicroHotplug";
 const JS_IDENT = "[A-Za-z_$][\\w$]*";
-// Newer signed packages drop the gate from the sidebar device bridge module
-// and render the bridge from the app shell behind the shell's own gate:
-//   eO=(0,M.Zj)("3207467860"),…,eG=eO&&eT;…showCodexMicroHud:eG
-// The sidebar contract may then have no owner, but only when an app-shell owner
-// proves that its gate feeds the HUD and bridge.
-const SHELL_BRIDGE_GATE = new RegExp(
-  `(${JS_IDENT})=(?:\\(0,${JS_IDENT}\\.${JS_IDENT}\\)\\("${CODEX_MICRO_GATE_ID}"\\)|!0/\\*${CODEX_MICRO_GATE_MARKER}\\*/)[,;]` +
-    `[\\s\\S]{0,2000}?[,;](${JS_IDENT})=\\1&&${JS_IDENT}[,;][\\s\\S]{0,2000}?showCodexMicroHud:\\2[,}]`,
-  "g",
-);
 // Each contract names one upstream module that reads the Codex Micro gate.
 // rspack may emit the same module into more than one lazily loaded chunk, so a
 // contract may own several byte-different copies; every copy is patched.
@@ -37,19 +27,6 @@ const CODEX_MICRO_GATE_CONTRACTS = [
     anchor: (source) =>
       source.includes('"codex-micro-onboarding"')
       && source.includes("appServices.codexMicro"),
-  },
-  {
-    description: "Codex Micro sidebar settings entry gate",
-    gateCount: 1,
-    routeCount: 2,
-    anchor: (source) =>
-      source.includes(`"${CODEX_MICRO_ROUTE}"`)
-      && source.includes("codexMicro"),
-    ownerMovedTo: (matches) =>
-      matches.some(({ expected, source }) =>
-        expected === CODEX_MICRO_GATE_CONTRACTS[0]
-        && [...source.matchAll(SHELL_BRIDGE_GATE)].length === 1,
-      ),
   },
   {
     description: "Codex Micro dictation gate",
@@ -211,7 +188,7 @@ function findCodexMicroFeatureGateAssets(extractedDir) {
 
   for (const expected of CODEX_MICRO_GATE_CONTRACTS) {
     const count = matches.filter((match) => match.expected === expected).length;
-    if (count === 0 && !expected.ownerMovedTo?.(matches)) {
+    if (count === 0) {
       return {
         matches: null,
         reason: `Found 0 current ${expected.description} bundles`,

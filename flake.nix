@@ -510,8 +510,7 @@
             version = codexVersion;
             src = sourceRoot;
             # This derivation's fail-closed audit owns ELF interpreters and
-            # RUNPATHs. Generic fixups would shrink them again and cannot
-            # safely strip the upstream payload.
+            # RUNPATHs. Generic fixups would shrink them again.
             dontPatchELF = true;
             dontStrip = true;
             dontFixup = true;

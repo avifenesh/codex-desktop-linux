@@ -48,19 +48,6 @@ test("shared backend fails closed for missing and ambiguous lifecycle anchors", 
   assert.throws(() => registrationContract(retiredMinifier), /registration function matched 0 times/);
 });
 
-test("shared backend rejects a hotkey owner listed after the dictation owner", () => {
-  const source = mainBundleFixture();
-  const reordered = source.replace(
-    "hotkeyWindowLifecycleManager:a,globalDictationLifecycleManager:o,",
-    "globalDictationLifecycleManager:o,hotkeyWindowLifecycleManager:a,",
-  );
-  assert.notEqual(reordered, source);
-  assert.throws(() => installPortalBackend(reordered), /hotkeyWindowLifecycleManager out of order/);
-  const withoutHotkey = source.replace("hotkeyWindowLifecycleManager:a,", "")
-    .replaceAll("a.dispose(),o.dispose(),Promise.allSettled([", "o.dispose(),Promise.allSettled([");
-  assert.doesNotThrow(() => installPortalBackend(withoutHotkey));
-});
-
 test("shared backend installs into the rspack module that owns the registration function", () => {
   const source = mainBundleFixture();
   const chunk = (owner, other) => `exports.ids=[916],exports.modules={11(e,t,r){"use strict";${owner}},22(e,t,r){"use strict";${other}}};`;

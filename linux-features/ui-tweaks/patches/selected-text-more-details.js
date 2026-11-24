@@ -41,6 +41,9 @@ const REGISTRY = `globalThis[Symbol.for(${JSON.stringify(REGISTRY_KEY)})]`;
 const SPAN_START = "/*codex-linux-selected-text-more-details:+*/";
 const SPAN_REPLACE = "/*codex-linux-selected-text-more-details:~";
 const SPAN_END = "/*codex-linux-selected-text-more-details:-*/";
+const NORMALIZE_SPAN_START = "/*codex-linux-selected-text-more-details-normalize:+*/";
+const NORMALIZE_SPAN_REPLACE = "/*codex-linux-selected-text-more-details-normalize:~";
+const NORMALIZE_SPAN_END = "/*codex-linux-selected-text-more-details-normalize:-*/";
 const IDENT = "[A-Za-z_$][\\w$]*";
 const MEMBER = `${IDENT}\\.${IDENT}`;
 const PARENT_CACHE_SIZE = 18;
@@ -69,29 +72,52 @@ function replacementSpan(original, text) {
   return `${SPAN_REPLACE}${original}*/${text}${SPAN_END}`;
 }
 
-// Removes every span this patch inserted and restores replaced upstream text.
-function restoreUpstream(source) {
+function normalizationSpan(text) {
+  return `${NORMALIZE_SPAN_START}${text}${NORMALIZE_SPAN_END}`;
+}
+
+function normalizationReplacementSpan(original, text) {
+  return `${NORMALIZE_SPAN_REPLACE}${Buffer.from(original).toString("base64")}*/${text}${NORMALIZE_SPAN_END}`;
+}
+
+function restoreLayer(source, insertMarker, replaceMarker, endMarker, encoded) {
   let result = "";
   let cursor = 0;
   for (;;) {
-    const insert = source.indexOf(SPAN_START, cursor);
-    const replace = source.indexOf(SPAN_REPLACE, cursor);
-    const start = [insert, replace].filter((index) => index >= 0).sort((a, b) => a - b)[0];
-    if (start == null) return result + source.slice(cursor);
-    const end = source.indexOf(SPAN_END, start);
+    const candidates = [
+      { index: source.indexOf(insertMarker, cursor), replacement: false },
+      { index: source.indexOf(replaceMarker, cursor), replacement: true },
+    ].filter(({ index }) => index >= 0).sort((left, right) => left.index - right.index);
+    if (candidates.length === 0) {
+      if (source.indexOf(endMarker, cursor) >= 0) throw new Error("Orphaned selected-text More details edit");
+      return result + source.slice(cursor);
+    }
+    const [{ index: start, replacement }] = candidates;
+    const end = source.indexOf(endMarker, start);
     if (end < 0) throw new Error("Unterminated selected-text More details edit");
     const inner = source.slice(start, end);
-    if (inner.indexOf(SPAN_START, 1) >= 0 || inner.indexOf(SPAN_REPLACE, 1) >= 0) {
+    if ([insertMarker, replaceMarker].some((marker) => inner.indexOf(marker, 1) >= 0)) {
       throw new Error("Nested selected-text More details edit");
     }
     result += source.slice(cursor, start);
-    if (start === replace) {
-      const close = source.indexOf("*/", start + SPAN_REPLACE.length);
+    if (replacement) {
+      const close = source.indexOf("*/", start + replaceMarker.length);
       if (close < 0 || close > end) throw new Error("Malformed selected-text More details replacement");
-      result += source.slice(start + SPAN_REPLACE.length, close);
+      const original = source.slice(start + replaceMarker.length, close);
+      result += encoded ? Buffer.from(original, "base64").toString() : original;
     }
-    cursor = end + SPAN_END.length;
+    cursor = end + endMarker.length;
   }
+}
+
+// Remove the runtime feature edits before the current-release normalization
+// layer. A feature insertion can intentionally contain a copied constructor
+// with normalization spans; deleting that outer insertion deletes the copy,
+// while the original constructor's independent normalization span is restored
+// by the second pass.
+function restoreUpstream(source) {
+  const withoutFeature = restoreLayer(source, SPAN_START, SPAN_REPLACE, SPAN_END, false);
+  return restoreLayer(withoutFeature, NORMALIZE_SPAN_START, NORMALIZE_SPAN_REPLACE, NORMALIZE_SPAN_END, true);
 }
 
 function hasPatchSpans(source) {
@@ -102,7 +128,6 @@ function hasPatchSpans(source) {
 
 // Returns the module factories of an rspack ESM chunk:
 // export const __webpack_modules__={id(e,t,n){...},"id"(e,t,n){...}}.
-// Newer official builds also emit wrapped factories: {id:(function(e,t,n){...})}.
 function chunkModules(source) {
   const anchor = "export const __webpack_modules__={";
   const first = source.indexOf(anchor);
@@ -110,19 +135,23 @@ function chunkModules(source) {
   const modules = [];
   let cursor = first + anchor.length;
   for (;;) {
-    const header = new RegExp(`^,?(?:"([^"]+)"|(${IDENT}))(:\\(function)?\\(((?:${IDENT}(?:,${IDENT})*)?)\\)\\{`, "u")
-      .exec(source.slice(cursor, cursor + 512));
+    const head = source.slice(cursor, cursor + 512);
+    const ordinary = new RegExp(`^,?(?:"([^"]+)"|(${IDENT}))\\(((?:${IDENT}(?:,${IDENT})*)?)\\)\\{`, "u")
+      .exec(head);
+    const wrapped = ordinary == null
+      ? new RegExp(`^,?(?:"([^"]+)"|(${IDENT})):\\(function\\(((?:${IDENT}(?:,${IDENT})*)?)\\)\\{`, "u")
+        .exec(head)
+      : null;
+    const header = ordinary ?? wrapped;
     if (header == null) break;
     const start = cursor + (header[0].startsWith(",") ? 1 : 0);
     const open = cursor + header[0].length - 1;
     const close = findMatchingBrace(source, open);
     if (close < 0) throw new Error("Unterminated rspack module factory");
-    const wrapped = header[3] != null;
-    if (wrapped && source[close + 1] !== ")") throw new Error("Unterminated wrapped rspack module factory");
-    const end = close + (wrapped ? 2 : 1);
-    modules.push({ id: header[1] ?? header[2], params: header[4] ? header[4].split(",") : [],
-      start, bodyStart: open + 1, bodyEnd: close, end });
-    cursor = end;
+    if (wrapped != null && source[close + 1] !== ")") throw new Error("Unterminated wrapped rspack module factory");
+    modules.push({ id: header[1] ?? header[2], params: header[3] ? header[3].split(",") : [],
+      start, bodyStart: open + 1, bodyEnd: close, end: close + 1 });
+    cursor = close + (wrapped == null ? 1 : 2);
   }
   if (source[cursor] !== "}" || modules.length === 0) throw new Error("Unrecognized rspack module table");
   return modules;
@@ -294,6 +323,19 @@ function identifierTokens(text) {
   let previous = "";
   for (let cursor = 0; cursor < text.length; cursor += 1) {
     const char = text[cursor];
+    if (char === "/" && text[cursor + 1] === "*") {
+      const close = text.indexOf("*/", cursor + 2);
+      if (close < 0) throw new Error("Unterminated comment in copied Quick Chat code");
+      cursor = close + 1;
+      previous = "value";
+      continue;
+    }
+    if (char === "/" && text[cursor + 1] === "/") {
+      const close = text.indexOf("\n", cursor + 2);
+      cursor = close < 0 ? text.length : close;
+      previous = "value";
+      continue;
+    }
     if (char === "'" || char === '"' || char === "`") {
       if (char === "`") throw new Error("Template literal in copied Quick Chat code");
       for (cursor += 1; cursor < text.length && text[cursor] !== char; cursor += text[cursor] === "\\" ? 2 : 1);
@@ -341,37 +383,28 @@ function quickChatContract(source, modules) {
   const offset = quick.start;
   const factoryHeader = uniqueMatch(quickText,
     `function (${IDENT})\\((${IDENT}),\\{projectId:${IDENT}=null,projectName:${IDENT}=null,` +
-      `preservePreviousSession:${IDENT}=!1,(?:pageOwnerKey:${IDENT},)?(?:previewSession:${IDENT},)?\\.\\.\\.${IDENT}\\}=\\{\\}\\)`,
+      `preservePreviousSession:${IDENT}=!1,(?:previewSession:${IDENT},)?\\.\\.\\.${IDENT}\\}=\\{\\}\\)`,
     "Quick Chat factory");
   const factory = functionAt(source, offset + factoryHeader.index);
   const scope = escapeRegExp(factoryHeader[2]);
   const capability = uniqueMatch(factory.source,
     `if\\(!${scope}\\.get\\((${MEMBER}),\\{name:"chatgpt\\.quick-chat"\\}\\)\\.isCapable\\)return;`,
     "Quick Chat capability")[1];
+  const normalizationPrefix = `${escapeRegExp(NORMALIZE_SPAN_REPLACE)}[A-Za-z0-9+/=]+\\*/`;
+  const normalizationEnd = escapeRegExp(NORMALIZE_SPAN_END);
   const constructor = uniqueMatch(factory.source,
-    `\\(function\\((${IDENT}),\\{conversationId:${IDENT}=\\(0,${MEMBER}\\)\\(\\),contextSourceThread:${IDENT}=null,` +
-      `projectId:${IDENT}=null,projectName:${IDENT}=null,preservePreviousSession:${IDENT}=!1(?:,pageOwnerKey:${IDENT})?(?:,previewSession:${IDENT})?\\}=\\{\\}\\)\\{`,
+    `\\((?:${normalizationPrefix})?function\\((${IDENT}),\\{conversationId:${IDENT}=\\(0,${MEMBER}\\)\\(\\),contextSourceThread:${IDENT}=null,` +
+      `projectId:${IDENT}=null,projectName:${IDENT}=null,preservePreviousSession:${IDENT}=!1(?:,previewSession:${IDENT})?\\}=\\{\\}\\)\\{`,
     "Quick Chat session constructor");
-  const create = functionAt(source, factory.start + constructor.index + 1);
-  if (!source.startsWith(`)(${factoryHeader[2]},{contextSourceThread:`, create.end)) {
+  const constructorStart = factory.start + constructor.index + constructor[0].indexOf("function");
+  const create = functionAt(source, constructorStart);
+  const afterCreate = source.slice(create.end).replace(new RegExp(`^${normalizationEnd}`, "u"), "");
+  if (!afterCreate.startsWith(`)(${factoryHeader[2]},{contextSourceThread:`)) {
     throw new Error("Quick Chat session constructor call drifted");
   }
-  // Older builds set the session atom inline; newer builds route it through a
-  // module-level setter that also records the page owner:
-  //   function j(e,t){if(e.set(Y,t),null!=t.pageOwnerKey){...}}
-  const sessionValue = `\\{contextSourceThread:${IDENT},conversationId:${IDENT},hasConversation:!1,`;
-  const directSession = [...create.source.matchAll(new RegExp(`(${IDENT})\\.set\\((${IDENT}),${sessionValue}`, "gu"))];
-  let session;
-  if (directSession.length === 1) {
-    session = directSession[0][2];
-  } else {
-    const setter = uniqueMatch(create.source, `(?<![\\w$.])(${IDENT})\\((${IDENT}),${sessionValue}`,
-      "Quick Chat session atom");
-    const helper = namedFunction(source, setter[1], quick.start, quick.end);
-    session = uniqueMatch(helper.source,
-      `^function ${escapeRegExp(setter[1])}\\((${IDENT}),(${IDENT})\\)\\{if\\(\\1\\.set\\((${IDENT}),\\2\\),`,
-      "Quick Chat session setter")[3];
-  }
+  const session = uniqueMatch(create.source,
+    `(${IDENT})\\.set\\((${IDENT}),\\{contextSourceThread:${IDENT},conversationId:${IDENT},hasConversation:!1,`,
+    "Quick Chat session atom")[2];
   const host = uniqueMatch(factory.source, `hostId:${IDENT}\\.get\\((${MEMBER}),${IDENT}\\)`, "source host atom")[1];
   const visibility = uniqueMatch(factory.source,
     `(${IDENT})\\(${scope},!1\\),\\(0,${MEMBER}\\)\\(${scope},\\{action:${MEMBER}\\.CODEX_QUICK_CHAT_LIFECYCLE_ACTION_OPENED`,
@@ -433,8 +466,8 @@ function nativeSubmissionContract(source, modules) {
   const followText = moduleSource(source, follow);
   const lock = uniqueMatch(followText, lockPattern, "ChatGPT native submission locks");
   const sendCall = uniqueMatch(followText,
-    `await \\(0,(${IDENT})\\.submitChatGPTCompletion\\)\\(${escapeRegExp(lock[2])},\\{(?:[^{}]|\\{[^{}]*\\})*model:` +
-      `${escapeRegExp(lock[9])}\\.slug,(?:[^{}]|\\{[^{}]*\\})*thinkingEffort:${escapeRegExp(lock[9])}\\.thinkingEffort,`,
+    `await \\(0,(${IDENT})\\.submitChatGPTCompletion\\)\\(${escapeRegExp(lock[2])},\\{[^{}]*model:` +
+      `${escapeRegExp(lock[9])}\\.slug,[^{}]*thinkingEffort:${escapeRegExp(lock[9])}\\.thinkingEffort,`,
     "ChatGPT native submission call");
   const sendId = requiredModuleId(source, follow, sendCall[1]);
   const sendModule = modules.find((module) => module.id === sendId);
@@ -444,40 +477,18 @@ function nativeSubmissionContract(source, modules) {
     "ChatGPT submission export")[1];
   const send = namedFunction(source, exported, sendModule.start, sendModule.end);
   if (!send.source.includes("Lockdown mode blocks connector approvals") ||
-      !send.source.includes("extraDeveloperInstructions:") || !send.source.includes("messageMetadata:")) {
+      !send.source.includes("extraDeveloperInstructions:") || !send.source.includes("messageMetadata:") ||
+      !send.source.includes("requireResponseAcceptance:") || !send.source.includes("isRequestCurrent:")) {
     throw new Error("ChatGPT submission context contract drifted");
-  }
-  let dispatchModule = sendModule;
-  let dispatch;
-  if (send.source.includes("requireResponseAcceptance:") && send.source.includes("isRequestCurrent:")) {
-    dispatch = containingFunction(source, "gizmoEditor??", sendModule.start, sendModule.end);
-  } else {
-    // Newer builds forward the remaining options, requireResponseAcceptance and
-    // isRequestCurrent included, to a dispatcher exported by another module:
-    //   async function y(e,{...,requireDispatchAcceptance:W,...K}){...await (0,f.S)(e,{...K,...
-    const sendHeader = uniqueMatch(source.slice(send.start, send.paramsEnd + 1),
-      `^(?:async )?function ${escapeRegExp(exported)}\\((${IDENT}),\\{.*,\\.\\.\\.(${IDENT})\\}\\)\\{$`,
-      "ChatGPT submission forwarded options");
-    const forward = uniqueMatch(send.source,
-      `await \\(0,(${IDENT})\\.(${IDENT})\\)\\(${escapeRegExp(sendHeader[1])},\\{\\.\\.\\.${escapeRegExp(sendHeader[2])},`,
-      "ChatGPT submission dispatcher call");
-    const dispatchId = requiredModuleId(source, sendModule, forward[1]);
-    dispatchModule = modules.find((module) => module.id === dispatchId);
-    if (dispatchModule == null) throw new Error("ChatGPT dispatcher module is not part of the Quick Chat runtime chunk");
-    const dispatchExport = uniqueMatch(moduleSource(source, dispatchModule),
-      `[{,]${escapeRegExp(forward[2])}:\\(\\)=>(${IDENT})[,}]`, "ChatGPT dispatcher export")[1];
-    dispatch = containingFunction(source, "gizmoEditor??", dispatchModule.start, dispatchModule.end);
-    if (dispatch.name !== dispatchExport || !dispatch.source.includes(".isRequestCurrent")) {
-      throw new Error("ChatGPT dispatcher contract drifted");
-    }
   }
   const blocked = uniqueMatch(send.source, `!${IDENT}&&${IDENT}\\.get\\((${MEMBER})\\)\\)throw new `,
     "ChatGPT submission guard")[1];
+  const dispatch = containingFunction(source, "gizmoEditor??", sendModule.start, sendModule.end);
   if (!/\.isEventStream&&[A-Za-z_$][\w$]*\.requireResponseAcceptance[^;]{0,100}\?\.resolve\(null\)/u.test(dispatch.source)) {
     throw new Error("ChatGPT response acceptance contract drifted");
   }
   const reference = (member) => memberReference(source, follow, member, modules);
-  return { sendModule, dispatchModule, dispatch, send: `${RUNTIME_REQUIRE}(${JSON.stringify(sendId)}).submitChatGPTCompletion`,
+  return { sendModule, dispatch, send: `${RUNTIME_REQUIRE}(${JSON.stringify(sendId)}).submitChatGPTCompletion`,
     blocked: memberReference(source, sendModule, blocked, modules), status: reference(lock[3]), busy: reference(lock[6]),
     submitting: reference(lock[7]), stopping: reference(lock[8]), model: reference(lock[10]) };
 }
@@ -487,7 +498,7 @@ function runtimeContract(source) {
   const quick = quickChatContract(source, modules);
   const native = nativeSubmissionContract(source, modules);
   const requireName = assertRequireVisible(source, quick.module);
-  if (declaresTopLevel(topLevelSkeleton(source, native.dispatchModule), "codexLinuxQuickChatTraceCallback")) {
+  if (declaresTopLevel(topLevelSkeleton(source, native.sendModule), "codexLinuxQuickChatTraceCallback")) {
     throw new Error("Native sender already declares the trace helper");
   }
   const bindings = { capability: quick.capability, blocked: native.blocked, account: quick.account,
@@ -496,8 +507,7 @@ function runtimeContract(source) {
     show: quick.show, context: quick.context, send: native.send, model: native.model, status: native.status,
     busy: native.busy, submitting: native.submitting, stopping: native.stopping };
   const prelude = `var ${RUNTIME_REQUIRE}=${requireName};const ${CREATE_SESSION}=${quick.createSource};`;
-  return { modules, quick: quick.module, sendModule: native.sendModule, dispatchModule: native.dispatchModule,
-    dispatch: native.dispatch, bindings, prelude };
+  return { modules, quick: quick.module, sendModule: native.sendModule, dispatch: native.dispatch, bindings, prelude };
 }
 
 function runtimeSource(bindings, prelude = "") {
@@ -821,7 +831,7 @@ function patchUpstream(chunks, references = []) {
   if (trace.applied) throw new Error("Mixed native sender trace");
   edits.get(runtimeName).push(
     { start: contract.dispatch.start, end: contract.dispatch.end, text: trace.source },
-    { start: contract.dispatchModule.bodyEnd, end: contract.dispatchModule.bodyEnd, text: span(nativeTraceHelperSource()) },
+    { start: contract.sendModule.bodyEnd, end: contract.sendModule.bodyEnd, text: span(nativeTraceHelperSource()) },
     { start: contract.quick.bodyEnd, end: contract.quick.bodyEnd, text: span(runtimeSource(contract.bindings, contract.prelude)) },
   );
   const allChunks = [...names.map((name) => chunks[name]), ...references];
@@ -899,4 +909,5 @@ const descriptors = [{
 
 module.exports = { RUNTIME_MARKER, OVERLAY_MARKER, BINDINGS_EXPORT, OPEN_EXPORT, AVAILABLE_EXPORT, DIAGNOSTICS_EXPORT,
   ACTION_HELPER, REGISTRY_KEY, NATIVE_TRACE_HELPER_MARKER, enabled, chunkModules, restoreUpstream, runtimeContract,
-  overlayContract, runtimeSource, patchUpstream, patchSources, applySelectedTextMoreDetails, descriptors };
+  overlayContract, runtimeSource, patchUpstream, patchSources, applySelectedTextMoreDetails, descriptors,
+  hasPatchSpans, normalizationSpan, normalizationReplacementSpan };

@@ -18,7 +18,6 @@ const {
 } = require("./runner.js");
 const { findMainProcessChunks } = require("./lib/assets.js");
 const {
-  escapeRegExp,
   findMatchingBrace,
 } = require("./lib/minified-js.js");
 
@@ -87,15 +86,12 @@ test("the signed baseline owns approved quit completion and shell startup", {
   const localApproval = `${quitState}.markQuitApproved()`;
   const quittingTransition = `${windows}.markAppQuitting()`;
   assert.equal(handlerBody.split(approvalGate).length - 1, 1);
-  // Count the call as an identifier: 26.1117 adds isPrivacySettingsTerminationRequest(),
-  // whose name ends in the same letter as a one-letter minified binding.
-  const pendingCall = new RegExp(`(?<![\\w$])${escapeRegExp(pending)}\\(\\)`, "gu");
-  assert.equal([...handlerBody.matchAll(pendingCall)].length, 1);
+  const pendingMatches = [...handlerBody.matchAll(new RegExp(`(?<![\\w$.])${pending}\\(\\)`, "g"))];
+  assert.equal(pendingMatches.length, 1);
   assert.equal(handlerBody.split(localApproval).length - 1, 1);
   assert.equal(handlerBody.split(quittingTransition).length - 1, 1);
-  const pendingIndex = handlerBody.search(pendingCall);
-  assert.ok(handlerBody.indexOf(approvalGate) < pendingIndex);
-  assert.ok(pendingIndex < handlerBody.indexOf(localApproval));
+  assert.ok(handlerBody.indexOf(approvalGate) < pendingMatches[0].index);
+  assert.ok(pendingMatches[0].index < handlerBody.indexOf(localApproval));
   assert.ok(handlerBody.indexOf(localApproval) < handlerBody.indexOf(quittingTransition));
 
   const shellOwner = uniqueOwner([
@@ -182,7 +178,7 @@ test("missing main bundle records enabled feature drift", (t) => {
   );
 });
 
-test("main-process chunks are the rspack early-bootstrap and app-server-host entries and their numbered chunks", () => {
+test("main-process chunks are the rspack early-bootstrap entry and its numbered chunks", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "runner-rspack-chunks-"));
   try {
     const buildDir = path.join(root, ".vite", "build");
@@ -191,9 +187,6 @@ test("main-process chunks are the rspack early-bootstrap and app-server-host ent
       "early-bootstrap.js",
       "early-bootstrap-916-2f6483d5bfd826f1.js",
       "early-bootstrap-87-929aa7e5d829f2a8.js",
-      "app-server-host.js",
-      "app-server-host-611-7d28dd8a0a2b5b37.js",
-      "app-server-host.js.owl-cjs-cache",
       "worker.js",
       "worker-904-f6f849be9d0ea1f7.js",
       "preload.js",
@@ -204,8 +197,6 @@ test("main-process chunks are the rspack early-bootstrap and app-server-host ent
     assert.deepEqual(findMainProcessChunks(root), {
       buildDir,
       chunks: [
-        "app-server-host-611-7d28dd8a0a2b5b37.js",
-        "app-server-host.js",
         "early-bootstrap-87-929aa7e5d829f2a8.js",
         "early-bootstrap-916-2f6483d5bfd826f1.js",
         "early-bootstrap.js",

@@ -23,7 +23,6 @@ const {
 
 const [
   appShellContract,
-  sidebarContract,
   dictationContract,
   composerContract,
   settingsContract,
@@ -74,7 +73,6 @@ function settingsVisibilitySource() {
 
 const GATE_FIXTURES = {
   "async/216127.shell.js": () => appShellSource(),
-  "async/91641.sidebar.js": () => sidebarSource(),
   "async/4317.dictation.js": () => dictationSource("Q"),
   "async/637431.dictation.js": () => dictationSource("W"),
   "async/589850.composer.js": () => composerSource(),
@@ -108,7 +106,6 @@ test("official Linux node-hid is reused without a native binding descriptor", ()
 test("Codex Micro feature gate patches every current callsite", () => {
   const currentContracts = [
     [appShellSource(), appShellContract],
-    [sidebarSource(), sidebarContract],
     [dictationSource(), dictationContract],
     [composerSource(), composerContract],
     [settingsVisibilitySource(), settingsContract],
@@ -137,7 +134,7 @@ test("Codex Micro feature gate patches every current callsite", () => {
       patched,
     );
   }
-  assert.equal(patchedCallsites, 6);
+  assert.equal(patchedCallsites, 5);
   for (const [source, contract] of currentContracts) {
     const owners = CODEX_MICRO_GATE_CONTRACTS.filter((expected) =>
       expected.anchor(source));
@@ -192,7 +189,7 @@ test("Codex Micro feature gate discovers and patches every rspack copy", (t) => 
   assert.equal(patched.includes(CODEX_MICRO_GATE_ID), false);
   assert.equal(
     patched.split(CODEX_MICRO_GATE_MARKER).length - 1,
-    7,
+    6,
   );
   assert.deepEqual(patchCodexMicroFeatureGateAssets(root), {
     matched: 1,
@@ -219,41 +216,6 @@ test("Codex Micro feature gate fails closed on an extra current callsite", (t) =
   );
 });
 
-// Signed 26.1117 shape: the sidebar bridge module no longer reads the gate; the
-// app shell renders the HUD and bridge behind its own second gate.
-function bridgeShellSource() {
-  return `${appShellSource()};const t=0,hud=gate1&&visible;render({showCodexMicroHud:hud})`;
-}
-
-test("Codex Micro sidebar gate may move into the app shell that gates the bridge", (t) => {
-  const { assets, root } = createExtractedApp(t);
-  fs.rmSync(path.join(assets, "async", "91641.sidebar.js"));
-  fs.writeFileSync(path.join(assets, "async", "2.route-only.js"), 'const r="/settings/codex-micro",s=D.appServices.codexMicro', "utf8");
-  fs.writeFileSync(path.join(assets, "async", "216127.shell.js"), bridgeShellSource(), "utf8");
-  const discovery = findCodexMicroFeatureGateAssets(root);
-  assert.equal(discovery.reason, null);
-  assert.equal(discovery.matches.some(({ expected }) => expected === sidebarContract), false);
-  const result = patchCodexMicroFeatureGateAssets(root);
-  assert.equal(result.matched, 1);
-  assert.equal(result.changed, Object.keys(GATE_FIXTURES).length - 1);
-  const shell = fs.readFileSync(path.join(assets, "async", "216127.shell.js"), "utf8");
-  assert.equal(shell.includes(CODEX_MICRO_GATE_ID), false);
-  assert.equal(patchCodexMicroFeatureGateAssets(root).changed, 0);
-});
-
-test("Codex Micro sidebar gate cannot disappear without the shell bridge gate", (t) => {
-  const { assets, root } = createExtractedApp(t);
-  fs.rmSync(path.join(assets, "async", "91641.sidebar.js"));
-  fs.writeFileSync(
-    path.join(assets, "async", "216127.shell.js"),
-    bridgeShellSource().replace("hud=gate1&&visible", "hud=other&&visible"),
-    "utf8",
-  );
-  const result = patchCodexMicroFeatureGateAssets(root);
-  assert.equal(result.matched, 0);
-  assert.match(result.reason, /Found 0 current Codex Micro sidebar settings entry gate bundles/);
-});
-
 test("Codex Micro feature gate fails closed when a semantic owner disappears", (t) => {
   const { assets, root } = createExtractedApp(t);
   fs.rmSync(path.join(assets, "async", "589850.composer.js"));
@@ -271,11 +233,7 @@ test(
     );
     assert.equal(discovery.reason, null);
     for (const expected of CODEX_MICRO_GATE_CONTRACTS) {
-      assert.ok(
-        discovery.matches.some((match) => match.expected === expected)
-          || expected.ownerMovedTo?.(discovery.matches),
-        expected.description,
-      );
+      assert.ok(discovery.matches.some((match) => match.expected === expected));
     }
     for (const match of discovery.matches) {
       assert.equal(match.contract.state, "unpatched");

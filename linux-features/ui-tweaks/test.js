@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const zlib = require("node:zlib");
 
 require("./suggested-prompts.test.js");
 require("./dock-icon.test.js");
@@ -245,13 +246,17 @@ function createUiFontSizeExtractedApp() {
   const targets = [
     path.join(buildDir, "early-bootstrap.js"),
     path.join(buildDir, "worker.js"),
+    path.join(buildDir, "utility-worker.js"),
+    path.join(buildDir, "app-server-host.js"),
+    path.join(buildDir, "background.js"),
+    path.join(buildDir, "bootstrap-helper.js"),
     path.join(webviewDir, "async", "545104.c407c1f749.js"),
     path.join(webviewDir, "async", "976185.66c52a7f23.js"),
   ];
   for (const [index, target] of targets.entries()) {
     fs.writeFileSync(
       target,
-      index < 3 ? uiFontSizeMainProcessFixture() : uiFontSizeBundleFixture(),
+      index < 7 ? uiFontSizeMainProcessFixture() : uiFontSizeBundleFixture(),
     );
   }
   fs.writeFileSync(path.join(buildDir, "early-bootstrap-916-0123456789abcdef.js"), "console.log('chunk');");
@@ -399,7 +404,7 @@ test("UI font size tweak atomically patches all four current runtime registries"
     assert.equal(result.changed, EXPECTED_FONT_SIZE_BUNDLE_COUNT);
     for (const [index, target] of targets.entries()) {
       const source = fs.readFileSync(target, "utf8");
-      assert.match(source, index < 3 ? /rZ=32\/\*/ : /sans:\{min:11,max:32\/\*/);
+      assert.match(source, index < 7 ? /rZ=32\/\*/ : /sans:\{min:11,max:32\/\*/);
       assert.match(source, new RegExp(UI_FONT_SIZE_RUNTIME_MARKER));
     }
     const registry = evaluateMainProcessFontSizeRegistry(fs.readFileSync(targets[0], "utf8"));
@@ -474,12 +479,9 @@ test("UI font size discovery finds the signed official main and rspack webview r
   const root = process.env.CODEX_SIGNED_EXTRACTED_APP;
   const discovery = findUiFontSizeBundles(root);
   assert.equal(discovery.reason, null);
-  assert.equal(discovery.candidates.length, 8);
+  assert.equal(discovery.candidates.length, EXPECTED_FONT_SIZE_BUNDLE_COUNT);
   const relative = discovery.candidates.map(({ filePath }) => path.relative(root, filePath));
-  assert.deepEqual(relative.filter((name) => name.startsWith(path.join(".vite", "build"))).sort(), [
-    "app-server-host.js", "chat-search-worker.js", "early-bootstrap.js",
-    "process-telemetry-worker.js", "sqlite-writer.js", "worker.js",
-  ].map((name) => path.join(".vite", "build", name)));
+  assert.equal(relative.filter((name) => name.startsWith(path.join(".vite", "build"))).length, 6);
   assert.equal(relative.filter((name) => name.startsWith(path.join("webview", "assets", "async"))).length, 2);
   for (const { source, state } of discovery.candidates) {
     assert.equal(state, "current");
@@ -896,64 +898,46 @@ test("reasoning effort descriptor rejects missing, duplicate and mismatched loca
   }
 });
 
-test("reasoning effort descriptor rewrites the 26.1117 gzip zh-CN catalog in place", () => {
-  const zlib = require("node:zlib");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ui-tweaks-zh-cn-gzip-"));
-  try {
-    const assetsDir = path.join(root, "webview", "assets");
-    fs.mkdirSync(path.join(assetsDir, "async"), { recursive: true });
-    fs.mkdirSync(path.join(assetsDir, "locales"), { recursive: true });
-    fs.writeFileSync(path.join(assetsDir, "async", "972521.8b15fff44b.js"),
-      "export const __rspack_esm_ids=[972521];export const __webpack_modules__={abcd(e,t,i){let n={" +
-      '"../locales/zh-CN.json":function(){return i.e(547807).then(i.bind(i,"F4or"))},' +
-      '"../locales/zh-TW.json":function(){return i.e(645427).then(i.bind(i,"nQdE"))}}}};');
-    const keysFile = "keys.f10c33ea71d5a779.json.codex-gzip";
-    const valuesFile = "zh-CN.keys.f10c33ea71d5a779.ea3e9265a7acd305.json.codex-gzip";
-    fs.writeFileSync(path.join(assetsDir, "async", "547807.2dd5264152.js"),
-      'export const __rspack_esm_ids=[547807];export const __webpack_modules__={F4or(e,a,o){o.a(e,async function(e,s){try{' +
-      'async function t(e){let a=await fetch(o.p+e);if(!a.ok)throw Error("Could not load locale catalog: "+a.status);' +
-      'return new Response(a.body.pipeThrough(new DecompressionStream("gzip"))).json()}o.r(a);' +
-      `let[e,c]=await Promise.all([t("assets/locales/${keysFile}"),t("assets/locales/${valuesFile}")]);` +
-      "a.default=Object.fromEntries(e.map((e,a)=>[e,c[a]])),s()}catch(e){s(e)}},1)}};");
-    const zhCn = { "/+SIoK": "升级至 Plus", ...Object.fromEntries(Object.keys(ENGLISH_REASONING_LABELS).map((key) => [key, "极高"])) };
-    const keys = Object.keys(zhCn);
-    fs.writeFileSync(path.join(assetsDir, "locales", keysFile), zlib.gzipSync(JSON.stringify(keys)));
-    fs.writeFileSync(path.join(assetsDir, "locales", valuesFile), zlib.gzipSync(JSON.stringify(Object.values(zhCn))));
-    const read = (name) => JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(assetsDir, "locales", name))));
-
-    const [descriptor] = reasoningLabelDescriptors;
-    assert.deepEqual(descriptor.apply(root, {}), {
-      matched: 1,
-      changed: 1,
-      targets: [path.join("webview", "assets", "locales", valuesFile)],
-    });
-    assert.deepEqual(read(keysFile), keys);
-    assert.deepEqual(read(valuesFile), ["升级至 Plus", ...Object.values(ENGLISH_REASONING_LABELS)]);
-    assert.equal(descriptor.apply(root, {}).changed, 0);
-
-    fs.writeFileSync(path.join(assetsDir, "locales", keysFile), zlib.gzipSync(JSON.stringify(keys.slice(1))));
-    const before = fs.readFileSync(path.join(assetsDir, "locales", valuesFile));
-    const { value, warnings } = withCapturedWarns(() => applyEnglishReasoningLabelsToApp(root, {}));
-    assert.equal(value.changed, 0);
-    assert.match(warnings[0], /does not pair one value with each unique key/);
-    assert.deepEqual(fs.readFileSync(path.join(assetsDir, "locales", valuesFile)), before);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("reasoning effort labels apply to the signed official Simplified Chinese locale", {
+test("reasoning effort labels apply to the signed official compressed Simplified Chinese locale", {
   skip: process.env.CODEX_SIGNED_EXTRACTED_APP ? false : "CODEX_SIGNED_EXTRACTED_APP is not set",
-}, () => {
-  const { findZhCnLocaleAsset } = require("./patches/reasoning-effort-labels.js");
-  const locale = findZhCnLocaleAsset(process.env.CODEX_SIGNED_EXTRACTED_APP);
-  assert.ok(locale.source.includes('"composer.mode.local.reasoning.none.label":"无"'));
-  const patched = applyEnglishReasoningLabels(locale.source, { warnOnMissingMarkers: true });
-  assert.notEqual(patched, locale.source);
-  for (const [key, label] of Object.entries(ENGLISH_REASONING_LABELS)) {
-    assert.ok(patched.includes(`"${key}":"${label}"`), key);
+}, (t) => {
+  const signed = process.env.CODEX_SIGNED_EXTRACTED_APP;
+  const signedAssets = path.join(signed, "webview", "assets");
+  const names = ["", "async"].flatMap((directory) => fs.readdirSync(path.join(signedAssets, directory))
+    .filter((name) => name.endsWith(".js"))
+    .map((name) => directory ? `${directory}/${name}` : name));
+  const loaders = names.filter((name) =>
+    fs.readFileSync(path.join(signedAssets, name), "utf8").includes('"../locales/zh-CN.json":'));
+  assert.equal(loaders.length, 1);
+  const loaderSource = fs.readFileSync(path.join(signedAssets, loaders[0]), "utf8");
+  const loader = /"\.\.\/locales\/zh-CN\.json":function\(\)\{return ([\w$]+)\.e\((\d+)\)\.then\(\1\.bind\(\1,"([^"\\]+)"\)\)\}/.exec(loaderSource);
+  assert.ok(loader);
+  const chunks = names.filter((name) => new RegExp(`^async/${loader[2]}\\.[0-9a-f]+\\.js$`).test(name));
+  assert.equal(chunks.length, 1);
+  const chunkSource = fs.readFileSync(path.join(signedAssets, chunks[0]), "utf8");
+  const catalogs = [...chunkSource.matchAll(/"(assets\/locales\/(?:keys|zh-CN)[^"\\]+\.json\.codex-gzip)"/g)]
+    .map((match) => match[1]);
+  assert.equal(catalogs.length, 2);
+
+  const copy = fs.mkdtempSync(path.join(os.tmpdir(), "ui-tweaks-current-zh-cn-"));
+  t.after(() => fs.rmSync(copy, { recursive: true, force: true }));
+  for (const relative of [loaders[0], chunks[0]].map((name) => path.join("webview", "assets", name))
+    .concat(catalogs.map((name) => path.join("webview", name)))) {
+    const target = path.join(copy, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(signed, relative), target);
   }
-  assert.equal(applyEnglishReasoningLabels(patched), patched);
+  const descriptor = require("./patch.js").descriptors.find((entry) =>
+    entry.id === "reasoning-effort-labels-english");
+  const applied = descriptor.apply(copy, {});
+  assert.equal(applied.matched, 1);
+  assert.equal(applied.changed, 1);
+  const keys = JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(copy, "webview", catalogs[0]))));
+  const values = JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(copy, "webview", catalogs[1]))));
+  for (const [key, label] of Object.entries(ENGLISH_REASONING_LABELS)) {
+    assert.equal(values[keys.indexOf(key)], label, key);
+  }
+  assert.equal(descriptor.apply(copy, {}).changed, 0);
 });
 
 test("reasoning effort label drift warns and leaves the asset unchanged", () => {
@@ -1150,7 +1134,7 @@ test("feature settings override the tracked defaults through features.json", () 
     const fontSizeFixture = createUiFontSizeExtractedApp();
     try {
       const result = uiFontSizeDescriptor.apply(fontSizeFixture.extractedDir, {});
-      assert.equal(result.changed, EXPECTED_FONT_SIZE_BUNDLE_COUNT);
+      assert.equal(result.changed, 8);
       for (const target of fontSizeFixture.targets) {
         assert.match(fs.readFileSync(target, "utf8"), /(?:max:|=)32\/\*/);
       }

@@ -116,14 +116,6 @@ test("binds Copilot persistence to the current model-and-reasoning service", () 
   ]) {
     assert.equal(matchesCopilotModelAndReasoningPersistenceContract(drifted), false);
   }
-  const conversationScoped = source.replace('eK(t,n,"current",a)', 'eK(t,n,r?"conversation":"current",a)');
-  assert.equal(matchesCopilotModelAndReasoningPersistenceContract(conversationScoped), true);
-  assert.equal(
-    matchesCopilotModelAndReasoningPersistenceContract(
-      conversationScoped.replace('()=>eK(e,t,"default")', '()=>other(e,t,"default")'),
-    ),
-    false,
-  );
 });
 
 test("descriptors find their owners by content needles, not chunk names", () => {

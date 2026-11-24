@@ -588,50 +588,46 @@ function validateLinuxRemoteControlAutoConnectContract(extractedDir) {
   return { matched: true, changed: false };
 }
 
-// 26.1117 hoists the gate id into a module constant read by an export getter:
-// `let h="1042620455",…;…mC:function(){return(0,l.Zj)(h)}`. rspack copies that
-// module into every async chunk that uses it, so each copy is patched.
-const REMOTE_CONTROL_LOAD_GATE_HOISTED =
-  /(?<prefix>[A-Za-z_$][\w$]*:function)\(\)\{return\(0,(?<gateHook>[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\)\((?<constant>[A-Za-z_$][\w$]*)\)\}/gu;
-const REMOTE_CONTROL_LOAD_GATE_HOISTED_PATCHED =
-  /(?<prefix>[A-Za-z_$][\w$]*:function)\(\)\{return codexLinuxRemoteControlLoadGateEnabled\(\)\|\|\(0,(?<gateHook>[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*)\)\((?<constant>[A-Za-z_$][\w$]*)\);function codexLinuxRemoteControlLoadGateEnabled\(\)\{/gu;
-const REMOTE_CONTROL_LOAD_GATE_CONSTANT_WINDOW = 3000;
-
-function hoistedLoadGateMatches(source, pattern) {
-  return [...source.matchAll(pattern)].filter((match) => {
-    const before = source.slice(Math.max(0, match.index - REMOTE_CONTROL_LOAD_GATE_CONSTANT_WINDOW), match.index);
-    const constant = match.groups.constant.replace(/[$]/g, "\\$");
-    return [...before.matchAll(new RegExp(`(?:let |,)${constant}="1042620455"[,;]`, "g"))].length === 1;
-  });
+function matchesLinuxRemoteControlLoadGateContract(source) {
+  return [...source.matchAll(REMOTE_CONTROL_LOAD_GATE_NEEDLE)].length +
+    [...source.matchAll(REMOTE_CONTROL_LOAD_GATE_PATCHED)].length +
+    [...source.matchAll(REMOTE_CONTROL_LOAD_GATE_PATCHED_INLINE)].length === 1;
 }
 
-function remoteControlLoadGateMatches(source) {
-  return {
-    pristine: [...source.matchAll(REMOTE_CONTROL_LOAD_GATE_NEEDLE), ...hoistedLoadGateMatches(source, REMOTE_CONTROL_LOAD_GATE_HOISTED)],
-    patched: [
-      ...source.matchAll(REMOTE_CONTROL_LOAD_GATE_PATCHED),
-      ...source.matchAll(REMOTE_CONTROL_LOAD_GATE_PATCHED_INLINE),
-      ...hoistedLoadGateMatches(source, REMOTE_CONTROL_LOAD_GATE_HOISTED_PATCHED),
-    ],
-  };
-}
+const REMOTE_CONTROL_CONFIG_FALLBACK =
+  /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)\)\{if\(!0===\2\?\.\["features\.remote_connections"\]\)return!0;let ([A-Za-z_$][\w$]*)=\2\?\.features;return null==\4\|\|"object"!=typeof \4\|\|Array\.isArray\(\4\)\?\3:Object\.getOwnPropertyDescriptor\(\4,"remote_connections"\)\?\.value===!0\|\|\3\}/gu;
 
 function applyLinuxRemoteControlLoadGatePatch(source) {
-  const { pristine, patched } = remoteControlLoadGateMatches(source);
+  const pristine = [...source.matchAll(REMOTE_CONTROL_LOAD_GATE_NEEDLE)];
+  const patched = [
+    ...source.matchAll(REMOTE_CONTROL_LOAD_GATE_PATCHED),
+    ...source.matchAll(REMOTE_CONTROL_LOAD_GATE_PATCHED_INLINE),
+  ];
   const markers = source.split(REMOTE_CONTROL_LOAD_GATE_MARKER).length - 1;
+  const configFallbacks = [...source.matchAll(REMOTE_CONTROL_CONFIG_FALLBACK)];
+  if (pristine.length === 0 && patched.length === 0 && markers === 0 && configFallbacks.length === 1) {
+    return source.replace(
+      REMOTE_CONTROL_CONFIG_FALLBACK,
+      (match) => match.replace(
+        "{if(",
+        `{if("undefined"!=typeof navigator&&navigator.userAgent.includes("Linux"))return!0;/*${REMOTE_CONTROL_LOAD_GATE_MARKER}*/if(`,
+      ),
+    );
+  }
+  if (pristine.length === 0 && patched.length === 0 && markers === 1 &&
+      source.includes('navigator.userAgent.includes("Linux"))return!0;')) return source;
   if (pristine.length === 0 && patched.length === 1 && markers === 2) return source;
   if (pristine.length !== 1 || patched.length !== 0 || markers !== 0) {
     console.warn("WARN: Could not find unique remote-control loader rollout gate - skipping Linux remote-control load gate patch");
     return source;
   }
   const [match] = pristine;
-  const { prefix, functionName, gateHook, constant } = match.groups;
-  const gate = constant ?? '"1042620455"';
+  const { prefix, functionName, gateHook } = match.groups;
   const declaration = `${prefix}${functionName == null ? "" : ` ${functionName}`}`;
   const helper = `function ${REMOTE_CONTROL_LOAD_GATE_MARKER}(){return"undefined"!=typeof navigator&&navigator.userAgent.includes("Linux")}`;
   const replacement = functionName == null
-    ? `${declaration}(){return ${REMOTE_CONTROL_LOAD_GATE_MARKER}()||(0,${gateHook})(${gate});${helper}}`
-    : `${declaration}(){return ${REMOTE_CONTROL_LOAD_GATE_MARKER}()||(0,${gateHook})(${gate})}${helper}`;
+    ? `${declaration}(){return ${REMOTE_CONTROL_LOAD_GATE_MARKER}()||(0,${gateHook})("1042620455");${helper}}`
+    : `${declaration}(){return ${REMOTE_CONTROL_LOAD_GATE_MARKER}()||(0,${gateHook})("1042620455")}${helper}`;
   return source.slice(0, match.index) + replacement + source.slice(match.index + match[0].length);
 }
 
@@ -770,33 +766,23 @@ function applyLinuxRemoteControlSettingsUxPatch(source) {
   return patched;
 }
 
-// 26.1117 imports the gate id from the remote connections module:
-// `tN=(0,B.Zj)(eI.K0)` with `eI=n("kTQn")` and `kTQn(e,t,n){…let f="782640499",…n.d(t,{},{…K0:f…})}`.
-function importedOutboundTabGates(source) {
-  const ident = "[A-Za-z_$][\\w$]*";
-  return [...source.matchAll(new RegExp(`(${ident})=\\(0,${ident}\\.${ident}\\)\\((${ident})\\.(${ident})\\)`, "gu"))]
-    .filter(([, , namespace, exportName]) => {
-      const bindings = [...source.matchAll(new RegExp(`(?<![\\w$.])${escapeRegExp(namespace)}=${ident}\\("([^"]+)"\\)`, "gu"))];
-      if (bindings.length !== 1) return false;
-      const modules = [...source.matchAll(new RegExp(`[{,]${escapeRegExp(bindings[0][1])}\\(${ident}(?:,${ident}){0,2}\\)\\{`, "gu"))];
-      if (modules.length !== 1) return false;
-      const open = modules[0].index + modules[0][0].length - 1;
-      const close = findMatchingBrace(source, open);
-      if (close < 0) return false;
-      const body = source.slice(open, close + 1);
-      const constants = [...body.matchAll(new RegExp(`(?:let |,)(${ident})="782640499"[,;]`, "gu"))];
-      return constants.length === 1 &&
-        new RegExp(`[{,]${escapeRegExp(exportName)}:${escapeRegExp(constants[0][1])}[,}]`, "u").test(body);
-    });
-}
-
 function applyLinuxRemoteControlOutboundTabGatePatch(source) {
   if (source.includes(REMOTE_CONTROL_OUTBOUND_TAB_GATE_MARKER)) {
     return source;
   }
 
-  const literalGates = [...source.matchAll(/([A-Za-z_$][\w$]*)=\(0,[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\)\("782640499"\)/gu)];
-  const gates = [...literalGates, ...importedOutboundTabGates(source)];
+  const gates = [...source.matchAll(/([A-Za-z_$][\w$]*)=\(0,[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\)\("782640499"\)/gu)];
+  const currentGate = /(?<state>[A-Za-z_$][\w$]*)&&!?(?<getter>[A-Za-z_$][\w$]*)\((?<gate>[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*),(?<id>[A-Za-z_$][\w$]*)\)&&(?<items>[A-Za-z_$][\w$]*)\.push\((?<route>[A-Za-z_$][\w$]*)\("access-other-devices",(?<platform>[A-Za-z_$][\w$]*)\)\)/gu;
+  const current = [...source.matchAll(currentGate)].filter((match) =>
+    source.includes(`let ${match.groups.id}="782640499"`),
+  );
+  if (gates.length === 0 && current.length === 1) {
+    const match = current[0];
+    const g = match.groups;
+    return source.slice(0, match.index) +
+      `${g.state}&&/*${REMOTE_CONTROL_OUTBOUND_TAB_GATE_MARKER}*/(typeof navigator!=\`undefined\`&&navigator.userAgent.includes(\`Linux\`)||!${g.getter}(${g.gate},${g.id}))&&${g.items}.push(${g.route}("access-other-devices",${g.platform}))` +
+      source.slice(match.index + match[0].length);
+  }
   if (gates.length !== 1) {
     console.warn("WARN: Could not find unique remote-control outbound tab gate - skipping Linux outbound tab gate patch");
     return source;
@@ -872,8 +858,7 @@ function applyLinuxRemoteConnectionsRefreshPatch(source) {
 function moduleFactoryAt(source, index) {
   const objectStart = source.indexOf("__webpack_modules__={");
   if (objectStart === -1) return null;
-  // 26.1117 also emits wrapped factories: `kaKF:(function(e,t){…})`.
-  const header = /([A-Za-z0-9_$]+|"[^"]*")(\(|:\(function\()([A-Za-z_$][\w$]*(?:,[A-Za-z_$][\w$]*){0,2})?\)\{/y;
+  const header = /([A-Za-z0-9_$]+|"[^"]*")(?:(?:\(([A-Za-z_$][\w$]*(?:,[A-Za-z_$][\w$]*){0,2})?\))|(?::(\()?function\(([A-Za-z_$][\w$]*(?:,[A-Za-z_$][\w$]*){0,2})?\)))\{/y;
   let cursor = objectStart + "__webpack_modules__={".length;
   while (cursor < source.length) {
     header.lastIndex = cursor;
@@ -883,13 +868,10 @@ function moduleFactoryAt(source, index) {
     const end = findMatchingBrace(source, open);
     if (end === -1) return null;
     if (index > open && index < end) {
-      return { bodyStart: open + 1, end, require: (match[3] ?? "").split(",")[2] ?? null };
+      return { bodyStart: open + 1, end, require: (match[2] ?? match[4] ?? "").split(",")[2] ?? null };
     }
     cursor = end + 1;
-    if (match[2] !== "(") {
-      if (source[cursor] !== ")") return null;
-      cursor += 1;
-    }
+    if (match[3] != null && source[cursor] === ")") cursor += 1;
     if (source[cursor] !== ",") return null;
     cursor += 1;
   }
@@ -1137,10 +1119,7 @@ function applyLinuxRemoteControlEnableForHostParamsPatch(source) {
 
 const REMOTE_MOBILE_ACTIVE_STATUS_PATTERN =
   /function\(\{latestTurnStatus:([A-Za-z_$][\w$]*),resumeState:([A-Za-z_$][\w$]*),streamRole:([A-Za-z_$][\w$]*),threadRuntimeStatus:([A-Za-z_$][\w$]*)\}\)\{return null==\3\?"needs_resume"===\2\?"needs-resume":"read-only":"follower"===\3\.role\?"follower":\4\?\.type==="active"\|\|"inProgress"===\1\?"active":"inactive"\}/gu;
-
-// 26.1117 keys the status on attached history instead of a stream role:
-// `return n?a?.type==="active"||"inProgress"===e?"active":"inactive":"needs_resume"===t?"needs-resume":"read-only"`.
-const REMOTE_MOBILE_HISTORY_ACTIVE_STATUS_PATTERN =
+const REMOTE_MOBILE_HISTORY_STATUS_PATTERN =
   /function\(\{latestTurnStatus:([A-Za-z_$][\w$]*),resumeState:([A-Za-z_$][\w$]*),historyAttached:([A-Za-z_$][\w$]*),threadRuntimeStatus:([A-Za-z_$][\w$]*)\}\)\{return \3\?\4\?\.type==="active"\|\|"inProgress"===\1\?"active":"inactive":"needs_resume"===\2\?"needs-resume":"read-only"\}/gu;
 
 // Mobile-started turns on the local host have no stream role yet; report them
@@ -1148,17 +1127,17 @@ const REMOTE_MOBILE_HISTORY_ACTIVE_STATUS_PATTERN =
 function applyLinuxRemoteMobileActiveStatusPatch(source) {
   const markers = source.split(REMOTE_MOBILE_ACTIVE_STATUS_MARKER).length - 1;
   const matches = [...source.matchAll(REMOTE_MOBILE_ACTIVE_STATUS_PATTERN)];
-  const historyMatches = [...source.matchAll(REMOTE_MOBILE_HISTORY_ACTIVE_STATUS_PATTERN)];
-  if (markers === 1 && matches.length + historyMatches.length === 0) return source;
-  if (markers !== 0 || matches.length + historyMatches.length !== 1) {
-    console.warn("WARN: Could not find unique active-status renderer - skipping remote mobile active-status patch");
-    return source;
-  }
-  if (historyMatches.length === 1) {
+  const historyMatches = [...source.matchAll(REMOTE_MOBILE_HISTORY_STATUS_PATTERN)];
+  if (markers === 0 && matches.length === 0 && historyMatches.length === 1) {
     return source.replace(
-      REMOTE_MOBILE_HISTORY_ACTIVE_STATUS_PATTERN,
+      REMOTE_MOBILE_HISTORY_STATUS_PATTERN,
       `function({latestTurnStatus:$1,resumeState:$2,historyAttached:$3,threadRuntimeStatus:$4}){/*${REMOTE_MOBILE_ACTIVE_STATUS_MARKER}*/return $4?.type==="active"||"inProgress"===$1?"active":$3?"inactive":"needs_resume"===$2?"needs-resume":"read-only"}`,
     );
+  }
+  if (markers === 1 && matches.length === 0) return source;
+  if (markers !== 0 || matches.length !== 1) {
+    console.warn("WARN: Could not find unique active-status renderer - skipping remote mobile active-status patch");
+    return source;
   }
   return source.replace(
     REMOTE_MOBILE_ACTIVE_STATUS_PATTERN,
@@ -1477,8 +1456,7 @@ module.exports = [
     // The remote connections settings page and the mobile setup dialog.
     id: "linux-remote-control-copy",
     phase: "webview-asset",
-    // 26.1117 drops message descriptions: `defaultMessage:"Keep this Mac awake"}`.
-    assetNeedles: ['this Mac"'],
+    assetNeedles: ["this Mac"],
     order: 20_130,
     ciPolicy: "optional",
     missingDescription: "remote-control settings or mobile setup bundle",

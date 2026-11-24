@@ -2,7 +2,6 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const zlib = require("node:zlib");
 
 const ZH_CN_LOCALE_MODULE = "../locales/zh-CN.json";
 const ENGLISH_REASONING_LABELS = Object.freeze({
@@ -47,64 +46,6 @@ function zhCnLoaderPattern() {
       `\\.then\\(\\k<require>\\.t\\.bind\\(\\k<require>,"(?<module>[^"\\\\]+)",\\d+\\)\\)\\}`,
     "g",
   );
-}
-
-// 26.1117 loads the catalog module itself, without the JSON interop flag:
-// "../locales/zh-CN.json":function(){return i.e(547807).then(i.bind(i,"F4or"))}.
-function zhCnModuleLoaderPattern() {
-  return new RegExp(
-    `"${escapeRegExp(ZH_CN_LOCALE_MODULE)}":function\\(\\)\\{return (?<require>${IDENT})\\.e\\((?<chunk>\\d+)\\)` +
-      `\\.then\\(\\k<require>\\.bind\\(\\k<require>,"(?<module>[^"\\\\]+)"\\)\\)\\}`,
-    "g",
-  );
-}
-
-// That module fetches two gzip JSON arrays, the shared message keys and the
-// zh-CN values in the same order, and zips them:
-// F4or(e,a,o){...DecompressionStream("gzip")...let[e,c]=await Promise.all([t("assets/locales/keys.<k>.json.codex-gzip"),
-// t("assets/locales/zh-CN.keys.<k>.<v>.json.codex-gzip")]);a.default=Object.fromEntries(e.map((e,a)=>[e,c[a]]))...}
-function gzipCatalogModulePattern(moduleId) {
-  return new RegExp(`[{,]${escapeRegExp(moduleId)}\\(${IDENT},${IDENT},${IDENT}\\)\\{`, "g");
-}
-
-function gzipCatalogFilesPattern() {
-  return new RegExp(
-    `let\\[(?<keysVar>${IDENT}),(?<valuesVar>${IDENT})\\]=await Promise\\.all\\(\\[(?<fetch>${IDENT})` +
-      `\\("assets/locales/(?<keys>keys\\.(?<keysHash>[0-9a-f]+)\\.json\\.codex-gzip)"\\),` +
-      `\\k<fetch>\\("assets/locales/(?<values>zh-CN\\.keys\\.(?<valuesKeysHash>[0-9a-f]+)\\.[0-9a-f]+\\.json\\.codex-gzip)"\\)\\]\\);` +
-      `${IDENT}\\.default=Object\\.fromEntries\\(\\k<keysVar>\\.map\\(\\((?<key>${IDENT}),(?<index>${IDENT})\\)=>` +
-      `\\[\\k<key>,\\k<valuesVar>\\[\\k<index>\\]\\]\\)\\)`,
-    "g",
-  );
-}
-
-function readGzipJsonArray(filePath) {
-  const value = JSON.parse(zlib.gunzipSync(fs.readFileSync(filePath)).toString("utf8"));
-  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
-    throw new Error(`Locale catalog ${path.basename(filePath)} is not an array of strings`);
-  }
-  return value;
-}
-
-function findGzipCatalog(assetsDir, assetName, source, moduleId) {
-  const modules = [...source.matchAll(gzipCatalogModulePattern(moduleId))];
-  const files = [...source.matchAll(gzipCatalogFilesPattern())];
-  if (modules.length !== 1 || files.length !== 1 || !source.includes('DecompressionStream("gzip")')) {
-    throw new Error(`Expected one Simplified Chinese locale catalog in ${assetName}, found ${Math.min(modules.length, files.length)}`);
-  }
-  const { keys: keysFile, keysHash, values: valuesFile, valuesKeysHash } = files[0].groups;
-  if (keysHash !== valuesKeysHash) {
-    throw new Error(`Simplified Chinese locale values ${valuesFile} do not belong to ${keysFile}`);
-  }
-  const keysAssetName = `locales/${keysFile}`;
-  const valuesAssetName = `locales/${valuesFile}`;
-  const keys = readGzipJsonArray(path.join(assetsDir, keysAssetName));
-  const values = readGzipJsonArray(path.join(assetsDir, valuesAssetName));
-  if (keys.length !== values.length || new Set(keys).size !== keys.length) {
-    throw new Error(`Simplified Chinese locale catalog ${valuesAssetName} does not pair one value with each unique key`);
-  }
-  const messages = Object.fromEntries(keys.map((key, index) => [key, values[index]]));
-  return { assetName: valuesAssetName, source: JSON.stringify(messages), catalog: { keysAssetName, keys } };
 }
 
 // The catalog module is `<id>(e){e.exports=JSON.parse('{...}')}`: messages are
@@ -179,15 +120,12 @@ function findZhCnLocaleAsset(extractedDir) {
   const loaders = [];
   for (const assetName of assetNames) {
     const source = fs.readFileSync(path.join(assetsDir, assetName), "utf8");
-    if (source.includes(`"${ZH_CN_LOCALE_MODULE}":`)) {
-      loaders.push(...source.matchAll(zhCnLoaderPattern()), ...source.matchAll(zhCnModuleLoaderPattern()));
-    }
+    if (source.includes(`"${ZH_CN_LOCALE_MODULE}":`)) loaders.push(...source.matchAll(zhCnLoaderPattern()));
   }
   if (loaders.length !== 1) {
     throw new Error(`Expected one Simplified Chinese locale loader, found ${loaders.length}`);
   }
   const { chunk, module: moduleId } = loaders[0].groups;
-  const gzipCatalog = !loaders[0][0].includes(".t.bind(");
   const chunkPattern = new RegExp(`^async/${chunk}\\.[0-9a-f]+\\.js$`);
   const chunkAssets = assetNames.filter((assetName) => chunkPattern.test(assetName));
   if (chunkAssets.length !== 1) {
@@ -199,7 +137,6 @@ function findZhCnLocaleAsset(extractedDir) {
       !source.startsWith(`export const __rspack_esm_ids=[${chunk}];`)) {
     throw new Error(`Simplified Chinese locale chunk ${assetName} does not declare rspack chunk ${chunk}`);
   }
-  if (gzipCatalog) return findGzipCatalog(assetsDir, assetName, source, moduleId);
   const catalogs = [...source.matchAll(localeCatalogPattern(moduleId))];
   if (catalogs.length !== 1) {
     throw new Error(`Expected one Simplified Chinese locale catalog in ${assetName}, found ${catalogs.length}`);
@@ -219,11 +156,7 @@ function applyEnglishReasoningLabelsToApp(extractedDir, context = {}) {
   }
   const patched = applyEnglishReasoningLabels(locale.source, { ...context, warnOnMissingMarkers: true });
   const changed = patched !== locale.source;
-  if (changed && locale.catalog) {
-    const messages = JSON.parse(patched);
-    const values = locale.catalog.keys.map((key) => messages[key]);
-    fs.writeFileSync(path.join(extractedDir, "webview", "assets", locale.assetName), zlib.gzipSync(JSON.stringify(values)));
-  } else if (changed) {
+  if (changed) {
     fs.writeFileSync(path.join(extractedDir, "webview", "assets", locale.assetName), patched);
   }
   return { matched: 1, changed: Number(changed), targets: [path.join("webview", "assets", locale.assetName)] };

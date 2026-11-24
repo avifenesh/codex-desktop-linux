@@ -13,11 +13,9 @@ function readDirectoryNames(dir) {
 }
 
 // The official main process is an rspack build: the `early-bootstrap.js`
-// entry plus numbered `early-bootstrap-<id>-<hash>.js` chunks. The app-server
-// transports run in the `app-server-host.js` utility process and its numbered
-// chunks. Main-process code is spread across these chunks, so patches search
-// all of them.
-const MAIN_PROCESS_CHUNK_PATTERN = /^(?:early-bootstrap|app-server-host)(?:-\d+-[0-9a-f]+)?\.js$/;
+// entry plus numbered `early-bootstrap-<id>-<hash>.js` chunks. Main-process
+// code is spread across several chunks, so patches search all of them.
+const MAIN_PROCESS_CHUNK_PATTERN = /^early-bootstrap(?:-\d+-[0-9a-f]+)?\.js$/;
 
 function findMainProcessChunks(extractedDir) {
   const buildDir = path.join(extractedDir, ".vite", "build");
@@ -215,7 +213,7 @@ function findCodexRequestExportName(source) {
   const ID = "[A-Za-z_$][\\w$]*";
   const modulesStart = source.indexOf("__webpack_modules__={");
   if (modulesStart < 0) return null;
-  const header = new RegExp(`^\\)?,?("[^"]+"|${ID}|\\d+)(?::\\(function)?\\(((?:${ID}(?:,${ID}){0,2})?)\\)\\{`, "u");
+  const header = new RegExp(`^,?("[^"]+"|${ID}|\\d+)\\(((?:${ID}(?:,${ID}){0,2})?)\\)\\{`, "u");
   const escape = (value) => value.replace(/\$/g, "\\$");
   const matches = [];
   let index = modulesStart + "__webpack_modules__={".length;

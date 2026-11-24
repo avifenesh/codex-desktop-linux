@@ -95,33 +95,6 @@ test("feature registration, duplicate chunk copies and enabled drift enforcement
   } finally { fs.rmSync(temp,{recursive:true,force:true}); }
 });
 
-// Newer signed partition: the classifier is inlined into the loop and the tool
-// exceptions are one upstream predicate fed the partition options object.
-const inlineFixture = "function xP(e,{hasFollowingFinalAnswer:t=!1,isTurnInProgress:n=!1,keepMcpAppEntriesPersistent:a=!1,mcpServerStatuses:i,renderMcpApps:l=!1}={}){let s=[],r=[],o=[],c=[],d=null,u={keepMcpAppEntriesPersistent:a,mcpServerStatuses:i,renderMcpApps:l,isPersistentDynamicTool:h.Q1},f=t?e.length:e.findLastIndex(m.HC);for(let[t,a]of e.entries()){var g,x;if(\"standalone\"===a.kind&&\"worked-for\"===a.item.item.type){d=a.item.item;continue}if(\"standalone\"===a.kind&&\"realtime-transcript\"===a.item.item.type){0===r.length?c.push(a):(r.push(a),o.push(a));continue}r.push(a),n&&f>=0&&t>f||\"standalone\"===a.kind&&((0,m.Gx)(a.item.item,u)||(g=a.item.item,x=t<f,\"assistant-message\"===g.type?(0,p.Yr)(g):\"user-message\"===g.type&&(\"pending\"===g.steeringStatus||!0===g.followsInterruptedFinalAnswer||\"accepted\"===g.steeringStatus&&null==g.questionReplies&&null==g.codexDelegation&&!g.isToolOutput&&!g.isHistoricalSteering||!0===g.wasInHistoryPreview||\"not-sent\"===g.deliveryStatus||!0===g.hookFeedback||!x)))?o.push(a):s.push(a)}return{collapsibleUnits:s,expandedUnits:r,persistentUnits:o,preToggleUnits:c,workedForItem:d}}";
-function inlinePartition(source, units, options) {
-  const m = { Gx: (item, opts) => "user-input-response" === item.type ? !item.completed : !!(item.persist || opts.keepMcpAppEntriesPersistent && opts.renderMcpApps && item.interactive), HC: unit => unit.item?.item?.final === true };
-  return vm.runInNewContext(source + ";xP", { m, p: { Yr: item => item.final }, h: { Q1: item => item.interactive } })(units, options);
-}
-
-test("inlined classifier keeps commentary and authored messages visible; tool predicate stays upstream-owned", () => {
-  const units = [unit("assistant-message","c1"),unit("exec","tool"),unit("user-message","steering",{steeringStatus:"accepted"}),unit("assistant-message","c2"),unit("user-message","ordinary"),unit("mcp-tool-call","mcp",{persist:true}),unit("worked-for","duration")];
-  const before = inlinePartition(inlineFixture, units, {hasFollowingFinalAnswer:true});
-  assert.deepEqual(ids(before.persistentUnits), ["steering","mcp"]);
-  const patched = apply(inlineFixture);
-  assert.notEqual(patched, inlineFixture);
-  const after = inlinePartition(patched, units, {hasFollowingFinalAnswer:true});
-  assert.deepEqual(ids(after.persistentUnits), ["c1","steering","c2","ordinary","mcp"]);
-  assert.deepEqual(ids(after.collapsibleUnits), ["tool"]);
-  assert.equal(after.workedForItem.id, "duration");
-  assert.equal(apply(patched), patched);
-  assert.equal(apply(inlineFixture.replace(/\bg\b/g, "itemAlias")).includes('"user-message"===itemAlias.type||'), true);
-  for (const source of [inlineFixture+inlineFixture, patched+inlineFixture, inlineFixture.replace('"not-sent"===g.deliveryStatus','"queued"===g.deliveryStatus'), inlineFixture.replace("(0,m.Gx)(a.item.item,u)","(0,m.Gx)(a.item.item,{})"), inlineFixture.replace("persistentUnits:o","persistentUnits:s")]) {
-    const result = captureWarnings(() => apply(source));
-    assert.equal(result.value, source);
-    assert.equal(result.warnings.length, 1);
-  }
-});
-
 const signedApp = process.env.CODEX_SIGNED_EXTRACTED_APP;
 test("official signed webview has one complete classifier that patches to valid JavaScript", { skip: !signedApp }, () => {
   const { findWebviewAssetsContaining } = require("../../scripts/patches/lib/assets.js");

@@ -18,7 +18,6 @@
       "interpreterStrategies": {
         "ChatGPT": "relocate-within-detect-libc-range",
         "resources/cua_node/bin/node": "patchelf-rpath-first",
-        "resources/node": "patchelf-rpath-first",
         "resources/cua_node/lib/node_modules/@img/sharp-libvips-linux-x64/lib/libvips-cpp.so.8.18.7": "preserve-upstream"
       }
     },
@@ -43,7 +42,6 @@
     }
   },
   "forbiddenPaths": [
-    "chrome_crashpad_handler",
-    "resources/plugins/openai-bundled/plugins/latex/bin/tectonic"
+    "chrome_crashpad_handler"
   ]
 }
