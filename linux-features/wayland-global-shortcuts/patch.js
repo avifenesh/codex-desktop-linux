@@ -39,9 +39,7 @@ function applyWaylandGlobalShortcutsPatch(source) {
     for (const [id, key, callback] of [
       ["hotkeyWindow", IDENT, `(?:onPressed:\\(\\)=>\\{this\\.handleHotkeyWindowHotkeyPressed\\(\\)\\}|` +
         `onPressed:\\(\\)=>\\{this\\.toggle\\(\\)\\.catch\\([\\s\\S]{0,180}?"Failed to open Spotlight")`],
-      // The Mini/Pet callback is identified by its unique Quick Chat failure log
-      // inside the pressed handler, not by the open-gate expression before it.
-      ["openAvatarOverlay", IDENT, `onPressed:\\(\\)=>\\{${IDENT}\\(\\)\\?[^{}]{0,120}?\\(\\)\\.catch\\(${IDENT}=>\\{[\\s\\S]{0,80}?"Failed to open Quick Chat from global hotkey"`],
+      ["openAvatarOverlay", IDENT, `onPressed:\\(\\)=>\\{${IDENT}\\(\\)\\?${IDENT}\\(\\)\\.catch\\([\\s\\S]{0,200}?"Failed to open Quick Chat from global hotkey"[\\s\\S]{0,100}?:${IDENT}\\(\\)\\}`],
       ["appshots", "this\\.configuredHotkey", "onPressed:\\(\\)=>this\\.#[A-Za-z_$][\\w$]*\\(\\)"],
       ["realtimeVoice", IDENT, `onPressed:\\(\\)=>\\{"locked"!==${IDENT}\\.powerMonitor\\.getSystemIdleState\\(1\\)&&${IDENT}\\(\\)\\}`],
       ["meetings", IDENT, `onPressed:\\(\\)=>\\{${IDENT}===${IDENT}&&"locked"!==${IDENT}\\.powerMonitor\\.getSystemIdleState\\(1\\)&&${IDENT}\\(\\)\\}`],

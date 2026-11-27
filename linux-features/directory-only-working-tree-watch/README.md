@@ -51,10 +51,7 @@ an injected helper that the active call path bypasses.
 The route matcher does not pin minifier-generated identifier spellings. It
 captures and correlates the Parcel helper, helper arguments, Git execution-host
 factory, main connection, local host, route host, route options, and path API
-across one complete semantic contract. The worker exports its local host class
-from its own rspack module; the route's `new <namespace>.<export>(` call must
-resolve through the nearest `<namespace>=require(<id>)` binding to that exact
-module and export. Alias-only upstream churn therefore
+across one complete semantic contract. Alias-only upstream churn therefore
 remains patchable, while mismatched aliases, partial lookalikes, changed
 ownership, duplicate contracts, or reordered semantics still fail closed.
 

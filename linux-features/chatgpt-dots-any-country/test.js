@@ -14,6 +14,7 @@ const {
   CONTRACTS,
   applyDotsAppSharedPatch,
   applyDotsLandingRoutePatch,
+  applyDotsPersonalizationPatch,
   descriptors,
 } = require("./patch.js");
 
@@ -22,7 +23,7 @@ const chunk = (id, body) => `export const __rspack_esm_id=${id};export const __r
   `export const __webpack_modules__={${body}};`;
 const FIXTURES = {
   "async/221857.4c17f751f6.js": chunk(221857, 'Ab12(e,t,n){function route(){if("error"===$||N?.tbo_config?.tbo_available==null||null==N.structure)return null;if(N.tbo_config.tbo_available){return redirect}}}'),
-  "async/24191.7b05d5cf83.js": chunk(24191, 'Cd34(e,t,n){const policy="dot_account_access_policy";function capable(){if(e.query.getData(s.sE,t)?.accounts[t]?.account.tbo_config?.tbo_available!==!0)throw Error();let capable="success"===r&&n.account.tbo_config?.tbo_available===!0;return capable||"error"===l&&r?.account.tbo_config?.tbo_available}}'),
+  "async/24191.7b05d5cf83.js": chunk(24191, 'Cd34(e,t,n){const policy="dot_account_access_policy";function capable(){if(e.query.getData(s.sE,t)?.accounts[t]?.account.tbo_config?.tbo_available!==!0)throw Error();return "error"===l&&r?.account.tbo_config?.tbo_available}function policyCheck(a,s){return a?.features?.includes("dot_account_access_policy")?"success"===s&&a.account.tbo_config?.tbo_available===!0:null}}'),
 };
 
 
@@ -57,6 +58,7 @@ test("feature is disabled until selected", () => {
       [
         "feature:chatgpt-dots-any-country:dots-landing-route",
         "feature:chatgpt-dots-any-country:dots-app-shared-capability",
+        "feature:chatgpt-dots-any-country:dots-personalization-capability",
       ],
     );
   });
@@ -72,9 +74,16 @@ test("landing route stays visible while preserving the server gate", () => {
 
 test("shared Dots capability checks no longer reject a country-gated account", () => {
   const patched = applyDotsAppSharedPatch(FIXTURES["async/24191.7b05d5cf83.js"]);
-  assert.ok(patched.includes('function capable(){if(!1)throw Error();let capable="success"===r&&!0;return capable||"error"===l&&!0}'));
+  assert.ok(patched.includes('function capable(){if(!1)throw Error();return "error"===l&&!0}'));
   assert.doesNotMatch(patched, /\?\.[!01]/);
   assert.equal(applyDotsAppSharedPatch(patched), patched);
+});
+
+test("personalization Dots checks are patched together", () => {
+  const patched = applyDotsPersonalizationPatch(FIXTURES["async/24191.7b05d5cf83.js"]);
+  assert.ok(patched.includes('function policyCheck(a,s){return a?.features?.includes("dot_account_access_policy")?"success"===s:null}'));
+  assert.doesNotMatch(patched, /"success"===s&&a\.account\.tbo_config/u);
+  assert.equal(applyDotsPersonalizationPatch(patched), patched);
 });
 
 test("ambiguous contracts fail closed", () => {
@@ -90,8 +99,12 @@ test("each descriptor patches its current rspack chunk contract", () => {
     for (const [name, source] of Object.entries(FIXTURES)) fs.writeFileSync(path.join(assetsDir, name), source);
     const report = createPatchReport();
     applyWebviewAssetPatchDescriptors(extractedDir, normalizePatchDescriptors(descriptors), {}, report);
-    assert.deepEqual(report.patches.map(({ status }) => status), ["applied", "applied"]);
-    assert.deepEqual(report.patches.map(({ assetName }) => assetName), Object.keys(FIXTURES));
+    assert.deepEqual(report.patches.map(({ status }) => status), ["applied", "applied", "applied"]);
+    assert.deepEqual(report.patches.map(({ assetName }) => assetName), [
+      "async/221857.4c17f751f6.js",
+      "async/24191.7b05d5cf83.js",
+      "async/24191.7b05d5cf83.js",
+    ]);
     for (const name of Object.keys(FIXTURES)) {
       assert.doesNotMatch(fs.readFileSync(path.join(assetsDir, name), "utf8"), /tbo_available(?:==null|[!=]==!0)/);
     }
@@ -108,7 +121,4 @@ test("the signed official webview has one pristine chunk per Dots contract", { s
       descriptor.assetMatch(fs.readFileSync(path.join(signedApp, "webview", "assets", name), "utf8")));
     assert.equal(matches.length, 1, descriptor.id);
   }
-  // Dot personalization no longer has its own country gate; only the shared
-  // capability chunk may reject an account whose tbo_available is not true.
-  assert.equal(findWebviewAssetsContaining(signedApp, ["tbo_available!==!0"]).length, 1);
 });

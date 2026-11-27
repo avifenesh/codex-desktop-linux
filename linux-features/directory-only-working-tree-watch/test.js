@@ -135,12 +135,12 @@ const CURRENT_PARCEL_HELPER =
   "async function oye(e,t){return new sye(await Promise.resolve().then(" +
   "r.t.bind(r,93861,23)),e,t).start()}";
 const CURRENT_GIT_ROUTE_PREFIX =
-  'case"git":{let s=(0,Ign.Ny)(),e=new Que._(s,e=>{let t=e.getPid();if(null==t)return;notify(e)});' +
+  'case"git":{let s=getIgnoreSource(),e=new t0.Que(s,e=>{let t=e.getPid();if(null==t)return;notify(e)});' +
   "return{git:{getWatchIgnoreSources:s?void 0:" +
   "()=>({getEnvironment:async()=>(function(){let e=process.env.HOME;" +
   'return{defaultExcludesFile:null==e?null:`${e}/.config/git/ignore`,globalConfigFiles:[]}})(),' +
-  'getWatchTargets:Wt.z,pruneIgnoredDirectories:"darwin"===process.platform?"observed":"all"}),' +
-  "createExecutionHost:h=>{if(h.id===e.id&&!(0,Rmt.rsL)(h))return e;" +
+  'getWatchTargets:Bee,pruneIgnoredDirectories:"darwin"===process.platform?"observed":"all"}),' +
+  "createExecutionHost:h=>{if(h.id===e.id&&!isRemote(h))return e;" +
   'if(null==n)throw Error("Git hosts require a main RPC connection");' +
   "return new nde(n,h)},startMetadataWatch:(t,n)=>t.isLocal?" +
   '"linux"===process.platform&&!1!==n.recursive?oye(n,{ignoredPaths:[]}):' +
@@ -161,19 +161,19 @@ function currentWorkerSource(route = CURRENT_PARCEL_ROUTE) {
   return [
     "(()=>{var n={",
     CURRENT_PARCEL_EXTERNAL,
-    ',83481(e,t,r){"use strict";var a=r(89477),d=r(15820);r.d(t,{},{_:class{runsInsideWsl;' +
-      'processOwner;workspaceRoot=new d.n(this);hostConfig={id:"local",display_name:"Local",' +
+    ",83481(e,t,r){\"use strict\";",
+    'class Que{runsInsideWsl;processOwner;workspaceRoot=new WorkerRoot(this);hostConfig={id:"local",display_name:"Local",' +
       'kind:"local"};id="local";isLocal=!0;',
     CURRENT_WORKER_LOCAL_FILE_WATCH,
-    '}})},77001(e,t,r){"use strict";class CurrentWorkerRemote{',
+    "}class CurrentWorkerRemote{",
     CURRENT_WORKER_REMOTE_FILE_WATCH,
-    "}}};var Rmt=r(77949),Que=r(83481),Ign=r(98197),Wt=r(54331);",
+    "}",
     CURRENT_PARCEL_HELPER,
     "function currentDependencies(r,n){switch(r){",
     CURRENT_GIT_ROUTE_PREFIX,
     route,
     CURRENT_GIT_ROUTE_SUFFIX,
-    "return{openIn:null}}}})();",
+    "return{openIn:null}}}}}})();",
   ].join("");
 }
 
@@ -339,10 +339,10 @@ test("correlates minified aliases instead of pinning their spellings", () => {
     "async function parcelStart(root,settings){return new ParcelWatcher(" +
     "await Promise.resolve().then(load.t.bind(load,93861,23)),root,settings).start()}";
   const gitRoutePrefix =
-    "case\"git\":{let ignoreSource=(0,ignoreModule.getIgnoreSource)(),localHost=new hostModule.LocalHost(ignoreSource,event=>{notify(event)});return{git:{" +
+    "case\"git\":{let ignoreSource=getIgnoreSource(),localHost=new LocalHost(ignoreSource,event=>{notify(event)});return{git:{" +
     "getWatchIgnoreSources:ignoreSource?void 0:()=>({getEnvironment:async()=>(function(){return readIgnoreEnvironment()})()," +
-    'getWatchTargets:targetModule.getWatchTargets,pruneIgnoredDirectories:"darwin"===process.platform?"observed":"all"}),createExecutionHost:executionOptions=>{' +
-    "if(executionOptions.id===localHost.id&&!(0,remoteModule.isRemote)(executionOptions))return localHost;" +
+    'getWatchTargets:getWatchTargets,pruneIgnoredDirectories:"darwin"===process.platform?"observed":"all"}),createExecutionHost:executionOptions=>{' +
+    "if(executionOptions.id===localHost.id&&!isRemote(executionOptions))return localHost;" +
     "if(null==mainConnection)" +
     "throw Error(\"Git hosts require a main RPC connection\");" +
     "return new RemoteHost(mainConnection,executionOptions)}," +
@@ -357,8 +357,7 @@ test("correlates minified aliases instead of pinning their spellings", () => {
   const worker = currentWorkerSource(parcelRoute)
     .replace(CURRENT_PARCEL_HELPER, parcelHelper)
     .replace(CURRENT_GIT_ROUTE_PREFIX, gitRoutePrefix)
-    .replace("r.d(t,{},{_:class{", "r.d(t,{},{LocalHost:class{")
-    .replace(",Que=r(83481),", ",hostModule=r(83481),");
+    .replace("class Que{", "class LocalHost{");
 
   const first = patchWorkerSource(worker, normalizedSettings());
   assert.equal(first.matched, 1);
@@ -655,19 +654,8 @@ test("rejects dual ownership, unrelated lookalikes, and unproven minified aliase
     {
       name: "a routed local host with a different class",
       worker: currentWorkerSource().replace(
-        'case"git":{let s=(0,Ign.Ny)(),e=new Que._(',
-        'case"git":{let s=(0,Ign.Ny)(),e=new Que.OtherHost(',
-      ),
-    },
-    {
-      name: "a routed local host namespace bound to a different module",
-      worker: currentWorkerSource().replace(",Que=r(83481),", ",Que=r(83482),"),
-    },
-    {
-      name: "a routed local host namespace rebound before the route",
-      worker: currentWorkerSource().replace(
-        "function currentDependencies(r,n){",
-        "Que=otherHosts;function currentDependencies(r,n){",
+        'case"git":{let s=getIgnoreSource(),e=new t0.Que',
+        'case"git":{let s=getIgnoreSource(),e=new t0.OtherHost',
       ),
     },
     {
@@ -811,8 +799,8 @@ test("rejects missing, duplicate, and partial current contracts", (t) => {
       name: "completed route retargeted to a different local class",
       overrides: {
         worker: completedWorker.replace(
-          'case"git":{let s=(0,Ign.Ny)(),e=new Que._(',
-          'case"git":{let s=(0,Ign.Ny)(),e=new Que.OtherHost(',
+          'case"git":{let s=getIgnoreSource(),e=new t0.Que',
+          'case"git":{let s=getIgnoreSource(),e=new t0.OtherHost',
         ),
         bootstrap: completedBootstrap,
       },

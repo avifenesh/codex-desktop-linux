@@ -16,15 +16,21 @@ const CONTRACTS = Object.freeze({
     replacement: "!1",
     expected: 1,
   }, {
-    pattern: new RegExp(
-      `${IDENT}\\.account\\.tbo_config\\?\\.tbo_available===!0`,
-      "gu",
-    ),
-    replacement: "!0",
-    expected: 1,
-  }, {
     pattern: new RegExp(`${IDENT}\\?\\.account\\.tbo_config\\?\\.tbo_available(?=,|\\})`, "gu"),
     replacement: "!0",
+    expected: 1,
+  }],
+  personalization: [{
+    pattern: new RegExp(
+      `function (?<fn>${IDENT})\\((?<account>${IDENT}),(?<status>${IDENT})\\)\\{return ` +
+        `\\k<account>\\?\\.features\\?\\.includes\\("dot_account_access_policy"\\)\\?` +
+        `"success"===\\k<status>&&\\k<account>\\.account\\.tbo_config\\?\\.tbo_available===!0:null\\}`,
+      "gu",
+    ),
+    replacement: (...args) => {
+      const { fn, account, status } = args.at(-1);
+      return `function ${fn}(${account},${status}){return ${account}?.features?.includes("dot_account_access_policy")?"success"===${status}:null}`;
+    },
     expected: 1,
   }],
 });
@@ -60,6 +66,10 @@ function applyDotsAppSharedPatch(source) {
   return applyContract(source, CONTRACTS.appShared, "capability");
 }
 
+function applyDotsPersonalizationPatch(source) {
+  return applyContract(source, CONTRACTS.personalization, "personalization");
+}
+
 function matchesContract(source, contracts) {
   return contractState(source, contracts) === "pristine";
 }
@@ -87,11 +97,23 @@ const descriptors = [
     skipDescription: "ChatGPT Dots capability patch",
     apply: applyDotsAppSharedPatch,
   },
+  {
+    id: "dots-personalization-capability",
+    phase: "webview-asset",
+    order: 20_902,
+    ciPolicy: "optional",
+    assetNeedles: ["dot_account_access_policy", '"success"', "tbo_available===!0"],
+    assetMatch: (source) => matchesContract(source, CONTRACTS.personalization),
+    missingDescription: "ChatGPT Dots personalization bundle",
+    skipDescription: "ChatGPT Dots personalization patch",
+    apply: applyDotsPersonalizationPatch,
+  },
 ];
 
 module.exports = {
   CONTRACTS,
   applyDotsAppSharedPatch,
   applyDotsLandingRoutePatch,
+  applyDotsPersonalizationPatch,
   descriptors,
 };
